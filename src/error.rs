@@ -1,11 +1,11 @@
-//! Error types for nanobox
+//! Error types for nanosandbox
 //!
-//! This module defines all error types used throughout the nanobox library.
+//! This module defines all error types used throughout the nanosandbox library.
 
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Main error type for nanobox operations
+/// Main error type for nanosandbox operations
 #[derive(Error, Debug)]
 pub enum SandboxError {
     // Platform errors
@@ -114,5 +114,5 @@ pub enum SandboxError {
     Internal(String),
 }
 
-/// Result type alias for nanobox operations
+/// Result type alias for nanosandbox operations
 pub type Result<T> = std::result::Result<T, SandboxError>;

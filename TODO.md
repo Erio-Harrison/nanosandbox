@@ -1,4 +1,4 @@
-# Nanobox Production Roadmap
+# Nanosandbox Production Roadmap
 
 ## P0: Critical Security Fixes (Must Have)
 
@@ -106,8 +106,8 @@
 
 ## P5: Documentation & Bindings
 
-- [x] **Python bindings** - `crates/nanobox-python/` (PyO3)
-- [x] **Node.js bindings** - `crates/nanobox-node/` (napi-rs)
+- [ ] **Python bindings** - `crates/nanosandbox-python/` (PyO3)
+- [ ] **Node.js bindings** - `crates/nanosandbox-node/` (napi-rs)
 - [x] **API reference** - `docs/API.md`
 - [x] **Architecture doc** - `docs/ARCHITECTURE.md`
 - [x] **Benchmark comparison** - `docs/BENCHMARKS.md`

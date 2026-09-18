@@ -69,7 +69,7 @@ sandbox-exec -p "(version 1)(deny default)(allow file-read*)" /bin/ls
 (allow mach-register)
 ```
 
-## Nanobox Implementation
+## Nanosandbox Implementation
 
 ### MacOSExecutor
 
@@ -168,10 +168,11 @@ fn generate_profile(&self, config: &SandboxConfig) -> String {
 macOS can use `setrlimit` to provide soft limits:
 
 ```rust
-fn set_resource_limits(cmd: &mut Command, config: &SandboxConfig) {
+// Called from Command::pre_exec, after fork() but before exec()
+fn apply_resource_limits(config: &SandboxConfig) {
     if let Some(memory) = config.memory_limit {
-        // Pass via environment variable, child process sets it
-        cmd.env("NANOBOX_MEMORY_LIMIT", memory.to_string());
+        let rlim = libc::rlimit { rlim_cur: memory, rlim_max: memory };
+        unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
     }
 }
 ```

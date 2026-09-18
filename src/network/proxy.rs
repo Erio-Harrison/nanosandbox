@@ -338,7 +338,7 @@ impl HttpProxy {
 
     async fn send_error(client: &mut TcpStream, code: u16, msg: &str) -> std::io::Result<()> {
         let body = format!(
-            "<html><body><h1>{} {}</h1><p>Nanobox proxy</p></body></html>",
+            "<html><body><h1>{} {}</h1><p>Nanosandbox proxy</p></body></html>",
             code, msg
         );
         let response = format!(

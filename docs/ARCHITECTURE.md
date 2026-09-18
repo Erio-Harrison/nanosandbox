@@ -1,6 +1,6 @@
-# Nanobox Architecture
+# Nanosandbox Architecture
 
-This document describes the internal architecture of nanobox and how it implements sandboxing on each platform.
+This document describes the internal architecture of nanosandbox and how it implements sandboxing on each platform.
 
 ## Overview
 
@@ -8,7 +8,7 @@ This document describes the internal architecture of nanobox and how it implemen
 ┌─────────────────────────────────────────────────────────────┐
 │                      User Application                        │
 ├─────────────────────────────────────────────────────────────┤
-│                    nanobox Public API                        │
+│                    nanosandbox Public API                        │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────┐  │
 │  │   Sandbox   │  │SandboxBuilder│  │ ExecutionResult   │  │
 │  └─────────────┘  └──────────────┘  └───────────────────┘  │
@@ -40,16 +40,33 @@ pub struct SandboxBuilder {
 }
 
 pub struct SandboxConfig {
-    pub mounts: Vec<MountPoint>,       // Filesystem mounts
-    pub memory_limit: Option<u64>,      // Memory limit (bytes)
+    // Filesystem
+    pub mounts: Vec<Mount>,
+    pub tmpfs_mounts: Vec<(PathBuf, u64)>,
+    pub working_dir: PathBuf,
+    pub rootfs: Option<PathBuf>,
+
+    // Resource limits
+    pub memory_limit: Option<u64>,      // bytes
     pub cpu_limit: Option<f64>,         // CPU cores (0.0-N.0)
     pub wall_time_limit: Option<Duration>,
-    pub max_pids: Option<u32>,          // Process limit
-    pub max_open_files: Option<u32>,    // FD limit
-    pub network_mode: NetworkMode,      // None/Host/Whitelist
-    pub env_vars: HashMap<String, String>,
-    pub working_dir: Option<PathBuf>,
+    pub cpu_time_limit: Option<Duration>,
+    pub max_pids: Option<u32>,
+    pub max_file_size: Option<u64>,
+    pub max_open_files: Option<u32>,
+
+    // Network
+    pub network_mode: NetworkMode,      // None/Host/Proxied
+
+    // Security
     pub seccomp_profile: SeccompProfile,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+
+    // Environment
+    pub env: HashMap<String, String>,
+    pub clear_env: bool,
+    pub hostname: String,
 }
 ```
 
@@ -59,12 +76,14 @@ Main execution unit. Each Sandbox instance has a unique ID.
 
 ```rust
 pub struct Sandbox {
-    id: u64,                    // Unique identifier (AtomicU64 counter)
-    config: SandboxConfig,      // Frozen configuration
+    config: SandboxConfig,
+    id: String,                          // "<unix_timestamp>-<counter>"
     executor: Box<dyn PlatformExecutor>,
-    network_manager: Option<NetworkManager>,
 }
 ```
+
+There is no separate `NetworkManager` field: the `Proxied` network mode is set up
+per-execution inside each platform executor's `execute()` call.
 
 ### 3. PlatformExecutor Trait
 
@@ -74,11 +93,13 @@ Platform abstraction layer:
 pub trait PlatformExecutor: Send + Sync {
     fn execute(
         &self,
-        command: &str,
+        config: &SandboxConfig,
+        cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
-        config: &SandboxConfig,
     ) -> Result<ExecutionResult>;
+
+    fn check_support(&self, config: &SandboxConfig) -> Result<()>;
 }
 ```
 

@@ -1,6 +1,6 @@
-# Nanobox API Reference
+# Nanosandbox API Reference
 
-Complete API documentation for the nanobox sandbox library.
+Complete API documentation for the nanosandbox sandbox library.
 
 ## Table of Contents
 
@@ -21,7 +21,7 @@ The main sandbox execution unit.
 ### Creating a Sandbox
 
 ```rust
-use nanobox::{Sandbox, Permission, MB};
+use nanosandbox::{Sandbox, Permission, MB};
 use std::time::Duration;
 
 // Using builder
@@ -576,7 +576,7 @@ pub const GB: u64 = 1024 * 1024 * 1024;
 
 **Example:**
 ```rust
-use nanobox::{MB, GB};
+use nanosandbox::{MB, GB};
 
 builder
     .memory_limit(512 * MB)
@@ -625,7 +625,7 @@ println!("Network isolation: {}", caps.network_isolation);
 ## Python Bindings
 
 ```python
-from nanobox import Sandbox, SandboxBuilder, Permission, MB, GB
+from nanosandbox import Sandbox, SandboxBuilder, Permission, MB, GB
 
 # Create sandbox
 sandbox = (Sandbox.builder()
@@ -649,7 +649,7 @@ sandbox = Sandbox.agent_executor("/workspace").build()
 ## Node.js Bindings
 
 ```javascript
-const { SandboxBuilder, Sandbox, Permission, MB, GB } = require('nanobox');
+const { SandboxBuilder, Sandbox, Permission, MB, GB } = require('nanosandbox');
 
 // Create sandbox
 const builder = new SandboxBuilder();

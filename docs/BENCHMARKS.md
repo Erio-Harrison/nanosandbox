@@ -1,4 +1,4 @@
-# Nanobox Benchmarks & Comparison
+# Nanosandbox Benchmarks & Comparison
 
 Performance benchmarks and comparison with other sandbox solutions.
 
@@ -11,7 +11,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 ---
 
-## Nanobox Performance
+## Nanosandbox Performance
 
 ### Sandbox Creation
 
@@ -78,7 +78,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 | Solution | Cold Start | Warm Start | Notes |
 |----------|------------|------------|-------|
-| **Nanobox** | **~13 ms** | **~13 ms** | No daemon, direct fork |
+| **Nanosandbox** | **~13 ms** | **~13 ms** | No daemon, direct fork |
 | Docker | ~500 ms | ~200 ms | Requires dockerd |
 | gVisor (runsc) | ~150 ms | ~80 ms | Requires containerd |
 | Firecracker | ~125 ms | ~50 ms | Requires KVM |
@@ -89,7 +89,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 | Solution | Per-Instance | Base Daemon | Total (10 instances) |
 |----------|--------------|-------------|---------------------|
-| **Nanobox** | **~2 MB** | **0** | **~20 MB** |
+| **Nanosandbox** | **~2 MB** | **0** | **~20 MB** |
 | Docker | ~30 MB | ~100 MB | ~400 MB |
 | gVisor | ~50 MB | ~200 MB | ~700 MB |
 | Firecracker | ~5 MB | ~50 MB | ~100 MB |
@@ -99,7 +99,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 | Solution | Core Binary | With Dependencies |
 |----------|-------------|-------------------|
-| **Nanobox** | **< 1 MB** | **< 1 MB** |
+| **Nanosandbox** | **< 1 MB** | **< 1 MB** |
 | Docker CLI | ~50 MB | ~100 MB (dockerd) |
 | gVisor | ~50 MB | ~50 MB |
 | Firecracker | ~3 MB | ~3 MB |
@@ -107,7 +107,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 ### Feature Comparison
 
-| Feature | Nanobox | Docker | gVisor | Firecracker | Wasmer |
+| Feature | Nanosandbox | Docker | gVisor | Firecracker | Wasmer |
 |---------|---------|--------|--------|-------------|--------|
 | **Language** | Rust | Go | Go | Rust | Rust |
 | **Isolation** | Process | Container | Kernel | VM | WASM |
@@ -129,7 +129,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 | Firecracker | Very High (VM) | Small (KVM) |
 | gVisor | High (Kernel intercept) | Medium |
 | Docker | Medium (namespaces) | Large |
-| **Nanobox** | **Medium** | **Medium** |
+| **Nanosandbox** | **Medium** | **Medium** |
 | Wasmer | Medium (WASM sandbox) | Small |
 
 ---
@@ -138,7 +138,7 @@ Performance benchmarks and comparison with other sandbox solutions.
 
 ### AI Code Execution (Low Latency)
 
-**Winner: Nanobox**
+**Winner: Nanosandbox**
 
 Requirements:
 - Sub-100ms startup
@@ -146,13 +146,13 @@ Requirements:
 - Embeddable in existing process
 
 ```
-Nanobox: 13ms startup, 0 daemon overhead, native library
+Nanosandbox: 13ms startup, 0 daemon overhead, native library
 Docker: 500ms startup, 100MB daemon, subprocess required
 ```
 
 ### Online Judge / Code Competition
 
-**Winner: Nanobox or Isolate**
+**Winner: Nanosandbox or Isolate**
 
 Requirements:
 - Strict resource limits
@@ -160,7 +160,7 @@ Requirements:
 - High concurrency
 
 ```
-Nanobox: 13ms/execution, portable
+Nanosandbox: 13ms/execution, portable
 Isolate: 10ms/execution, Linux only
 Docker: 200ms/execution, overkill
 ```
@@ -176,7 +176,7 @@ Requirements:
 
 ```
 Docker: Rich ecosystem, well-tested
-Nanobox: Not designed for this use case
+Nanosandbox: Not designed for this use case
 ```
 
 ### High-Security Isolation
@@ -191,12 +191,12 @@ Requirements:
 ```
 Firecracker: VM-level isolation
 gVisor: Kernel syscall interception
-Nanobox: Process-level only
+Nanosandbox: Process-level only
 ```
 
 ### Edge / Serverless
 
-**Winner: Nanobox or Wasmer**
+**Winner: Nanosandbox or Wasmer**
 
 Requirements:
 - Minimal footprint
@@ -204,7 +204,7 @@ Requirements:
 - No infrastructure
 
 ```
-Nanobox: 13ms startup, native code support
+Nanosandbox: 13ms startup, native code support
 Wasmer: 5ms startup, WASM only
 Docker: Too heavy for edge
 ```
@@ -220,7 +220,7 @@ Requirements:
 
 ```
 Wasmer: Native WASM support
-Nanobox: Can run wasm runtimes, but not specialized
+Nanosandbox: Can run wasm runtimes, but not specialized
 ```
 
 ---
@@ -231,12 +231,12 @@ Assuming 1M executions/month, 100ms average execution:
 
 | Solution | Compute Cost | Infrastructure | Total |
 |----------|--------------|----------------|-------|
-| **Nanobox** (Lambda) | ~$2 | $0 | **~$2** |
+| **Nanosandbox** (Lambda) | ~$2 | $0 | **~$2** |
 | Docker (ECS) | ~$50 | ~$20 | ~$70 |
 | gVisor (GKE) | ~$100 | ~$50 | ~$150 |
 | Firecracker (Lambda) | ~$2 | $0 | ~$2 |
 
-**Note:** Nanobox's low overhead makes it ideal for serverless.
+**Note:** Nanosandbox's low overhead makes it ideal for serverless.
 
 ---
 
@@ -260,7 +260,7 @@ cargo bench -- --verbose
 
 ```rust
 use criterion::{criterion_group, criterion_main, Criterion};
-use nanobox::Sandbox;
+use nanosandbox::Sandbox;
 
 fn my_benchmark(c: &mut Criterion) {
     c.bench_function("my_workload", |b| {

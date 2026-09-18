@@ -1,4 +1,4 @@
-//! # Nanobox
+//! # Nanosandbox
 //!
 //! A lightweight cross-platform sandbox for secure code execution.
 //!

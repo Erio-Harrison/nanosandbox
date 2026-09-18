@@ -15,7 +15,7 @@
 //!                              │
 //!                              ▼
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │  Nanobox HTTP Proxy                                              │
+//! │  Nanosandbox HTTP Proxy                                              │
 //! │  - Check domain whitelist                                        │
 //! │  - Allowed → Forward request                                     │
 //! │  - Denied  → Return 403                                          │
