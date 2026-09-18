@@ -1,10 +1,10 @@
-# nanobox
+# nanosandbox
 
 A lightweight, embeddable sandbox for running untrusted code. Works on Linux, macOS, and Windows.
 
 ## Why?
 
-Docker is overkill for running a single script. Cloud sandboxes (E2B, etc.) add latency and cost money. nanobox uses OS-native isolation primitives directly—no VMs, no containers, no network calls.
+Docker is overkill for running a single script. Cloud sandboxes (E2B, etc.) add latency and cost money. nanosandbox uses OS-native isolation primitives directly—no VMs, no containers, no network calls.
 
 | Platform | How it works |
 |----------|--------------|
@@ -16,13 +16,13 @@ Docker is overkill for running a single script. Cloud sandboxes (E2B, etc.) add 
 
 ```toml
 [dependencies]
-nanobox = "0.1"
+nanosandbox = "0.1"
 ```
 
 ## Usage
 
 ```rust
-use nanobox::{Sandbox, Permission, MB};
+use nanosandbox::{Sandbox, Permission, MB};
 use std::time::Duration;
 
 let sandbox = Sandbox::builder()
@@ -56,7 +56,7 @@ let sandbox = Sandbox::data_analysis("/input", "/output")
 ### Python Bindings
 
 ```python
-from nanobox import Sandbox, Permission, MB
+from nanosandbox import Sandbox, Permission, MB
 
 sandbox = (Sandbox.builder()
     .working_dir("/tmp")
@@ -67,7 +67,7 @@ result = sandbox.run("echo", ["hello"])
 print(result.stdout)
 ```
 
-Install with: `pip install nanobox`
+Install with: `pip install nanosandbox`
 
 ## Network Control
 
