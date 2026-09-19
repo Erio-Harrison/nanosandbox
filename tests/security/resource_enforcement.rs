@@ -8,40 +8,104 @@
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: Memory limit should actually be enforced via setrlimit (macOS)
-///
-/// NOTE: RLIMIT_AS on macOS doesn't effectively limit memory for many programs
-/// because modern allocators use mmap which may not be counted against AS.
-/// This test verifies that setrlimit is called, but may not always trigger.
+/// Test: Memory limit is enforced on macOS by polling the process group footprint
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_memory_limit_enforced() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .memory_limit(50 * 1024 * 1024) // 50MB
+        .memory_limit(50 * 1024 * 1024)
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
 
-    // Verify sandbox can be built with memory limit
-    // The actual enforcement depends on the program's allocation strategy
-    let result = sandbox.run("sh", &["-c", "echo memory_limit_set"]).unwrap();
-    assert_eq!(result.exit_code, 0);
-    assert!(result.stdout.contains("memory_limit_set"));
+    let ok = sandbox.run("sh", &["-c", "echo within_limit"]).unwrap();
+    assert_eq!(ok.exit_code, 0);
+    assert!(!ok.killed_by_oom);
 
-    // Test that the limit is passed - check ulimit
-    let result = sandbox.run("sh", &["-c", "ulimit -v"]).unwrap();
-    // ulimit should show the limit (in KB)
-    let output = result.stdout.trim();
-    if output != "unlimited" {
-        let limit_kb: u64 = output.parse().unwrap_or(0);
-        // Should be around 50MB = ~50000 KB
-        assert!(
-            limit_kb > 0 && limit_kb <= 60000,
-            "Memory limit should be ~50MB, got {} KB",
-            limit_kb
-        );
+    let result = sandbox
+        .run("perl", &["-e", "$x = 'a' x 200_000_000; sleep 5"])
+        .unwrap();
+    assert!(result.killed_by_oom, "200MB allocation should exceed the 50MB limit");
+    assert!(!result.success());
+    assert!(!result.killed_by_timeout);
+}
+
+/// Test: A child that leaves the process group still counts toward the memory limit
+#[test]
+#[cfg(target_os = "macos")]
+fn test_macos_memory_limit_counts_escaped_child() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .memory_limit(50 * 1024 * 1024)
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // A variable length keeps perl from folding the allocation into the parent at compile time.
+    let script = "use POSIX; if (fork() == 0) { POSIX::setsid(); $n = 200_000_000; $x = 'a' x $n; sleep 5; exit 0 } sleep 6;";
+    let result = sandbox.run("perl", &["-e", script]).unwrap();
+    assert!(result.killed_by_oom, "escaped child's memory should be counted");
+    assert!(result.duration < Duration::from_secs(4));
+}
+
+/// Test: The timeout kill also reaches a child that left the process group
+#[test]
+#[cfg(target_os = "macos")]
+fn test_macos_timeout_kills_escaped_child() {
+    let pid_file = format!("/tmp/nanosandbox_escape_{}", std::process::id());
+    let _ = std::fs::remove_file(&pid_file);
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(1))
+        .build()
+        .unwrap();
+
+    let script = format!(
+        "use POSIX; if (fork() == 0) {{ POSIX::setsid(); open(F, '>', '{pid_file}'); print F $$; close(F); sleep 30; exit 0 }} sleep 30;"
+    );
+    let result = sandbox.run("perl", &["-e", &script]).unwrap();
+    assert!(result.killed_by_timeout);
+    assert!(
+        result.duration < Duration::from_secs(5),
+        "run() should return right after the timeout, took {:?}",
+        result.duration
+    );
+
+    let pid = std::fs::read_to_string(&pid_file).expect("child should have written its pid");
+    let pid = pid.trim();
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = std::process::Command::new("kill")
+        .args(["-0", pid])
+        .status()
+        .unwrap()
+        .success();
+    if alive {
+        let _ = std::process::Command::new("kill").args(["-9", pid]).status();
     }
+    let _ = std::fs::remove_file(&pid_file);
+    assert!(!alive, "escaped child survived the timeout kill");
+}
+
+/// Test: A rejected setrlimit names the setting instead of a bare errno
+#[test]
+#[cfg(target_os = "macos")]
+fn test_macos_rejected_rlimit_names_the_setting() {
+    // root may raise the hard limit, so the value below would be accepted
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .max_file_size(u64::MAX)
+        .build()
+        .unwrap();
+
+    let err = sandbox.run("true", &[]).unwrap_err().to_string();
+    assert!(
+        err.contains("max_file_size") && err.contains("RLIMIT_FSIZE"),
+        "error should name the rejected limit, got: {err}"
+    );
 }
 
 /// Test: Max processes limit on macOS
