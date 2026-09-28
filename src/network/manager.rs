@@ -4,10 +4,9 @@
 
 use crate::error::{Result, SandboxError};
 use crate::network::HttpProxy;
-use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
 
 /// Manages proxied network access for a sandbox
@@ -29,12 +28,13 @@ impl ProxiedNetwork {
     ///
     /// A `ProxiedNetwork` instance that manages the proxy lifecycle
     pub fn setup(allowed_domains: Vec<String>) -> Result<Self> {
-        // Find a free port
-        let proxy_port = Self::find_free_port()?;
-
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
+        // Carries the real bind result (address or error) from inside proxy.run(),
+        // which binds exactly once — see HttpProxy::run's `bound` parameter. There
+        // is no separate "reserve a port, then bind it again" step, so there is no
+        // window for another process to grab the port in between.
+        let (bound_tx, bound_rx) = mpsc::channel::<std::io::Result<std::net::SocketAddr>>();
 
         // The runtime is built and dropped entirely on this dedicated OS thread,
         // so it never nests inside whatever runtime the caller happens to be on.
@@ -49,50 +49,33 @@ impl ProxiedNetwork {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("Failed to create proxy runtime: {e}");
-                        let _ = ready_tx.send(false);
+                        let _ = bound_tx.send(Err(std::io::Error::other(e)));
                         return;
                     }
                 };
                 rt.block_on(async move {
-                    let proxy = HttpProxy::new(allowed_domains, proxy_port);
-                    let handle = tokio::spawn(async move {
-                        if let Err(e) = proxy.run(shutdown_rx).await {
-                            tracing::error!("Proxy error: {e}");
-                        }
-                    });
-
-                    // proxy.run() binds its listener as the first step; poll until
-                    // it is actually accepting instead of guessing a fixed delay.
-                    let deadline = Instant::now() + Duration::from_secs(2);
-                    let ready = loop {
-                        if handle.is_finished() {
-                            break false; // run() returned early, e.g. bind failed
-                        }
-                        if tokio::net::TcpStream::connect(("127.0.0.1", proxy_port))
-                            .await
-                            .is_ok()
-                        {
-                            break true;
-                        }
-                        if Instant::now() >= deadline {
-                            break false;
-                        }
-                        tokio::time::sleep(Duration::from_millis(2)).await;
-                    };
-                    let _ = ready_tx.send(ready);
-                    let _ = handle.await; // keep the thread alive until shutdown
+                    // Port 0: ask the OS for any free ephemeral port, reported back
+                    // once run() has actually bound it.
+                    let proxy = HttpProxy::new(allowed_domains, 0);
+                    if let Err(e) = proxy.run(shutdown_rx, Some(bound_tx)).await {
+                        tracing::error!("Proxy error: {e}");
+                    }
                 });
             })
             .map_err(|e| SandboxError::Internal(format!("Failed to spawn proxy thread: {e}")))?;
 
-        match ready_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(true) => {}
-            Ok(false) | Err(_) => {
+        let proxy_port = match bound_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(Ok(addr)) => addr.port(),
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                return Err(SandboxError::Internal(format!("proxy failed to bind: {e}")));
+            }
+            Err(_) => {
                 let _ = shutdown_tx.send(true);
                 let _ = thread.join();
-                return Err(SandboxError::Internal("proxy failed to start".into()));
+                return Err(SandboxError::Internal("proxy did not start within 3s".into()));
             }
-        }
+        };
 
         Ok(Self {
             proxy_port,
@@ -124,17 +107,6 @@ impl ProxiedNetwork {
         ]
     }
 
-    /// Find a free port to listen on
-    fn find_free_port() -> Result<u16> {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|e| SandboxError::Internal(format!("Failed to bind: {}", e)))?;
-        let port = listener
-            .local_addr()
-            .map_err(|e| SandboxError::Internal(format!("Failed to get addr: {}", e)))?
-            .port();
-        Ok(port)
-    }
-
     /// Shutdown the proxy
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
@@ -156,12 +128,6 @@ impl Drop for ProxiedNetwork {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_find_free_port() {
-        let port = ProxiedNetwork::find_free_port().unwrap();
-        assert!(port > 0);
-    }
 
     #[test]
     fn test_env_vars() {

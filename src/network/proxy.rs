@@ -44,10 +44,29 @@ impl HttpProxy {
 
     /// Run the proxy server
     ///
-    /// This will block until the shutdown signal is received.
-    pub async fn run(&self, mut shutdown: watch::Receiver<bool>) -> std::io::Result<()> {
-        let listener = TcpListener::bind(self.listen_addr).await?;
+    /// This will block until the shutdown signal is received. If `bound` is
+    /// given, the actual listen address (or the bind error) is sent on it as
+    /// soon as the listener is up, before the accept loop starts — so a
+    /// caller never has to guess a port and race a second bind against it.
+    pub async fn run(
+        &self,
+        mut shutdown: watch::Receiver<bool>,
+        bound: Option<std::sync::mpsc::Sender<std::io::Result<SocketAddr>>>,
+    ) -> std::io::Result<()> {
+        let listener = match TcpListener::bind(self.listen_addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                let kind = e.kind();
+                if let Some(tx) = bound {
+                    let _ = tx.send(Err(std::io::Error::new(kind, e.to_string())));
+                }
+                return Err(e);
+            }
+        };
         let actual_addr = listener.local_addr()?;
+        if let Some(tx) = bound {
+            let _ = tx.send(Ok(actual_addr));
+        }
         tracing::info!("HTTP proxy listening on {}", actual_addr);
 
         loop {
@@ -82,7 +101,7 @@ impl HttpProxy {
     /// Run the proxy server without shutdown signal (for simpler use cases)
     pub async fn run_forever(&self) -> std::io::Result<()> {
         let (_tx, rx) = watch::channel(false);
-        self.run(rx).await
+        self.run(rx, None).await
     }
 
     async fn handle_connection(
