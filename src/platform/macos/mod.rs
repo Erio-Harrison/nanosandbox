@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,42 @@ use std::time::{Duration, Instant};
 const LIMIT_OPEN_FILES: u8 = 1;
 const LIMIT_FILE_SIZE: u8 = 2;
 const LIMIT_CPU_TIME: u8 = 3;
+
+const BASE_POLICY: &str = include_str!("policy/seatbelt_base_policy.sbpl");
+const NETWORK_POLICY: &str = include_str!("policy/seatbelt_network_policy.sbpl");
+const PREFERENCES_POLICY: &str = include_str!("policy/seatbelt_preferences_policy.sbpl");
+
+/// Directories programs expect to write to regardless of the working directory
+const DEFAULT_WRITABLE: [&str; 4] =
+    ["/tmp", "/private/tmp", "/private/var/folders", "/private/var/tmp"];
+
+/// Two gaps in the base policy found by running real toolchains under it:
+/// `sysctl`(1) reads `sysctl.oidfmt.*` / `sysctl.name.*` metadata nodes to format
+/// and name a value, on top of the name it was actually asked for; and clang
+/// needs dirhelper to resolve its scratch directory (falling back to
+/// `/private/var/tmp` without it).
+const EXTRA_BASE_POLICY: &str = r#"
+(allow sysctl-read (sysctl-name-prefix "sysctl."))
+(allow mach-lookup (global-name "com.apple.bsd.dirhelper"))
+"#;
+
+/// Seatbelt policy text and the `-D key=value` definitions it refers to
+struct SeatbeltProfile {
+    policy: String,
+    params: Vec<(String, String)>,
+}
+
+/// Resolve symlinks (macOS /tmp is a link to /private/tmp) because Seatbelt
+/// matches real paths. Paths that do not exist yet keep their resolved parent.
+fn canonical_path(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    match (path.parent().and_then(|p| p.canonicalize().ok()), path.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
 
 /// Check if sandbox-exec is available
 pub fn is_supported() -> bool {
@@ -42,92 +79,73 @@ impl MacOSExecutor {
         Self { _private: () }
     }
 
-    /// Generate SBPL (Sandbox Profile Language) profile
-    fn generate_profile(&self, config: &SandboxConfig) -> String {
-        let mut profile = String::new();
+    /// Compose the SBPL profile: Codex-derived base policy, reads, writes, network.
+    /// Paths are passed as `-D` parameters and referenced with `(param ...)`, so a
+    /// path can never be parsed as policy text.
+    fn generate_profile(&self, config: &SandboxConfig, proxy_port: Option<u16>) -> SeatbeltProfile {
+        let mut sections = vec![
+            BASE_POLICY.to_string(),
+            EXTRA_BASE_POLICY.to_string(),
+            "(allow file-read*)".to_string(),
+        ];
 
-        // Version and default deny
-        profile.push_str("(version 1)\n");
-        profile.push_str("(deny default)\n");
-
-        // Allow basic process operations
-        profile.push_str("(allow process-fork)\n");
-        profile.push_str("(allow process-exec)\n");
-        profile.push_str("(allow process-exec-interpreter)\n");
-        profile.push_str("(allow signal)\n");
-
-        // Allow sysctl operations
-        profile.push_str("(allow sysctl-read)\n");
-        profile.push_str("(allow sysctl-write)\n");
-
-        // Allow mach operations
-        profile.push_str("(allow mach-lookup)\n");
-        profile.push_str("(allow mach-register)\n");
-        profile.push_str("(allow mach-priv-host-port)\n");
-        profile.push_str("(allow mach-priv-task-port)\n");
-        profile.push_str("(allow mach-task-name)\n");
-
-        // Allow IPC operations
-        profile.push_str("(allow ipc-posix-shm-read-data)\n");
-        profile.push_str("(allow ipc-posix-shm-write-data)\n");
-        profile.push_str("(allow ipc-posix-shm-read-metadata)\n");
-        profile.push_str("(allow ipc-posix-shm-write-create)\n");
-        profile.push_str("(allow ipc-posix-sem)\n");
-
-        // Allow iokit and pseudo-tty
-        profile.push_str("(allow iokit-open)\n");
-        profile.push_str("(allow pseudo-tty)\n");
-
-        // Allow process info
-        profile.push_str("(allow process-info-pidinfo)\n");
-        profile.push_str("(allow process-info-setcontrol)\n");
-        profile.push_str("(allow process-info-dirtycontrol)\n");
-        profile.push_str("(allow process-info-codesignature)\n");
-
-        // Allow reading from anywhere (simplifies profile)
-        profile.push_str("(allow file-read* (subpath \"/\"))\n");
-
-        // Allow writes to specific directories
-        profile.push_str("(allow file-write* (subpath \"/tmp\"))\n");
-        profile.push_str("(allow file-write* (subpath \"/private/tmp\"))\n");
-        profile.push_str("(allow file-write* (subpath \"/private/var/folders\"))\n");
-        profile.push_str("(allow file-write* (subpath \"/dev\"))\n");
-
-        // Working directory write access
-        let working_dir = config.working_dir.to_string_lossy();
-        profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", working_dir));
-
-        // Custom mount write access
-        for mount in &config.mounts {
-            if mount.permission == Permission::ReadWrite {
-                let source = mount.source.to_string_lossy();
-                profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", source));
+        let mut roots: Vec<PathBuf> = Vec::new();
+        let candidates = DEFAULT_WRITABLE
+            .iter()
+            .map(PathBuf::from)
+            .chain(std::iter::once(config.working_dir.clone()))
+            .chain(
+                config
+                    .mounts
+                    .iter()
+                    .filter(|m| m.permission == Permission::ReadWrite)
+                    .map(|m| m.source.clone()),
+            )
+            .chain(config.tmpfs_mounts.iter().map(|(path, _)| path.clone()))
+            .chain(config.rootfs.clone());
+        for path in candidates {
+            let root = canonical_path(&path);
+            if !roots.contains(&root) {
+                roots.push(root);
             }
         }
 
-        // tmpfs mount write access
-        for (path, _) in &config.tmpfs_mounts {
-            let path_str = path.to_string_lossy();
-            profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", path_str));
+        let mut params = Vec::new();
+        let mut write_rules = String::from("; allow writes to the writable roots\n");
+        for (i, root) in roots.iter().enumerate() {
+            let key = format!("WRITABLE_ROOT_{i}");
+            write_rules.push_str(&format!("(allow file-write* (subpath (param \"{key}\")))\n"));
+            params.push((key, root.to_string_lossy().into_owned()));
         }
+        sections.push(write_rules);
 
-        // Rootfs write access if specified
-        if let Some(rootfs) = &config.rootfs {
-            let rootfs_str = rootfs.to_string_lossy();
-            profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", rootfs_str));
-        }
-
-        // Network rules
         match &config.network_mode {
-            NetworkMode::None => {
-                // No network rules - default deny applies
+            NetworkMode::None => {}
+            NetworkMode::Host => {
+                sections.push(format!(
+                    "(allow network-outbound)\n(allow network-inbound)\n{NETWORK_POLICY}"
+                ));
             }
-            NetworkMode::Host | NetworkMode::Proxied { .. } => {
-                profile.push_str("(allow network*)\n");
+            // Only the local proxy is reachable, so the domain allowlist cannot be
+            // bypassed by connecting directly. Without a proxy port nothing is opened.
+            NetworkMode::Proxied { .. } => {
+                if let Some(port) = proxy_port {
+                    sections.push(format!(
+                        "(allow network-outbound (remote ip \"localhost:{port}\"))\n{NETWORK_POLICY}"
+                    ));
+                }
             }
         }
 
-        profile
+        sections.push(PREFERENCES_POLICY.to_string());
+        sections.push("(deny mach-lookup (xpc-service-name-prefix \"\"))".to_string());
+        // These fcntls mutate files through read-only descriptors, bypassing file-write*.
+        sections.push("(deny system-fcntl (fcntl-command 80 110))".to_string());
+
+        SeatbeltProfile {
+            policy: sections.join("\n"),
+            params,
+        }
     }
 
     /// Apply resource limits using setrlimit.
@@ -324,7 +342,7 @@ impl PlatformExecutor for MacOSExecutor {
         };
 
         // Generate sandbox profile
-        let profile = self.generate_profile(config);
+        let profile = self.generate_profile(config, proxy.as_ref().map(|p| p.port()));
 
         let (report_rd, report_wr) = Self::report_pipe()?;
         let report_fd = report_wr.as_raw_fd();
@@ -334,9 +352,13 @@ impl PlatformExecutor for MacOSExecutor {
         let max_file_size = config.max_file_size;
         let cpu_time_limit = config.cpu_time_limit;
 
-        // Build command: sandbox-exec -p <profile> <cmd> <args>
+        // Build command: sandbox-exec -p <profile> -Dkey=value... -- <cmd> <args>
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(&profile);
+        command.arg("-p").arg(&profile.policy);
+        for (key, value) in &profile.params {
+            command.arg(format!("-D{key}={value}"));
+        }
+        command.arg("--");
         command.arg(cmd);
         command.args(args);
 
@@ -553,54 +575,70 @@ mod tests {
         assert!(is_supported());
     }
 
+    fn profile(config: &SandboxConfig, proxy_port: Option<u16>) -> SeatbeltProfile {
+        MacOSExecutor::new().generate_profile(config, proxy_port)
+    }
+
     #[test]
     fn test_generate_profile() {
-        let executor = MacOSExecutor::new();
-        let config = SandboxConfig::default();
-        let profile = executor.generate_profile(&config);
+        let p = profile(&SandboxConfig::default(), None);
 
-        assert!(profile.contains("(version 1)"));
-        assert!(profile.contains("(deny default)"));
+        assert!(p.policy.contains("(version 1)"));
+        assert!(p.policy.contains("(deny default)"));
+        assert!(p.policy.contains("(allow signal (target same-sandbox))"));
+        assert!(!p.policy.contains("(allow signal)"));
     }
 
     #[test]
     fn test_generate_profile_with_mounts() {
-        let executor = MacOSExecutor::new();
         let mut config = SandboxConfig::default();
-        // Use ReadWrite permission since that adds explicit rules
         config.mounts.push(Mount {
             source: "/tmp/test_mount".into(),
             target: "/sandbox/test".into(),
             permission: Permission::ReadWrite,
         });
 
-        let profile = executor.generate_profile(&config);
-        // Should contain write access for ReadWrite mounts
-        assert!(profile.contains("/tmp/test_mount"));
+        let p = profile(&config, None);
+        assert!(p.params.iter().any(|(_, v)| v.ends_with("test_mount")));
+        assert!(!p.policy.contains("test_mount"));
+    }
+
+    #[test]
+    fn test_paths_are_parameters_not_policy_text() {
+        let config = SandboxConfig {
+            working_dir: PathBuf::from("/tmp/x\") (allow file-write* (subpath \"/"),
+            ..Default::default()
+        };
+
+        let p = profile(&config, None);
+        assert!(!p.policy.contains("(allow file-write* (subpath \"/\"))"));
+        assert!(p.params.iter().any(|(_, v)| v.contains("(allow file-write*")));
     }
 
     #[test]
     fn test_generate_profile_network_none() {
-        let executor = MacOSExecutor::new();
-        let config = SandboxConfig {
-            network_mode: NetworkMode::None,
-            ..Default::default()
-        };
-
-        let profile = executor.generate_profile(&config);
-        // Should not contain network* allow
-        assert!(!profile.contains("(allow network*)"));
+        let p = profile(&SandboxConfig { network_mode: NetworkMode::None, ..Default::default() }, None);
+        assert!(!p.policy.contains("(allow network-outbound"));
     }
 
     #[test]
     fn test_generate_profile_network_host() {
-        let executor = MacOSExecutor::new();
+        let p = profile(&SandboxConfig { network_mode: NetworkMode::Host, ..Default::default() }, None);
+        assert!(p.policy.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn test_generate_profile_network_proxied_only_reaches_proxy() {
         let config = SandboxConfig {
-            network_mode: NetworkMode::Host,
+            network_mode: NetworkMode::Proxied { allowed_domains: vec!["example.com".into()] },
             ..Default::default()
         };
 
-        let profile = executor.generate_profile(&config);
-        assert!(profile.contains("(allow network*)"));
+        let p = profile(&config, Some(8080));
+        assert!(p.policy.contains("(remote ip \"localhost:8080\")"));
+        assert!(!p.policy.contains("(allow network-outbound)"));
+
+        let p = profile(&config, None);
+        assert!(!p.policy.contains("(allow network-outbound"));
     }
 }

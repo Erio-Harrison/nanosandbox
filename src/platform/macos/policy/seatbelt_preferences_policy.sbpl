@@ -1,0 +1,16 @@
+; Adapted from OpenAI Codex, codex-rs/sandboxing/src/seatbelt_preferences_policy.sbpl
+; https://github.com/openai/codex, file content as of repository commit 3483294596ea86edd1fdc30bf360b8951b9d7022
+; (last modified upstream in 21facf227366 on 2026-08-20: "Restrict macOS preference reads to full-disk policies (#39811)")
+; Licensed under the Apache License, Version 2.0. See THIRD_PARTY_NOTICES.md.
+; Parts of the original policies are derived from Chromium's sandbox policies (BSD-3-Clause),
+; as referenced in the comments below.
+; Changes: none to the rules; only this header was added.
+
+; Preferences IPC can expose data outside the filesystem read roots.
+; Include this policy only when filesystem reads are unrestricted.
+(allow ipc-posix-shm-read* (ipc-posix-name-prefix "apple.cfprefs."))
+(allow mach-lookup
+  (global-name "com.apple.cfprefsd.daemon")
+  (global-name "com.apple.cfprefsd.agent")
+  (local-name "com.apple.cfprefsd.agent"))
+(allow user-preference-read)
