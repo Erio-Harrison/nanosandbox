@@ -5,18 +5,17 @@
 use crate::error::{Result, SandboxError};
 use crate::network::HttpProxy;
 use std::net::TcpListener;
-use std::sync::Arc;
-use tokio::runtime::Runtime;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 /// Manages proxied network access for a sandbox
 pub struct ProxiedNetwork {
     proxy_port: u16,
     proxy_url: String,
     shutdown_tx: watch::Sender<bool>,
-    _proxy_handle: JoinHandle<()>,
-    _runtime: Arc<Runtime>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl ProxiedNetwork {
@@ -33,37 +32,73 @@ impl ProxiedNetwork {
         // Find a free port
         let proxy_port = Self::find_free_port()?;
 
-        // Create tokio runtime for the proxy
-        let runtime = Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .map_err(|e| SandboxError::Internal(format!("Failed to create runtime: {}", e)))?,
-        );
-
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (ready_tx, ready_rx) = mpsc::channel::<bool>();
 
-        // Create and start the proxy
-        let proxy = HttpProxy::new(allowed_domains, proxy_port);
-        let proxy_handle = runtime.spawn(async move {
-            if let Err(e) = proxy.run(shutdown_rx).await {
-                tracing::error!("Proxy error: {}", e);
+        // The runtime is built and dropped entirely on this dedicated OS thread,
+        // so it never nests inside whatever runtime the caller happens to be on.
+        // Dropping a `Runtime` from within another async context panics:
+        // https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#shutdown
+        // The "spawn a runtime, talk to it over a channel" pattern is documented at
+        // https://tokio.rs/tokio/topics/bridging
+        let thread = std::thread::Builder::new()
+            .name("nanosandbox-proxy".into())
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("Failed to create proxy runtime: {e}");
+                        let _ = ready_tx.send(false);
+                        return;
+                    }
+                };
+                rt.block_on(async move {
+                    let proxy = HttpProxy::new(allowed_domains, proxy_port);
+                    let handle = tokio::spawn(async move {
+                        if let Err(e) = proxy.run(shutdown_rx).await {
+                            tracing::error!("Proxy error: {e}");
+                        }
+                    });
+
+                    // proxy.run() binds its listener as the first step; poll until
+                    // it is actually accepting instead of guessing a fixed delay.
+                    let deadline = Instant::now() + Duration::from_secs(2);
+                    let ready = loop {
+                        if handle.is_finished() {
+                            break false; // run() returned early, e.g. bind failed
+                        }
+                        if tokio::net::TcpStream::connect(("127.0.0.1", proxy_port))
+                            .await
+                            .is_ok()
+                        {
+                            break true;
+                        }
+                        if Instant::now() >= deadline {
+                            break false;
+                        }
+                        tokio::time::sleep(Duration::from_millis(2)).await;
+                    };
+                    let _ = ready_tx.send(ready);
+                    let _ = handle.await; // keep the thread alive until shutdown
+                });
+            })
+            .map_err(|e| SandboxError::Internal(format!("Failed to spawn proxy thread: {e}")))?;
+
+        match ready_rx.recv_timeout(Duration::from_secs(3)) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                let _ = shutdown_tx.send(true);
+                let _ = thread.join();
+                return Err(SandboxError::Internal("proxy failed to start".into()));
             }
-        });
-
-        // Give proxy a moment to start
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        let proxy_url = format!("http://127.0.0.1:{}", proxy_port);
+        }
 
         Ok(Self {
             proxy_port,
-            proxy_url,
+            proxy_url: format!("http://127.0.0.1:{proxy_port}"),
             shutdown_tx,
-            _proxy_handle: proxy_handle,
-            _runtime: runtime,
+            thread: Some(thread),
         })
     }
 
@@ -109,6 +144,12 @@ impl ProxiedNetwork {
 impl Drop for ProxiedNetwork {
     fn drop(&mut self) {
         self.shutdown();
+        // Blocks briefly until the proxy's accept loop observes the shutdown
+        // signal and the thread exits — consistent with the rest of the crate,
+        // which is blocking end-to-end.
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
 
