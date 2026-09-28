@@ -22,6 +22,7 @@ pub mod windows;
 
 use crate::builder::SandboxConfig;
 use crate::error::Result;
+use crate::network::ProxiedNetwork;
 use crate::result::ExecutionResult;
 
 /// Platform-specific sandbox executor trait
@@ -37,6 +38,9 @@ pub trait PlatformExecutor: Send + Sync {
     /// * `cmd` - Command to execute
     /// * `args` - Command arguments
     /// * `stdin` - Optional stdin data to pass to the process
+    /// * `proxy` - The sandbox's proxy, already running, when `network_mode` is
+    ///   `Proxied`. Owned by the `Sandbox` and reused across every `run()` call
+    ///   instead of being started and torn down per call.
     ///
     /// # Returns
     /// * `ExecutionResult` containing stdout, stderr, exit code, and resource usage
@@ -46,6 +50,7 @@ pub trait PlatformExecutor: Send + Sync {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
+        proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult>;
 
     /// Check if this platform supports all requested features

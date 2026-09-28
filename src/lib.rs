@@ -28,7 +28,7 @@
 //! ```
 
 pub mod error;
-pub mod platform;
+pub(crate) mod platform;
 pub mod sandbox;
 pub mod builder;
 pub mod result;

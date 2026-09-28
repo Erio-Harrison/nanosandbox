@@ -330,19 +330,12 @@ impl PlatformExecutor for MacOSExecutor {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
+        proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
-        // Setup proxy if using proxied network mode
-        let proxy = match &config.network_mode {
-            NetworkMode::Proxied { allowed_domains } => {
-                Some(ProxiedNetwork::setup(allowed_domains.clone())?)
-            }
-            _ => None,
-        };
-
         // Generate sandbox profile
-        let profile = self.generate_profile(config, proxy.as_ref().map(|p| p.port()));
+        let profile = self.generate_profile(config, proxy.map(|p| p.port()));
 
         let (report_rd, report_wr) = Self::report_pipe()?;
         let report_fd = report_wr.as_raw_fd();
@@ -378,7 +371,7 @@ impl PlatformExecutor for MacOSExecutor {
         }
 
         // Set proxy environment variables if proxied network
-        if let Some(ref proxy) = proxy {
+        if let Some(proxy) = proxy {
             for (key, value) in proxy.env_vars() {
                 command.env(key, value);
             }
@@ -440,13 +433,9 @@ impl PlatformExecutor for MacOSExecutor {
 
         // Wait with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
-        let result =
-            self.wait_with_timeout(&mut child, child_pid, timeout, config.memory_limit, start);
-
-        // Proxy will be shut down when dropped
-        drop(proxy);
-
-        result
+        // The proxy is owned by the Sandbox, not this call, so it stays up
+        // for the next run() instead of being shut down here.
+        self.wait_with_timeout(&mut child, child_pid, timeout, config.memory_limit, start)
     }
 
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {

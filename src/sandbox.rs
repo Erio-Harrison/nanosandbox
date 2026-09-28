@@ -3,8 +3,9 @@
 //! The main Sandbox struct that provides the high-level API for running
 //! sandboxed processes across different platforms.
 
-use crate::builder::{Permission, SandboxBuilder, SandboxConfig, SeccompProfile};
+use crate::builder::{NetworkMode, Permission, SandboxBuilder, SandboxConfig, SeccompProfile};
 use crate::error::Result;
+use crate::network::ProxiedNetwork;
 use crate::platform::{get_executor, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::path::PathBuf;
@@ -34,6 +35,10 @@ pub struct Sandbox {
     config: SandboxConfig,
     id: String,
     executor: Box<dyn PlatformExecutor>,
+    /// Started once here and reused by every `run()` call instead of being
+    /// spun up and torn down per call; dropped (and shut down) with the
+    /// `Sandbox` itself.
+    proxy: Option<ProxiedNetwork>,
 }
 
 impl Sandbox {
@@ -61,10 +66,20 @@ impl Sandbox {
         // Validate platform support for this configuration
         executor.check_support(&config)?;
 
+        // Start the proxy once, after platform support is confirmed, so it is
+        // not spun up only to be discarded by a check_support() failure.
+        let proxy = match &config.network_mode {
+            NetworkMode::Proxied { allowed_domains } => {
+                Some(ProxiedNetwork::setup(allowed_domains.clone())?)
+            }
+            _ => None,
+        };
+
         Ok(Self {
             config,
             id: generate_sandbox_id(),
             executor,
+            proxy,
         })
     }
 
@@ -115,7 +130,8 @@ impl Sandbox {
         args: &[&str],
         stdin: Option<&[u8]>,
     ) -> Result<ExecutionResult> {
-        self.executor.execute(&self.config, cmd, args, stdin)
+        self.executor
+            .execute(&self.config, cmd, args, stdin, self.proxy.as_ref())
     }
 
     /// Get the sandbox ID

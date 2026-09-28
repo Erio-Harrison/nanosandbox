@@ -43,6 +43,7 @@ impl PlatformExecutor for WindowsExecutor {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
+        proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
         // Windows implementation using Job Objects and Restricted Tokens
 
@@ -51,14 +52,6 @@ impl PlatformExecutor for WindowsExecutor {
         use std::time::Instant;
 
         let start = Instant::now();
-
-        // Setup proxy if using proxied network mode
-        let _proxy = match &config.network_mode {
-            NetworkMode::Proxied { allowed_domains } => {
-                Some(ProxiedNetwork::setup(allowed_domains.clone())?)
-            }
-            _ => None,
-        };
 
         // Build command
         let mut command = Command::new(cmd);
@@ -74,7 +67,7 @@ impl PlatformExecutor for WindowsExecutor {
         }
 
         // Add proxy environment variables if using proxied network
-        if let Some(ref proxy) = _proxy {
+        if let Some(proxy) = proxy {
             for (key, value) in proxy.env_vars() {
                 command.env(key, value);
             }

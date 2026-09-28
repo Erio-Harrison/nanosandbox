@@ -83,6 +83,7 @@ impl PlatformExecutor for LinuxExecutor {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
+        proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
         use nix::sched::{clone, CloneFlags};
         use nix::sys::signal::Signal;
@@ -92,14 +93,6 @@ impl PlatformExecutor for LinuxExecutor {
         const STACK_SIZE: usize = 1024 * 1024;
 
         let start = Instant::now();
-
-        // Setup proxy if using proxied network mode
-        let _proxy = match &config.network_mode {
-            NetworkMode::Proxied { allowed_domains } => {
-                Some(ProxiedNetwork::setup(allowed_domains.clone())?)
-            }
-            _ => None,
-        };
 
         // Create pipes for stdout, stderr, and synchronization
         let (r, w) = pipe().map_err(|e| SandboxError::Internal(format!("create pipe for child stdout: {e}")))?;
@@ -146,7 +139,7 @@ impl PlatformExecutor for LinuxExecutor {
         let mut env = config.env.clone();
 
         // Add proxy environment variables if using proxied network
-        if let Some(ref proxy) = _proxy {
+        if let Some(proxy) = proxy {
             for (key, value) in proxy.env_vars() {
                 env.insert(key, value);
             }
