@@ -110,27 +110,29 @@ fn test_exit_code_accuracy() {
 }
 
 /// Test: Signal information should be captured
+///
+/// On Linux, the sandboxed process is PID 1 of its own PID namespace
+/// (pid_namespaces(7)), and the kernel suppresses unhandled signals —
+/// including self-directed SIGKILL — sent to an init process from
+/// *within* its own namespace; only a signal sent from an ancestor
+/// namespace is forcibly delivered. So `sh -c "kill -9 $$"` is a no-op
+/// here, not a bug: verified with a real sandbox that it prints and
+/// keeps running afterward. Exercise the delivery path that actually
+/// applies to us instead — our own wall_time_limit kill, sent from
+/// outside the sandbox's namespace.
 #[test]
 #[cfg(unix)]
 fn test_signal_capture() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .wall_time_limit(Duration::from_secs(5))
+        .wall_time_limit(Duration::from_millis(300))
         .build()
         .unwrap();
 
-    // Process that kills itself
-    let result = sandbox.run("sh", &["-c", "kill -9 $$"]).unwrap();
+    let result = sandbox.run("sleep", &["10"]).unwrap();
 
-    // Should capture the signal
-    assert!(
-        result.signal.is_some() || result.exit_code != 0,
-        "Signal or non-zero exit should be captured"
-    );
-
-    if let Some(signal) = result.signal {
-        assert_eq!(signal, 9, "Should be SIGKILL (9)");
-    }
+    assert!(result.killed_by_timeout);
+    assert_eq!(result.signal, Some(9), "Should be SIGKILL (9)");
 }
 
 /// Test: Timeout flag should be accurate
