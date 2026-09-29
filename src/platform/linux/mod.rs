@@ -171,6 +171,13 @@ impl PlatformExecutor for LinuxExecutor {
                 }
                 let _ = close_raw(stdin_fd);
             }
+            // clone() inherited our copy of the write end too (pipe() isn't
+            // O_CLOEXEC); left open, it survives execvp and keeps the pipe's
+            // write side alive under the exec'd program, so it never sees
+            // EOF on stdin. Close it — we (the child) never write to it.
+            if let Some(fd) = stdin_write {
+                let _ = close_raw(fd);
+            }
 
             // Redirect stdout/stderr
             unsafe {
