@@ -182,9 +182,24 @@ impl PlatformExecutor for LinuxExecutor {
                 libc::setpgid(0, 0);
             }
 
-            // Wait for parent to setup UID/GID mappings
+            // clone() gave us a copy of both pipe ends. Close our own copy
+            // of the write end *before* reading: otherwise, if the parent
+            // (the intended writer) dies before signaling us, the pipe
+            // never reaches EOF — our own inherited copy keeps it "open" —
+            // and the read below blocks forever instead of returning.
+            // Confirmed for real: a parent killed between clone() and its
+            // own write+close left the child permanently stuck here, never
+            // reaching exec, reparented to init once the parent was gone.
+            let _ = close_raw(ready_write);
+
+            // Wait for parent to setup UID/GID mappings and place us in our
+            // cgroup. 0 bytes read means EOF — the parent died before
+            // signaling — nothing valid to continue with either way.
             let mut buf = [0u8; 1];
-            let _ = read_raw(ready_read, &mut buf);
+            match read_raw(ready_read, &mut buf) {
+                Ok(1) => {}
+                _ => return 1,
+            }
             let _ = close_raw(ready_read);
 
             // Setup stdin
