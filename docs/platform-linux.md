@@ -281,6 +281,26 @@ mount | grep cgroup2
 ls /sys/fs/cgroup/cgroup.controllers
 ```
 
+### AppArmor on Ubuntu 23.10+
+
+Ubuntu's AppArmor confines a freshly-created unprivileged user namespace to its
+`unprivileged_userns` profile (security hardening against user-namespace-based
+privilege escalation). That profile denies some `CAP_SYS_ADMIN`-requiring
+calls even though the kernel's own capability model would allow them for the
+namespace's creator — in particular, `sethostname()`, so the in-sandbox
+hostname can silently not take effect on these systems. Confirmed via
+`dmesg | grep apparmor` showing an `operation="userns_create" ...
+target="unprivileged_userns"` transition line, and reproduced with a minimal
+`clone(CLONE_NEWUSER | CLONE_NEWUTS)` program outside of nanosandbox
+entirely. This doesn't affect sandbox isolation itself — only that one
+cosmetic setting — and the platform code already logs it and continues
+rather than failing the run:
+
+```bash
+# Confirm this is what's happening
+sudo dmesg | grep -i "unprivileged_userns"
+```
+
 ## References
 
 - [Linux Namespaces](https://man7.org/linux/man-pages/man7/namespaces.7.html)
