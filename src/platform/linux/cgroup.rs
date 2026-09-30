@@ -7,19 +7,40 @@ use crate::error::{Result, SandboxError};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 /// Shared base for per-sandbox leaves; never holds a process itself.
 const NANOSANDBOX_CGROUP: &str = "nanosandbox";
+/// How often a long-lived process re-sweeps its scope's neighborhood and the
+/// lock directory, beyond the one-time sweep on first use. Sweeping is cheap
+/// (a directory listing plus a few flock probes), so this can be short.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 static LEAF_ID: AtomicU64 = AtomicU64::new(0);
+
+/// A per-process random value, mixed into every self-owned cgroup/scope name
+/// alongside our pid. Names keyed on pid alone can collide with a leftover
+/// from a dead process that happened to have the same (recycled) pid and
+/// hasn't been swept yet -- not just a narrow timing window, since sweeping
+/// is opportunistic, not continuous. Mixing in this nonce doesn't narrow
+/// that race, it removes the collision as a possible outcome at all: two
+/// different process lifetimes never produce the same name, regardless of
+/// pid reuse or sweep timing.
+fn process_nonce() -> u32 {
+    static NONCE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *NONCE.get_or_init(|| {
+        use std::hash::{BuildHasher, Hasher};
+        std::collections::hash_map::RandomState::new().build_hasher().finish() as u32
+    })
+}
 
 /// A fresh, process-unique cgroup leaf id (pid not known yet at this point).
 pub fn next_leaf_id() -> String {
     format!(
-        "{}-{}",
+        "{}-{:08x}-{}",
         std::process::id(),
+        process_nonce(),
         LEAF_ID.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -268,6 +289,9 @@ fn ensure_base(needed: &[&str]) -> Result<PathBuf> {
     hold_instance_lock();
     let scope = ensure_own_scope()?;
     let root_owned = scope == Path::new(CGROUP_ROOT);
+    if !root_owned {
+        sweep_scope_neighbors_if_due(&scope);
+    }
 
     enable_subtree_control(&scope, needed)?;
 
@@ -315,16 +339,10 @@ fn ensure_base(needed: &[&str]) -> Result<PathBuf> {
 
     sweep_stale_leaves(&base, |name| name.split('-').next(), owner_is_gone); // Drop doesn't run on SIGKILL/process::exit
 
-    // Last, not first: sweep_stale_scopes/sweep_stale_leaves above still need
-    // a stale pid's lock file to exist to confirm it via owner_is_gone —
-    // removing it any earlier in this same pass would erase that evidence
-    // before it's used.
-    static LOCKS_SWEPT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOCKS_SWEPT.get_or_init(|| {
-        if let Some(dir) = lock_dir() {
-            sweep_stale_locks(&dir);
-        }
-    });
+    // Last, not first: the sweeps above still need a stale pid's lock file
+    // to exist to confirm it via owner_is_gone — removing it any earlier in
+    // this same pass would erase that evidence before it's used.
+    sweep_locks_if_due();
 
     Ok(base)
 }
@@ -371,12 +389,6 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
         ));
     }
 
-    // A process that never shares its scope with anyone (the common,
-    // unwrapped case) has no other invocation that would ever revisit it
-    // via the leaf sweeps below — only a scan of `target` itself catches a
-    // killed one's own dedicated scope.
-    sweep_stale_scopes(&target);
-
     let governing = governing_unit();
 
     let usable = governing.as_ref().is_some_and(|unit| {
@@ -398,12 +410,14 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
         own_cgroup_path().map_err(|e| e.to_string())?
     };
 
-    sweep_stale_leaves(&own, |name| name.strip_prefix("nanosandbox-supervisor-"), owner_is_gone);
-
-    // Pid-suffixed leaf so `own`'s own root never holds a process directly
-    // (required before its subtree_control can be enabled), and two
-    // processes reusing the same unit don't collide.
-    let supervisor = own.join(format!("nanosandbox-supervisor-{}", std::process::id()));
+    // Pid- and nonce-suffixed leaf so `own`'s own root never holds a process
+    // directly (required before its subtree_control can be enabled), and
+    // two processes reusing the same unit — or the same recycled pid —
+    // don't collide. Swept periodically from ensure_base, not here: this
+    // runs on every call, not just the first, so a stale sibling doesn't
+    // wait for this process to restart before it's noticed.
+    let supervisor =
+        own.join(format!("nanosandbox-supervisor-{}-{:08x}", std::process::id(), process_nonce()));
     fs::create_dir_all(&supervisor)
         .map_err(|e| format!("cannot create {}: {e}", supervisor.display()))?;
     if !safe_to_build_under(&supervisor) {
@@ -526,8 +540,8 @@ fn sweep_stale_leaves(
     }
 }
 
-/// Reaps sibling `nanosandbox-<pid>.scope` units directly under `target`
-/// whose owner is confirmed gone: killing empties their cgroup, and
+/// Reaps sibling `nanosandbox-<pid>-<nonce>.scope` units directly under
+/// `target` whose owner is confirmed gone: killing empties their cgroup, and
 /// systemd's own `CollectMode=inactive-or-failed` notices and removes the
 /// unit — its cgroup is systemd's to manage, not ours to `rmdir`.
 fn sweep_stale_scopes(target: &Path) {
@@ -538,6 +552,7 @@ fn sweep_stale_scopes(target: &Path) {
             .to_str()
             .and_then(|n| n.strip_prefix("nanosandbox-"))
             .and_then(|n| n.strip_suffix(".scope"))
+            .and_then(|n| n.split('-').next())
         else {
             continue;
         };
@@ -546,6 +561,51 @@ fn sweep_stale_scopes(target: &Path) {
             continue;
         }
         kill_cgroup_atomically(&entry.path());
+    }
+}
+
+/// Returns whether at least `SWEEP_INTERVAL` has passed since the last call
+/// that returned true, atomically claiming this call as that next sweep if
+/// so. Shared by the two periodic sweeps below; each keeps its own gate.
+fn sweep_due(last: &std::sync::Mutex<Option<Instant>>) -> bool {
+    let mut last = last.lock().unwrap();
+    let due = match *last {
+        Some(t) => t.elapsed() >= SWEEP_INTERVAL,
+        None => true,
+    };
+    if due {
+        *last = Some(Instant::now());
+    }
+    due
+}
+
+/// Beyond the one-time scope decision in `compute_own_scope`, periodically
+/// re-sweeps sibling scopes near our own and supervisor leaves inside it —
+/// called from every `ensure_base`, not just the first, so a process that
+/// stays alive a long time doesn't wait for its own restart to pick up
+/// leftovers from other processes that died after our first sweep.
+fn sweep_scope_neighbors_if_due(own: &Path) {
+    static LAST_SWEPT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    if !sweep_due(&LAST_SWEPT) {
+        return;
+    }
+    let uid = unsafe { libc::getuid() };
+    sweep_stale_scopes(&user_app_slice(CGROUP_ROOT, uid));
+    sweep_stale_leaves(
+        own,
+        |name| name.strip_prefix("nanosandbox-supervisor-").and_then(|s| s.split('-').next()),
+        owner_is_gone,
+    );
+}
+
+/// Same idea as `sweep_scope_neighbors_if_due`, for the lock directory.
+fn sweep_locks_if_due() {
+    static LAST_SWEPT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    if !sweep_due(&LAST_SWEPT) {
+        return;
+    }
+    if let Some(dir) = lock_dir() {
+        sweep_stale_locks(&dir);
     }
 }
 
@@ -757,7 +817,10 @@ fn try_relocate_into_delegated_scope(preferred_slice: Option<&str>) -> std::resu
     .map_err(|e| format!("cannot reach systemd over D-Bus: {e}"))?;
 
     let pid = std::process::id();
-    let scope_name = format!("nanosandbox-{pid}.scope");
+    // Nonce-suffixed (see process_nonce()) so a name collision with a
+    // not-yet-swept scope from a dead process that had the same recycled
+    // pid can't make this StartTransientUnit call fail.
+    let scope_name = format!("nanosandbox-{pid}-{:08x}.scope", process_nonce());
     let pids: &[u32] = &[pid];
     let mut properties: Vec<(&str, Value)> = vec![
         ("PIDs", Value::new(pids)),
@@ -804,6 +867,20 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
     if controllers.is_empty() {
         return Ok(());
     }
+
+    // Concurrent callers in this process most often target the very same
+    // shared scope, each independently reading then writing
+    // cgroup.subtree_control on its own. With enough of them running at
+    // once there's effectively always a write in flight, so a short
+    // per-call retry alone keeps losing that race -- confirmed for real:
+    // under 20-way concurrency, about half the runs still failed even after
+    // 5 retries each. Serializing this process's own callers removes that
+    // self-inflicted contention entirely; the retry below still covers
+    // genuine cross-process contention (another nanosandbox process
+    // sharing this same delegated scope).
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap();
+
     let subtree_path = dir.join("cgroup.subtree_control");
     let enabled = read_controller_list(&subtree_path)?;
     let missing: Vec<&str> = controllers
@@ -819,12 +896,39 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
         .map(|c| format!("+{c}"))
         .collect::<Vec<_>>()
         .join(" ");
-    fs::write(&subtree_path, &value).map_err(|e| {
-        SandboxError::CgroupCreation(format!(
-            "cannot enable '{value}' in {}: {e}",
-            subtree_path.display()
-        ))
-    })
+
+    // The kernel serializes subtree_control writes on this cgroup; one
+    // landing while another (ours or a concurrent thread/process sharing
+    // this same scope) is still being applied can transiently fail with
+    // EBUSY, not because anything is actually wrong. Confirmed for real
+    // under concurrent sandbox creation sharing one delegated scope. Retry
+    // briefly instead of surfacing that as a hard failure.
+    let mut last_err = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(5 * attempt as u64));
+            // Someone else's write may have already covered us.
+            let enabled = read_controller_list(&subtree_path)?;
+            if missing.iter().all(|c| enabled.iter().any(|e| e == c)) {
+                return Ok(());
+            }
+        }
+        match fs::write(&subtree_path, &value) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => last_err = Some(e),
+            Err(e) => {
+                return Err(SandboxError::CgroupCreation(format!(
+                    "cannot enable '{value}' in {}: {e}",
+                    subtree_path.display()
+                )));
+            }
+        }
+    }
+    Err(SandboxError::CgroupCreation(format!(
+        "cannot enable '{value}' in {} (still busy after retries): {}",
+        subtree_path.display(),
+        last_err.expect("loop only exits via return or after recording an EBUSY error")
+    )))
 }
 
 #[cfg(test)]
