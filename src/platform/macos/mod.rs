@@ -525,6 +525,15 @@ impl MacOSExecutor {
                 drain_available(&mut stdout_pipe, &mut stdout);
                 drain_available(&mut stderr_pipe, &mut stderr);
 
+                // The immediate child exiting (normally or by signal) says
+                // nothing about descendants it backgrounded before doing so
+                // (e.g. `cmd & exit 0`) -- those keep running, untracked and
+                // unbounded by wall_time_limit/memory_limit, unless we sweep
+                // the whole tree here too, not just on the timeout/oom paths
+                // below (confirmed for real: a backgrounded `sleep 20` was
+                // still alive well after run() returned).
+                Self::kill_process_tree(child_pid);
+
                 // Extract exit code and signal
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
                     (libc::WEXITSTATUS(status), None)
@@ -580,12 +589,16 @@ impl MacOSExecutor {
                 }
                 std::thread::sleep(poll);
             } else {
-                // Error
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    // Interrupted by a signal, not a real failure -- WNOHANG
+                    // means we weren't blocked on anything to begin with, so
+                    // just retry rather than treating this as fatal.
+                    continue;
+                }
                 Self::kill_process_tree(child_pid);
                 let _ = child.wait();
-                return Err(SandboxError::ExecutionFailed(
-                    format!("wait4 failed: {}", std::io::Error::last_os_error())
-                ));
+                return Err(SandboxError::ExecutionFailed(format!("wait4 failed: {err}")));
             }
         }
     }
