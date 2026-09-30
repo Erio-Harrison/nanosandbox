@@ -331,6 +331,18 @@ impl SandboxBuilder {
                     "sandbox-exec not found at /usr/bin/sandbox-exec".into()
                 ));
             }
+
+            // Unlike Linux (where working_dir can be a path that only
+            // exists inside the sandbox's own mount namespace, made real by
+            // its own mount setup), sandbox-exec does no remapping -- it
+            // chdirs straight to this real host path. Left unchecked, a bad
+            // one surfaces at run() time as a chdir failure with the same
+            // ErrorKind as a missing command, and was being misreported as
+            // CommandNotFound(cmd) even though cmd exists (confirmed for
+            // real).
+            if !self.config.working_dir.is_dir() {
+                return Err(SandboxError::PathNotFound(self.config.working_dir.clone()));
+            }
         }
 
         // Windows: Job Objects are always available, no pre-check needed
