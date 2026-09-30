@@ -302,20 +302,26 @@ impl PlatformExecutor for LinuxExecutor {
             return Err(e);
         }
 
-        // Write stdin if provided
-        if let (Some(data), Some(fd)) = (stdin, stdin_write) {
-            let _ = write_raw(fd, data);
-            close_raw(fd).map_err(|e| SandboxError::Internal(format!("close stdin pipe write end after writing: {e}")))?;
-        }
-
-        // Signal child to continue
+        // Signal child to continue.
         write_raw(ready_write, &[0u8]).map_err(|e| SandboxError::Internal(format!("signal child to continue: {e}")))?;
         close_raw(ready_write).map_err(|e| SandboxError::Internal(format!("close sync pipe write end after signaling: {e}")))?;
+
+        // Stdin is written inside wait_with_timeout's own loop, interleaved
+        // with draining stdout/stderr — not sequentially before it. A
+        // program that echoes input to output as it goes (e.g. `cat`) can
+        // block once >64KB of it is buffered and unread, which stops it
+        // reading more stdin in turn; writing all of stdin here first,
+        // before anything reads stdout/stderr at all, deadlocks against
+        // that (confirmed for real with a 200KB input).
+        let stdin_pipe = match (stdin, stdin_write) {
+            (Some(data), Some(fd)) => Some((fd, data)),
+            _ => None,
+        };
 
         // Wait for child with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         let (stdout, stderr, exit_code, killed_by_timeout, signal) =
-            wait_with_timeout(child_pid, stdout_read, stderr_read, timeout)?;
+            wait_with_timeout(child_pid, stdout_read, stderr_read, stdin_pipe, timeout)?;
 
         // Collect resource stats BEFORE cgroup cleanup
         let (peak_memory, cpu_time, killed_by_oom) = if let Some(ref cg) = cgroup {
@@ -451,6 +457,7 @@ fn wait_with_timeout(
     pid: nix::unistd::Pid,
     stdout_fd: RawFd,
     stderr_fd: RawFd,
+    mut stdin: Option<(RawFd, &[u8])>,
     timeout: Duration,
 ) -> Result<(String, String, i32, bool, Option<i32>)> {
     use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -467,8 +474,38 @@ fn wait_with_timeout(
         let flags = libc::fcntl(stderr_fd, libc::F_GETFL);
         libc::fcntl(stderr_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
+    if let Some((fd, _)) = stdin {
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
 
     loop {
+        // Write more stdin, non-blocking, interleaved with draining
+        // stdout/stderr below — not all upfront. A program that echoes
+        // input to output as it goes (e.g. `cat`) can block on writing its
+        // own output once enough of it is buffered and unread, which stops
+        // it reading more stdin in turn; writing stdin to completion
+        // before anything reads stdout/stderr deadlocks against exactly
+        // that, confirmed for real with input over the output pipe's size.
+        if let Some((fd, data)) = &mut stdin {
+            if !data.is_empty() {
+                match write_raw(*fd, data) {
+                    Ok(n) if n > 0 => *data = &data[n..],
+                    Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EINTR) => {}
+                    // Either wrote 0 (shouldn't happen for non-empty data)
+                    // or the reader's gone (e.g. EPIPE) — nothing more to
+                    // usefully write either way.
+                    _ => *data = &[],
+                }
+            }
+            if data.is_empty() {
+                let _ = close_raw(*fd);
+                stdin = None;
+            }
+        }
+
         // Read available output
         let mut buf = [0u8; 4096];
         if let Ok(n) = read_raw(stdout_fd, &mut buf) {
@@ -486,6 +523,9 @@ fn wait_with_timeout(
             .map_err(|e| SandboxError::Internal(format!("waitpid for child {pid}: {e}")))?
         {
             WaitStatus::Exited(_, code) => {
+                if let Some((fd, _)) = stdin.take() {
+                    let _ = close_raw(fd);
+                }
                 drain_fd(stdout_fd, &mut stdout);
                 drain_fd(stderr_fd, &mut stderr);
                 close_raw(stdout_fd).ok();
@@ -499,6 +539,9 @@ fn wait_with_timeout(
                 ));
             }
             WaitStatus::Signaled(_, sig, _) => {
+                if let Some((fd, _)) = stdin.take() {
+                    let _ = close_raw(fd);
+                }
                 drain_fd(stdout_fd, &mut stdout);
                 drain_fd(stderr_fd, &mut stderr);
                 close_raw(stdout_fd).ok();
