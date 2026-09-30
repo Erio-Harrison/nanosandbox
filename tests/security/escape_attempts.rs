@@ -3,6 +3,8 @@
 //! These tests verify sandbox isolation
 
 use nanosandbox::{Permission, Sandbox, SeccompProfile};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
 
 /// Test that sandbox cannot read sensitive host files
 #[test]
