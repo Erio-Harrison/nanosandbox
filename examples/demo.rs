@@ -49,10 +49,7 @@ fn main() {
 
     // 4. Exit code propagation
     println!("\n4. Exit code propagation:");
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("sh", &["-c", "exit 42"]).unwrap();
     println!("   exit_code: {}", result.exit_code);
@@ -80,7 +77,10 @@ fn main() {
         .build()
         .unwrap();
 
-    let result = sandbox.run("curl", &["-s", "--connect-timeout", "2", "https://example.com"]);
+    let result = sandbox.run(
+        "curl",
+        &["-s", "--connect-timeout", "2", "https://example.com"],
+    );
     match result {
         Ok(r) => {
             if r.exit_code != 0 || r.stdout.is_empty() {

@@ -7,7 +7,11 @@ use std::time::{Duration, Instant};
 #[test]
 fn test_wall_time_limit() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_millis(500))
         .build()
         .unwrap();
@@ -28,7 +32,11 @@ fn test_wall_time_limit() {
 #[test]
 fn test_wall_time_within_limit() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_secs(5))
         .build()
         .unwrap();
@@ -53,22 +61,28 @@ fn test_memory_limit_linux() {
         .unwrap();
 
     // Try to allocate more memory than allowed
-    let result = sandbox.run("python3", &[
-        "-c",
-        "x = bytearray(100 * 1024 * 1024)"  // Try to allocate 100MB
-    ]);
+    let result = sandbox.run(
+        "python3",
+        &[
+            "-c",
+            "x = bytearray(100 * 1024 * 1024)", // Try to allocate 100MB
+        ],
+    );
 
-    // Should either fail or be killed
-    match result {
-        Ok(r) => assert!(!r.success() || r.killed_by_oom),
-        Err(_) => {} // Command failed, which is expected
+    // Should either fail or be killed (an Err is also acceptable)
+    if let Ok(r) = result {
+        assert!(!r.success() || r.killed_by_oom);
     }
 }
 
 #[test]
 fn test_memory_within_limit() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .memory_limit(256 * MB)
         .wall_time_limit(Duration::from_secs(10))
         .build()
@@ -77,18 +91,19 @@ fn test_memory_within_limit() {
     #[cfg(not(target_os = "windows"))]
     {
         // Check if python3 is available
-        let result = sandbox.run("python3", &[
-            "-c",
-            "x = bytearray(10 * 1024 * 1024); print('ok')"  // 10MB - well within limit
-        ]);
+        let result = sandbox.run(
+            "python3",
+            &[
+                "-c",
+                "x = bytearray(10 * 1024 * 1024); print('ok')", // 10MB - well within limit
+            ],
+        );
 
-        match result {
-            Ok(r) => {
-                if r.exit_code == 0 {
-                    assert_eq!(r.stdout.trim(), "ok");
-                }
+        // An Err means python3 isn't available
+        if let Ok(r) = result {
+            if r.exit_code == 0 {
+                assert_eq!(r.stdout.trim(), "ok");
             }
-            Err(_) => {} // Python not available
         }
     }
 }
@@ -106,7 +121,7 @@ fn test_max_pids_limit() {
 
     // Try fork bomb - should be contained
     let start = Instant::now();
-    let result = sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
+    sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
     let elapsed = start.elapsed();
 
     // Should complete within time limit (contained by pids limit)
@@ -116,7 +131,11 @@ fn test_max_pids_limit() {
 #[test]
 fn test_multiple_limits_combined() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .memory_limit(128 * MB)
         .wall_time_limit(Duration::from_secs(5))
         .max_pids(50)
@@ -134,7 +153,11 @@ fn test_multiple_limits_combined() {
 fn test_cpu_limit() {
     // CPU limit test - verifies it doesn't crash
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .cpu_limit(1.0)
         .wall_time_limit(Duration::from_secs(2))
         .build()

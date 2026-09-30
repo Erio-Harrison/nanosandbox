@@ -173,11 +173,9 @@ impl CgroupManager {
     }
 
     pub fn get_memory_stats(&self) -> Result<MemoryStats> {
-        let current = fs::read_to_string(self.path.join("memory.current"))?
-            .trim().parse()?;
         let peak = fs::read_to_string(self.path.join("memory.peak"))?
             .trim().parse()?;
-        Ok(MemoryStats { current, peak })
+        Ok(MemoryStats { peak })
     }
 }
 ```

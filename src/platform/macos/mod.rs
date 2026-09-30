@@ -33,8 +33,12 @@ const NETWORK_POLICY: &str = include_str!("policy/seatbelt_network_policy.sbpl")
 const PREFERENCES_POLICY: &str = include_str!("policy/seatbelt_preferences_policy.sbpl");
 
 /// Directories programs expect to write to regardless of the working directory
-const DEFAULT_WRITABLE: [&str; 4] =
-    ["/tmp", "/private/tmp", "/private/var/folders", "/private/var/tmp"];
+const DEFAULT_WRITABLE: [&str; 4] = [
+    "/tmp",
+    "/private/tmp",
+    "/private/var/folders",
+    "/private/var/tmp",
+];
 
 /// Two gaps in the base policy found by running real toolchains under it:
 /// `sysctl`(1) reads `sysctl.oidfmt.*` / `sysctl.name.*` metadata nodes to format
@@ -58,7 +62,10 @@ fn canonical_path(path: &Path) -> PathBuf {
     if let Ok(real) = path.canonicalize() {
         return real;
     }
-    match (path.parent().and_then(|p| p.canonicalize().ok()), path.file_name()) {
+    match (
+        path.parent().and_then(|p| p.canonicalize().ok()),
+        path.file_name(),
+    ) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }
@@ -114,7 +121,9 @@ impl MacOSExecutor {
         let mut write_rules = String::from("; allow writes to the writable roots\n");
         for (i, root) in roots.iter().enumerate() {
             let key = format!("WRITABLE_ROOT_{i}");
-            write_rules.push_str(&format!("(allow file-write* (subpath (param \"{key}\")))\n"));
+            write_rules.push_str(&format!(
+                "(allow file-write* (subpath (param \"{key}\")))\n"
+            ));
             params.push((key, root.to_string_lossy().into_owned()));
         }
         sections.push(write_rules);
@@ -211,16 +220,32 @@ impl MacOSExecutor {
     fn limit_failure(report: OwnedFd, config: &SandboxConfig) -> Option<String> {
         let mut buf = [0u8; 5];
         let n = unsafe {
-            libc::read(report.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+            libc::read(
+                report.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len(),
+            )
         };
         if n != buf.len() as isize {
             return None;
         }
         let errno = i32::from_ne_bytes(buf[1..].try_into().ok()?);
         let (setting, value, rlimit) = match buf[0] {
-            LIMIT_OPEN_FILES => ("max_open_files", config.max_open_files?.to_string(), "RLIMIT_NOFILE"),
-            LIMIT_FILE_SIZE => ("max_file_size", config.max_file_size?.to_string(), "RLIMIT_FSIZE"),
-            LIMIT_CPU_TIME => ("cpu_time_limit", format!("{}s", config.cpu_time_limit?.as_secs()), "RLIMIT_CPU"),
+            LIMIT_OPEN_FILES => (
+                "max_open_files",
+                config.max_open_files?.to_string(),
+                "RLIMIT_NOFILE",
+            ),
+            LIMIT_FILE_SIZE => (
+                "max_file_size",
+                config.max_file_size?.to_string(),
+                "RLIMIT_FSIZE",
+            ),
+            LIMIT_CPU_TIME => (
+                "cpu_time_limit",
+                format!("{}s", config.cpu_time_limit?.as_secs()),
+                "RLIMIT_CPU",
+            ),
             _ => return None,
         };
         Some(format!(
@@ -311,7 +336,11 @@ impl MacOSExecutor {
                         &mut info as *mut _ as *mut libc::rusage_info_t,
                     )
                 };
-                if ret == 0 { info.ri_phys_footprint } else { 0 }
+                if ret == 0 {
+                    info.ri_phys_footprint
+                } else {
+                    0
+                }
             })
             .sum()
     }
@@ -436,7 +465,14 @@ impl PlatformExecutor for MacOSExecutor {
         // that once either side exceeds one pipe buffer (confirmed for real
         // with 200KB of stdin, and independently with >64KB of output alone
         // and no stdin at all).
-        self.wait_with_timeout(&mut child, child_pid, stdin, timeout, config.memory_limit, start)
+        self.wait_with_timeout(
+            &mut child,
+            child_pid,
+            stdin,
+            timeout,
+            config.memory_limit,
+            start,
+        )
     }
 
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {
@@ -445,7 +481,10 @@ impl PlatformExecutor for MacOSExecutor {
         }
 
         // Check for unsupported features
-        if !matches!(config.seccomp_profile, SeccompProfile::Disabled | SeccompProfile::Standard) {
+        if !matches!(
+            config.seccomp_profile,
+            SeccompProfile::Disabled | SeccompProfile::Standard
+        ) {
             // Custom seccomp profiles are not directly supported on macOS
             // We map them to sandbox-exec profiles instead
         }
@@ -516,9 +555,7 @@ impl MacOSExecutor {
             let mut status: libc::c_int = 0;
             let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
 
-            let result = unsafe {
-                libc::wait4(child_pid, &mut status, libc::WNOHANG, &mut rusage)
-            };
+            let result = unsafe { libc::wait4(child_pid, &mut status, libc::WNOHANG, &mut rusage) };
 
             if result == child_pid {
                 // Catch anything written in the child's last moments.
@@ -598,7 +635,9 @@ impl MacOSExecutor {
                 }
                 Self::kill_process_tree(child_pid);
                 let _ = child.wait();
-                return Err(SandboxError::ExecutionFailed(format!("wait4 failed: {err}")));
+                return Err(SandboxError::ExecutionFailed(format!(
+                    "wait4 failed: {err}"
+                )));
             }
         }
     }
@@ -674,25 +713,42 @@ mod tests {
 
         let p = profile(&config, None);
         assert!(!p.policy.contains("(allow file-write* (subpath \"/\"))"));
-        assert!(p.params.iter().any(|(_, v)| v.contains("(allow file-write*")));
+        assert!(p
+            .params
+            .iter()
+            .any(|(_, v)| v.contains("(allow file-write*")));
     }
 
     #[test]
     fn test_generate_profile_network_none() {
-        let p = profile(&SandboxConfig { network_mode: NetworkMode::None, ..Default::default() }, None);
+        let p = profile(
+            &SandboxConfig {
+                network_mode: NetworkMode::None,
+                ..Default::default()
+            },
+            None,
+        );
         assert!(!p.policy.contains("(allow network-outbound"));
     }
 
     #[test]
     fn test_generate_profile_network_host() {
-        let p = profile(&SandboxConfig { network_mode: NetworkMode::Host, ..Default::default() }, None);
+        let p = profile(
+            &SandboxConfig {
+                network_mode: NetworkMode::Host,
+                ..Default::default()
+            },
+            None,
+        );
         assert!(p.policy.contains("(allow network-outbound)"));
     }
 
     #[test]
     fn test_generate_profile_network_proxied_only_reaches_proxy() {
         let config = SandboxConfig {
-            network_mode: NetworkMode::Proxied { allowed_domains: vec!["example.com".into()] },
+            network_mode: NetworkMode::Proxied {
+                allowed_domains: vec!["example.com".into()],
+            },
             ..Default::default()
         };
 

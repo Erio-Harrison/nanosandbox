@@ -2,17 +2,13 @@
 //!
 //! These tests verify sandbox isolation
 
-use nanosandbox::{Sandbox, Permission, SeccompProfile};
-use std::time::Duration;
+use nanosandbox::{Permission, Sandbox, SeccompProfile};
 
 /// Test that sandbox cannot read sensitive host files
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_read_host_etc_shadow() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("cat", &["/etc/shadow"]).unwrap();
 
@@ -24,10 +20,7 @@ fn test_cannot_read_host_etc_shadow() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_pid_namespace_isolation() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // PID 1 in sandbox should be sandbox's init, not host's systemd
     let result = sandbox.run("cat", &["/proc/1/cmdline"]).unwrap();
@@ -38,10 +31,7 @@ fn test_pid_namespace_isolation() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_see_host_processes() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("ps", &["aux"]).unwrap();
 
@@ -60,7 +50,9 @@ fn test_cannot_mount_filesystems() {
         .build()
         .unwrap();
 
-    let result = sandbox.run("mount", &["-t", "tmpfs", "none", "/mnt"]).unwrap();
+    let result = sandbox
+        .run("mount", &["-t", "tmpfs", "none", "/mnt"])
+        .unwrap();
     assert!(result.exit_code != 0);
 }
 
@@ -68,10 +60,7 @@ fn test_cannot_mount_filesystems() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_create_device_nodes() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("mknod", &["/tmp/test", "c", "1", "3"]).unwrap();
     assert!(result.exit_code != 0);
@@ -81,10 +70,7 @@ fn test_cannot_create_device_nodes() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_user_namespace_isolation() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Should appear as root inside sandbox
     let result = sandbox.run("id", &[]).unwrap();
@@ -103,9 +89,12 @@ fn test_macos_network_blocked() {
         .build()
         .unwrap();
 
-    let result = sandbox.run("curl", &[
-        "-s", "--connect-timeout", "2", "https://google.com"
-    ]).unwrap();
+    let result = sandbox
+        .run(
+            "curl",
+            &["-s", "--connect-timeout", "2", "https://google.com"],
+        )
+        .unwrap();
 
     // Should fail due to network restrictions
     assert!(result.exit_code != 0);
@@ -134,7 +123,11 @@ fn test_environment_isolation() {
     std::env::set_var("SECRET_VAR", "secret_value");
 
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
@@ -163,7 +156,9 @@ fn test_working_directory_confinement() {
         .unwrap();
 
     // Should be able to write in workspace
-    let result = sandbox.run("sh", &["-c", "echo test > /workspace/file.txt"]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "echo test > /workspace/file.txt"])
+        .unwrap();
     assert!(result.success());
 
     // File should exist in temp dir
@@ -187,7 +182,9 @@ fn test_working_directory_confinement_macos() {
 
     // Should be able to write in workspace
     let file_path = format!("{}/file.txt", tmpdir_path);
-    let result = sandbox.run("sh", &["-c", &format!("echo test > {}", file_path)]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", &format!("echo test > {}", file_path)])
+        .unwrap();
     assert!(result.success());
 
     // File should exist in temp dir

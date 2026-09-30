@@ -33,8 +33,8 @@
 //! | macOS    | SBPL rules        | HTTP proxy       |
 //! | Windows  | None (best effort)| HTTP proxy       |
 
-mod proxy;
 mod manager;
+mod proxy;
 
-pub use proxy::HttpProxy;
 pub use manager::ProxiedNetwork;
+pub use proxy::HttpProxy;

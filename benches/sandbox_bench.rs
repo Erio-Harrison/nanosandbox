@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo bench
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use nanosandbox::{Sandbox, Permission, MB};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use nanosandbox::{Permission, Sandbox, MB};
 use std::time::Duration;
 
 /// Benchmark sandbox creation overhead
@@ -13,7 +13,11 @@ fn bench_sandbox_creation(c: &mut Criterion) {
     group.bench_function("minimal", |b| {
         b.iter(|| {
             let sandbox = Sandbox::builder()
-                .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+                .working_dir(if cfg!(windows) {
+                    "C:\\Windows\\Temp"
+                } else {
+                    "/tmp"
+                })
                 .build()
                 .unwrap();
             black_box(sandbox)
@@ -23,7 +27,11 @@ fn bench_sandbox_creation(c: &mut Criterion) {
     group.bench_function("with_limits", |b| {
         b.iter(|| {
             let sandbox = Sandbox::builder()
-                .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+                .working_dir(if cfg!(windows) {
+                    "C:\\Windows\\Temp"
+                } else {
+                    "/tmp"
+                })
                 .memory_limit(256 * MB)
                 .wall_time_limit(Duration::from_secs(30))
                 .max_pids(100)
@@ -36,7 +44,11 @@ fn bench_sandbox_creation(c: &mut Criterion) {
     group.bench_function("with_mounts", |b| {
         b.iter(|| {
             let sandbox = Sandbox::builder()
-                .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+                .working_dir(if cfg!(windows) {
+                    "C:\\Windows\\Temp"
+                } else {
+                    "/tmp"
+                })
                 .mount("/tmp", "/data", Permission::ReadOnly)
                 .build()
                 .unwrap();
@@ -53,7 +65,11 @@ fn bench_command_execution(c: &mut Criterion) {
 
     // Pre-create sandbox for execution benchmarks
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -100,7 +116,11 @@ fn bench_output_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("output_sizes");
 
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -124,7 +144,11 @@ fn bench_stdin_input(c: &mut Criterion) {
     let mut group = c.benchmark_group("stdin_input");
 
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_secs(30))
         .build()
         .unwrap();
@@ -188,7 +212,11 @@ fn bench_parallel_execution(c: &mut Criterion) {
                         .map(|_| {
                             std::thread::spawn(|| {
                                 let sandbox = Sandbox::builder()
-                                    .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+                                    .working_dir(if cfg!(windows) {
+                                        "C:\\Windows\\Temp"
+                                    } else {
+                                        "/tmp"
+                                    })
                                     .wall_time_limit(Duration::from_secs(10))
                                     .build()
                                     .unwrap();

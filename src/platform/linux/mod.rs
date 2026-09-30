@@ -22,7 +22,7 @@ mod namespace;
 mod seccomp;
 
 pub use cgroup::CgroupManager;
-pub use namespace::{MountNamespace, UserNamespace, UtsNamespace};
+pub use namespace::UserNamespace;
 pub use seccomp::SeccompFilter;
 
 /// RawFd version of close
@@ -120,20 +120,25 @@ impl PlatformExecutor for LinuxExecutor {
         let start = Instant::now();
 
         // Create pipes for stdout, stderr, and synchronization
-        let (r, w) = pipe().map_err(|e| SandboxError::Internal(format!("create pipe for child stdout: {e}")))?;
+        let (r, w) = pipe()
+            .map_err(|e| SandboxError::Internal(format!("create pipe for child stdout: {e}")))?;
         let stdout_read: RawFd = r.into_raw_fd();
         let stdout_write: RawFd = w.into_raw_fd();
 
-        let (r, w) = pipe().map_err(|e| SandboxError::Internal(format!("create pipe for child stderr: {e}")))?;
+        let (r, w) = pipe()
+            .map_err(|e| SandboxError::Internal(format!("create pipe for child stderr: {e}")))?;
         let stderr_read: RawFd = r.into_raw_fd();
         let stderr_write: RawFd = w.into_raw_fd();
 
-        let (r, w) = pipe().map_err(|e| SandboxError::Internal(format!("create pipe for parent-child sync: {e}")))?;
+        let (r, w) = pipe().map_err(|e| {
+            SandboxError::Internal(format!("create pipe for parent-child sync: {e}"))
+        })?;
         let ready_read: RawFd = r.into_raw_fd();
         let ready_write: RawFd = w.into_raw_fd();
 
         let (stdin_read, stdin_write) = if stdin.is_some() {
-            let (r, w) = pipe().map_err(|e| SandboxError::Internal(format!("create pipe for child stdin: {e}")))?;
+            let (r, w) = pipe()
+                .map_err(|e| SandboxError::Internal(format!("create pipe for child stdin: {e}")))?;
             (Some(r.into_raw_fd()), Some(w.into_raw_fd()))
         } else {
             (None, None)
@@ -193,7 +198,10 @@ impl PlatformExecutor for LinuxExecutor {
             }
         }
         if !env.contains_key("PATH") {
-            env.insert("PATH".to_string(), "/usr/local/bin:/usr/bin:/bin".to_string());
+            env.insert(
+                "PATH".to_string(),
+                "/usr/local/bin:/usr/bin:/bin".to_string(),
+            );
         }
 
         // Built here, before clone(), and just used as-is in the child --
@@ -209,7 +217,11 @@ impl PlatformExecutor for LinuxExecutor {
             .iter()
             .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
             .collect();
-        let exec_path = resolve_in_path(cmd, &cmd_cstr, env.get("PATH").map(String::as_str).unwrap_or(""));
+        let exec_path = resolve_in_path(
+            cmd,
+            &cmd_cstr,
+            env.get("PATH").map(String::as_str).unwrap_or(""),
+        );
 
         // execve's own nix wrapper builds a NUL-terminated pointer array
         // from these each time it's called -- an allocation that, unlike
@@ -219,9 +231,11 @@ impl PlatformExecutor for LinuxExecutor {
         // syscall, no allocation at all. args_cstr/envp_cstr are moved into
         // the closure alongside these so the strings they point into stay
         // alive for the call.
-        let mut args_ptrs: Vec<*const libc::c_char> = args_cstr.iter().map(|c| c.as_ptr()).collect();
+        let mut args_ptrs: Vec<*const libc::c_char> =
+            args_cstr.iter().map(|c| c.as_ptr()).collect();
         args_ptrs.push(std::ptr::null());
-        let mut envp_ptrs: Vec<*const libc::c_char> = envp_cstr.iter().map(|c| c.as_ptr()).collect();
+        let mut envp_ptrs: Vec<*const libc::c_char> =
+            envp_cstr.iter().map(|c| c.as_ptr()).collect();
         envp_ptrs.push(std::ptr::null());
 
         // A pre-built CString, used with raw stat()/chdir() in the child
@@ -312,7 +326,9 @@ impl PlatformExecutor for LinuxExecutor {
 
             // Setup mount namespace if needed
             if let Some(rootfs) = &child_config.rootfs {
-                if setup_mount_namespace(rootfs, &child_config.mounts, &child_config.tmpfs_mounts).is_err() {
+                if setup_mount_namespace(rootfs, &child_config.mounts, &child_config.tmpfs_mounts)
+                    .is_err()
+                {
                     let _ = write_raw(2, b"Mount setup failed\n");
                     return 1;
                 }
@@ -350,8 +366,14 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Clone child
         let child_pid = unsafe {
-            clone(child_fn, &mut stack, clone_flags, Some(Signal::SIGCHLD as i32))
-        }.map_err(|e| SandboxError::Internal(format!("clone sandboxed process: {e}")))?;
+            clone(
+                child_fn,
+                &mut stack,
+                clone_flags,
+                Some(Signal::SIGCHLD as i32),
+            )
+        }
+        .map_err(|e| SandboxError::Internal(format!("clone sandboxed process: {e}")))?;
 
         // Parent process
 
@@ -363,11 +385,19 @@ impl PlatformExecutor for LinuxExecutor {
         // early return here goes through that same cleanup, rather than
         // needing it repeated (and, before, missed) at each fallible step.
         let setup: Result<()> = (|| {
-            close_raw(ready_read).map_err(|e| SandboxError::Internal(format!("close sync pipe read end in parent: {e}")))?;
-            close_raw(stdout_write).map_err(|e| SandboxError::Internal(format!("close stdout pipe write end in parent: {e}")))?;
-            close_raw(stderr_write).map_err(|e| SandboxError::Internal(format!("close stderr pipe write end in parent: {e}")))?;
+            close_raw(ready_read).map_err(|e| {
+                SandboxError::Internal(format!("close sync pipe read end in parent: {e}"))
+            })?;
+            close_raw(stdout_write).map_err(|e| {
+                SandboxError::Internal(format!("close stdout pipe write end in parent: {e}"))
+            })?;
+            close_raw(stderr_write).map_err(|e| {
+                SandboxError::Internal(format!("close stderr pipe write end in parent: {e}"))
+            })?;
             if let Some(fd) = stdin_read {
-                close_raw(fd).map_err(|e| SandboxError::Internal(format!("close stdin pipe read end in parent: {e}")))?;
+                close_raw(fd).map_err(|e| {
+                    SandboxError::Internal(format!("close stdin pipe read end in parent: {e}"))
+                })?;
             }
             user_ns.write_mappings(child_pid.as_raw())?;
             if let Some(ref cg) = cgroup {
@@ -382,8 +412,11 @@ impl PlatformExecutor for LinuxExecutor {
         }
 
         // Signal child to continue.
-        write_raw(ready_write, &[0u8]).map_err(|e| SandboxError::Internal(format!("signal child to continue: {e}")))?;
-        close_raw(ready_write).map_err(|e| SandboxError::Internal(format!("close sync pipe write end after signaling: {e}")))?;
+        write_raw(ready_write, &[0u8])
+            .map_err(|e| SandboxError::Internal(format!("signal child to continue: {e}")))?;
+        close_raw(ready_write).map_err(|e| {
+            SandboxError::Internal(format!("close sync pipe write end after signaling: {e}"))
+        })?;
 
         // Stdin is written inside wait_with_timeout's own loop, interleaved
         // with draining stdout/stderr — not sequentially before it. A
@@ -405,7 +438,10 @@ impl PlatformExecutor for LinuxExecutor {
         // Collect resource stats BEFORE cgroup cleanup
         let (peak_memory, cpu_time, killed_by_oom) = if let Some(ref cg) = cgroup {
             let peak = cg.get_memory_stats().ok().map(|s| s.peak);
-            let cpu = cg.get_cpu_stats().ok().map(|s| Duration::from_micros(s.total_usec));
+            let cpu = cg
+                .get_cpu_stats()
+                .ok()
+                .map(|s| Duration::from_micros(s.total_usec));
             let oom = cg.was_oom_killed();
             (peak, cpu, oom)
         } else {
@@ -476,7 +512,9 @@ fn setup_mount_namespace(
         MsFlags::MS_BIND | MsFlags::MS_REC,
         None::<&str>,
     )
-    .map_err(|e| SandboxError::Internal(format!("bind mount rootfs at {}: {e}", rootfs.display())))?;
+    .map_err(|e| {
+        SandboxError::Internal(format!("bind mount rootfs at {}: {e}", rootfs.display()))
+    })?;
 
     // Setup mounts
     for m in mounts {
@@ -488,14 +526,13 @@ fn setup_mount_namespace(
             flags |= MsFlags::MS_RDONLY;
         }
 
-        mount(
-            Some(&m.source),
-            &target,
-            None::<&str>,
-            flags,
-            None::<&str>,
-        )
-        .map_err(|e| SandboxError::Internal(format!("bind mount {} -> {}: {e}", m.source.display(), m.target.display())))?;
+        mount(Some(&m.source), &target, None::<&str>, flags, None::<&str>).map_err(|e| {
+            SandboxError::Internal(format!(
+                "bind mount {} -> {}: {e}",
+                m.source.display(),
+                m.target.display()
+            ))
+        })?;
     }
 
     // Setup tmpfs mounts
@@ -511,20 +548,36 @@ fn setup_mount_namespace(
             MsFlags::empty(),
             Some(options.as_str()),
         )
-        .map_err(|e| SandboxError::Internal(format!("mount tmpfs at {} (size={}): {e}", path.display(), size)))?;
+        .map_err(|e| {
+            SandboxError::Internal(format!(
+                "mount tmpfs at {} (size={}): {e}",
+                path.display(),
+                size
+            ))
+        })?;
     }
 
     // Pivot root
     let old_root = rootfs.join("old_root");
     std::fs::create_dir_all(&old_root)?;
 
-    nix::unistd::pivot_root(rootfs, &old_root)
-        .map_err(|e| SandboxError::Internal(format!("pivot_root into sandbox at {}: {e}", rootfs.display())))?;
+    nix::unistd::pivot_root(rootfs, &old_root).map_err(|e| {
+        SandboxError::Internal(format!(
+            "pivot_root into sandbox at {}: {e}",
+            rootfs.display()
+        ))
+    })?;
     std::env::set_current_dir("/")?;
 
     // Unmount old root
-    mount::<str, str, str, str>(None, "/old_root", None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None)
-        .map_err(|e| SandboxError::Internal(format!("mark /old_root as private mount: {e}")))?;
+    mount::<str, str, str, str>(
+        None,
+        "/old_root",
+        None,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None,
+    )
+    .map_err(|e| SandboxError::Internal(format!("mark /old_root as private mount: {e}")))?;
     nix::mount::umount2("/old_root", nix::mount::MntFlags::MNT_DETACH)
         .map_err(|e| SandboxError::Internal(format!("detach /old_root mount: {e}")))?;
     std::fs::remove_dir("/old_root")?;

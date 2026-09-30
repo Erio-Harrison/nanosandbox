@@ -24,7 +24,12 @@ fn test_proxy_chunked_transfer() {
         .unwrap();
 
     // httpbin /stream/N returns N chunked JSON lines
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             response=$(curl -s --max-time 20 http://httpbin.org/stream/3 2>&1)
             lines=$(echo "$response" | wc -l)
@@ -36,7 +41,10 @@ fn test_proxy_chunked_transfer() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -70,7 +78,12 @@ fn test_proxy_keepalive() {
         .unwrap();
 
     // Make multiple requests - keep-alive should make this faster
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             start=$(date +%s%N 2>/dev/null || date +%s)
 
@@ -85,7 +98,10 @@ fn test_proxy_keepalive() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -95,7 +111,6 @@ fn test_proxy_keepalive() {
         assert!(result.exit_code == 0 || result.killed_by_timeout);
     }
 }
-
 
 /// Test: Proxy should handle large responses
 #[test]
@@ -109,7 +124,12 @@ fn test_proxy_large_response() {
         .unwrap();
 
     // httpbin /bytes/N returns N random bytes
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             # Request 100KB of data
             size=$(curl -s --max-time 30 http://httpbin.org/bytes/102400 2>/dev/null | wc -c)
@@ -121,7 +141,10 @@ fn test_proxy_large_response() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -145,7 +168,12 @@ fn test_proxy_connection_refused() {
         .unwrap();
 
     // Try to connect to a port that's likely not listening
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             response=$(curl -s --max-time 5 http://localhost:59999/ 2>&1)
             if echo "$response" | grep -qi "refused\|502\|failed\|connect"; then
@@ -156,15 +184,18 @@ fn test_proxy_connection_refused() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
     // Should get a proper error, not hang
     assert!(
-        output.contains("REFUSED_HANDLED") ||
-        output.contains("NO_CURL") ||
-        output.contains("UNEXPECTED"),
+        output.contains("REFUSED_HANDLED")
+            || output.contains("NO_CURL")
+            || output.contains("UNEXPECTED"),
         "Connection refused not handled: {}",
         output
     );
@@ -182,7 +213,12 @@ fn test_proxy_malformed_response() {
         .unwrap();
 
     // This just verifies the proxy doesn't crash on edge cases
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             # Request with bad path (404)
             curl -s --max-time 5 http://httpbin.org/status/404 2>&1
@@ -190,7 +226,10 @@ fn test_proxy_malformed_response() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Should complete without crash
     assert!(result.exit_code == 0 || result.stdout.contains("NO_CURL"));
@@ -209,10 +248,18 @@ fn test_proxy_unique_ports() {
             .build()
             .unwrap();
 
-        let result = sandbox.run("sh", &["-c", r#"
+        let result = sandbox
+            .run(
+                "sh",
+                &[
+                    "-c",
+                    r#"
             # Extract port from proxy URL
             echo "$http_proxy" | sed 's/.*://' | tr -d '/'
-        "#]).unwrap();
+        "#,
+                ],
+            )
+            .unwrap();
 
         let port = result.stdout.trim().to_string();
         if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
@@ -241,7 +288,12 @@ fn test_proxy_https_connect() {
         .build()
         .unwrap();
 
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             # HTTPS uses CONNECT method through proxy
             response=$(curl -s --max-time 20 https://httpbin.org/get 2>&1)
@@ -253,7 +305,10 @@ fn test_proxy_https_connect() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -278,7 +333,12 @@ fn test_proxy_concurrent_requests() {
         .build()
         .unwrap();
 
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if ! command -v curl >/dev/null 2>&1; then
             echo "NO_CURL"
             exit 0
@@ -298,7 +358,10 @@ fn test_proxy_concurrent_requests() {
             fi
         done
         echo "SUCCESS:$count"
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -310,7 +373,10 @@ fn test_proxy_concurrent_requests() {
         let count: i32 = count_str.parse().unwrap_or(0);
         // At least some should succeed (may fail due to network)
         if count < 3 {
-            println!("Note: Only {} of 5 concurrent requests succeeded (network issues?)", count);
+            println!(
+                "Note: Only {} of 5 concurrent requests succeeded (network issues?)",
+                count
+            );
         }
         // Relaxed assertion - network tests are flaky
         assert!(

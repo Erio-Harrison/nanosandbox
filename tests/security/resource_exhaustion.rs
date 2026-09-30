@@ -15,7 +15,7 @@ fn test_fork_bomb_contained() {
         .unwrap();
 
     let start = std::time::Instant::now();
-    let result = sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
+    sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
     let elapsed = start.elapsed();
 
     // Should not hang - contained by pids limit
@@ -28,26 +28,29 @@ fn test_fork_bomb_contained() {
 fn test_memory_bomb_contained() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .memory_limit(64 * 1024 * 1024)  // 64MB
+        .memory_limit(64 * 1024 * 1024) // 64MB
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
 
-    let result = sandbox.run("python3", &["-c", r#"
+    let result = sandbox.run(
+        "python3",
+        &[
+            "-c",
+            r#"
 x = []
 try:
     while True:
         x.append('A' * 1024 * 1024)
 except MemoryError:
     print('memory error')
-"#]);
+"#,
+        ],
+    );
 
-    match result {
-        Ok(r) => {
-            // Should be killed by OOM or memory error
-            assert!(r.killed_by_oom || r.exit_code != 0 || r.stdout.contains("memory error"));
-        }
-        Err(_) => {} // Expected - command may fail
+    // Should be killed by OOM or memory error (an Err is also acceptable)
+    if let Ok(r) = result {
+        assert!(r.killed_by_oom || r.exit_code != 0 || r.stdout.contains("memory error"));
     }
 }
 
@@ -55,16 +58,24 @@ except MemoryError:
 #[test]
 fn test_cpu_bomb_contained() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .wall_time_limit(Duration::from_secs(2))
         .build()
         .unwrap();
 
     #[cfg(not(target_os = "windows"))]
-    let result = sandbox.run("sh", &["-c", "while true; do :; done"]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "while true; do :; done"])
+        .unwrap();
 
     #[cfg(target_os = "windows")]
-    let result = sandbox.run("cmd", &["/c", "for /L %i in (1,0,2) do @echo off"]).unwrap();
+    let result = sandbox
+        .run("cmd", &["/c", "for /L %i in (1,0,2) do @echo off"])
+        .unwrap();
 
     assert!(result.killed_by_timeout);
 }
@@ -75,14 +86,17 @@ fn test_cpu_bomb_contained() {
 fn test_disk_bomb_contained_tmpfs() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .tmpfs("/tmp", 10 * 1024 * 1024)  // 10MB tmpfs
+        .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB tmpfs
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
 
-    let result = sandbox.run("sh", &["-c",
-        "dd if=/dev/zero of=/tmp/large bs=1M count=100 2>&1"
-    ]).unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", "dd if=/dev/zero of=/tmp/large bs=1M count=100 2>&1"],
+        )
+        .unwrap();
 
     // Should fail when tmpfs is full
     assert!(result.exit_code != 0 || result.stderr.contains("No space"));
@@ -100,9 +114,12 @@ fn test_subprocess_bomb_contained() {
         .unwrap();
 
     // Try to spawn many processes
-    let result = sandbox.run("sh", &["-c",
-        "for i in $(seq 1 100); do sleep 100 & done; wait"
-    ]).unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", "for i in $(seq 1 100); do sleep 100 & done; wait"],
+        )
+        .unwrap();
 
     // Should be contained by pids limit or wall time
     assert!(result.duration < Duration::from_secs(6));
@@ -119,7 +136,11 @@ fn test_fd_bomb_contained() {
         .unwrap();
 
     // Try to open many file descriptors
-    let result = sandbox.run("python3", &["-c", r#"
+    let result = sandbox.run(
+        "python3",
+        &[
+            "-c",
+            r#"
 import os
 fds = []
 try:
@@ -128,12 +149,13 @@ try:
 except OSError:
     print('fd limit reached')
 print(f'opened {len(fds)} fds')
-"#]);
+"#,
+        ],
+    );
 
-    // Should complete (may hit fd limit)
-    match result {
-        Ok(r) => assert!(r.exit_code == 0 || r.stdout.contains("fd limit")),
-        Err(_) => {} // Python not available
+    // Should complete (may hit fd limit); an Err means python3 isn't available
+    if let Ok(r) = result {
+        assert!(r.exit_code == 0 || r.stdout.contains("fd limit"));
     }
 }
 
@@ -143,13 +165,18 @@ print(f'opened {len(fds)} fds')
 fn test_directory_bomb_contained() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .tmpfs("/tmp", 10 * 1024 * 1024)  // 10MB
+        .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
 
     // Try to create deep directory structure
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
 d=/tmp/bomb
 mkdir -p $d
 for i in $(seq 1 1000); do
@@ -157,7 +184,10 @@ for i in $(seq 1 1000); do
     mkdir -p $d 2>/dev/null || break
 done
 echo done
-"#]).unwrap();
+"#,
+            ],
+        )
+        .unwrap();
 
     // Should complete (may hit inode or space limit)
     assert!(result.duration < Duration::from_secs(11));

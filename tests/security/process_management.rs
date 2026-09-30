@@ -61,25 +61,21 @@ fn test_process_group_killing() {
         .unwrap();
 
     // Start a script that spawns child processes
-    let result = sandbox.run("sh", &["-c",
-        "sleep 7777 & sleep 7777 & sleep 7777"
-    ]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "sleep 7777 & sleep 7777 & sleep 7777"])
+        .unwrap();
 
     assert!(
         result.killed_by_timeout,
         "Expected timeout, got exit_code={}, duration={:?}, stderr={}",
-        result.exit_code,
-        result.duration,
-        result.stderr
+        result.exit_code, result.duration, result.stderr
     );
 
     // Wait a moment for process cleanup
     std::thread::sleep(Duration::from_millis(500));
 
     // Check that no orphan sleep 7777 processes remain
-    let orphans = Command::new("pgrep")
-        .args(&["-f", "sleep 7777"])
-        .output();
+    let orphans = Command::new("pgrep").args(["-f", "sleep 7777"]).output();
 
     if let Ok(output) = orphans {
         let orphan_pids: Vec<_> = String::from_utf8_lossy(&output.stdout)
@@ -162,24 +158,20 @@ fn test_deep_process_tree_killed() {
 
     // Create a deep process tree with unique sleep time
     // Use proper shell syntax: command1 & command2
-    let result = sandbox.run("sh", &["-c",
-        "sh -c 'sh -c \"sleep 8888\" &' & sleep 8888"
-    ]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "sh -c 'sh -c \"sleep 8888\" &' & sleep 8888"])
+        .unwrap();
 
     assert!(
         result.killed_by_timeout,
         "Expected timeout, got exit_code={}, duration={:?}, stderr={}",
-        result.exit_code,
-        result.duration,
-        result.stderr
+        result.exit_code, result.duration, result.stderr
     );
 
     // Verify no deep children survive
     std::thread::sleep(Duration::from_millis(500));
 
-    let orphans = Command::new("pgrep")
-        .args(&["-f", "sleep 8888"])
-        .output();
+    let orphans = Command::new("pgrep").args(["-f", "sleep 8888"]).output();
 
     if let Ok(output) = orphans {
         assert!(
@@ -195,7 +187,7 @@ fn test_deep_process_tree_killed() {
 #[cfg(unix)]
 fn count_zombie_processes() -> usize {
     let output = Command::new("ps")
-        .args(&["aux"])
+        .args(["aux"])
         .output()
         .expect("Failed to run ps");
 

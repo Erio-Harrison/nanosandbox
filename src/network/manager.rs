@@ -45,7 +45,10 @@ impl ProxiedNetwork {
         let thread = std::thread::Builder::new()
             .name("nanosandbox-proxy".into())
             .spawn(move || {
-                let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                let rt = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
                     Ok(rt) => rt,
                     Err(e) => {
                         tracing::error!("Failed to create proxy runtime: {e}");
@@ -73,7 +76,9 @@ impl ProxiedNetwork {
             Err(_) => {
                 let _ = shutdown_tx.send(true);
                 let _ = thread.join();
-                return Err(SandboxError::Internal("proxy did not start within 3s".into()));
+                return Err(SandboxError::Internal(
+                    "proxy did not start within 3s".into(),
+                ));
             }
         };
 

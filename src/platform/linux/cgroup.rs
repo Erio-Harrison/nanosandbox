@@ -31,7 +31,9 @@ fn process_nonce() -> u32 {
     static NONCE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *NONCE.get_or_init(|| {
         use std::hash::{BuildHasher, Hasher};
-        std::collections::hash_map::RandomState::new().build_hasher().finish() as u32
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish() as u32
     })
 }
 
@@ -48,7 +50,6 @@ pub fn next_leaf_id() -> String {
 /// Memory statistics from cgroup
 #[derive(Debug, Clone)]
 pub struct MemoryStats {
-    pub current: u64,
     pub peak: u64,
 }
 
@@ -56,8 +57,6 @@ pub struct MemoryStats {
 #[derive(Debug, Clone)]
 pub struct CpuStats {
     pub total_usec: u64,
-    pub user_usec: u64,
-    pub system_usec: u64,
 }
 
 /// Memory events from cgroup (for OOM detection)
@@ -153,19 +152,13 @@ impl CgroupManager {
 
     /// Get memory statistics
     pub fn get_memory_stats(&self) -> Result<MemoryStats> {
-        let current = fs::read_to_string(self.path.join("memory.current"))
-            .map_err(|e| SandboxError::Internal(format!("Failed to read memory.current: {}", e)))?
-            .trim()
-            .parse::<u64>()
-            .unwrap_or(0);
-
         let peak = fs::read_to_string(self.path.join("memory.peak"))
             .map_err(|e| SandboxError::Internal(format!("Failed to read memory.peak: {}", e)))?
             .trim()
             .parse::<u64>()
             .unwrap_or(0);
 
-        Ok(MemoryStats { current, peak })
+        Ok(MemoryStats { peak })
     }
 
     /// Get CPU statistics
@@ -173,27 +166,13 @@ impl CgroupManager {
         let stat = fs::read_to_string(self.path.join("cpu.stat"))
             .map_err(|e| SandboxError::Internal(format!("Failed to read cpu.stat: {}", e)))?;
 
-        let mut usage_usec = 0u64;
-        let mut user_usec = 0u64;
-        let mut system_usec = 0u64;
+        let total_usec = stat
+            .lines()
+            .find_map(|line| line.strip_prefix("usage_usec "))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
 
-        for line in stat.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                match parts[0] {
-                    "usage_usec" => usage_usec = parts[1].parse().unwrap_or(0),
-                    "user_usec" => user_usec = parts[1].parse().unwrap_or(0),
-                    "system_usec" => system_usec = parts[1].parse().unwrap_or(0),
-                    _ => {}
-                }
-            }
-        }
-
-        Ok(CpuStats {
-            total_usec: usage_usec,
-            user_usec,
-            system_usec,
-        })
+        Ok(CpuStats { total_usec })
     }
 
     /// Get memory events (for OOM detection)
@@ -257,11 +236,6 @@ impl CgroupManager {
         }
 
         let _ = fs::write(&freeze_path, "0");
-    }
-
-    /// Get the cgroup path
-    pub fn path(&self) -> &PathBuf {
-        &self.path
     }
 
     /// Kills all processes and removes the cgroup directory.
@@ -394,7 +368,9 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     let usable = governing.as_ref().is_some_and(|unit| {
         current_unit_is_exclusively_ours(unit)
             && current_unit_delegated_controllers(unit).is_some_and(|delegated| {
-                ALL_CONTROLLERS.iter().all(|c| delegated.iter().any(|d| d == c))
+                ALL_CONTROLLERS
+                    .iter()
+                    .all(|c| delegated.iter().any(|d| d == c))
             })
     });
 
@@ -416,8 +392,11 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     // don't collide. Swept periodically from ensure_base, not here: this
     // runs on every call, not just the first, so a stale sibling doesn't
     // wait for this process to restart before it's noticed.
-    let supervisor =
-        own.join(format!("nanosandbox-supervisor-{}-{:08x}", std::process::id(), process_nonce()));
+    let supervisor = own.join(format!(
+        "nanosandbox-supervisor-{}-{:08x}",
+        std::process::id(),
+        process_nonce()
+    ));
     fs::create_dir_all(&supervisor)
         .map_err(|e| format!("cannot create {}: {e}", supervisor.display()))?;
     if !safe_to_build_under(&supervisor) {
@@ -427,8 +406,11 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
             supervisor.display()
         ));
     }
-    fs::write(supervisor.join("cgroup.procs"), std::process::id().to_string())
-        .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
+    fs::write(
+        supervisor.join("cgroup.procs"),
+        std::process::id().to_string(),
+    )
+    .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
 
     Ok(own)
 }
@@ -460,8 +442,7 @@ fn governing_unit() -> Option<GoverningUnit> {
         "org.freedesktop.systemd1.Manager",
     )
     .ok()?;
-    let object_path: OwnedObjectPath =
-        manager.call("GetUnitByPID", &(std::process::id(),)).ok()?;
+    let object_path: OwnedObjectPath = manager.call("GetUnitByPID", &(std::process::id(),)).ok()?;
 
     let props = Proxy::new(
         &conn,
@@ -472,7 +453,9 @@ fn governing_unit() -> Option<GoverningUnit> {
     .ok()?;
     // `Id` (e.g. "foo.scope") is on the generic `Unit` interface; its
     // suffix picks the interface `ControlGroup` actually lives on below.
-    let id: OwnedValue = props.call("Get", &("org.freedesktop.systemd1.Unit", "Id")).ok()?;
+    let id: OwnedValue = props
+        .call("Get", &("org.freedesktop.systemd1.Unit", "Id"))
+        .ok()?;
     let id = String::try_from(id).ok()?;
     let interface = if id.ends_with(".scope") {
         "org.freedesktop.systemd1.Scope"
@@ -489,7 +472,11 @@ fn governing_unit() -> Option<GoverningUnit> {
     let mut root = PathBuf::from(CGROUP_ROOT);
     root.extend(control_group.split('/').filter(|s| !s.is_empty()));
 
-    Some(GoverningUnit { root, object_path, interface })
+    Some(GoverningUnit {
+        root,
+        object_path,
+        interface,
+    })
 }
 
 /// Required before `subtree_control` can be enabled (no-internal-process
@@ -526,11 +513,17 @@ fn sweep_stale_leaves(
     pid_of: impl Fn(&str) -> Option<&str>,
     owner_is_gone: impl Fn(u32) -> bool,
 ) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid_str) = name.to_str().and_then(&pid_of) else { continue };
-        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        let Some(pid_str) = name.to_str().and_then(&pid_of) else {
+            continue;
+        };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
         if pid == std::process::id() || !owner_is_gone(pid) {
             continue;
         }
@@ -545,7 +538,9 @@ fn sweep_stale_leaves(
 /// systemd's own `CollectMode=inactive-or-failed` notices and removes the
 /// unit — its cgroup is systemd's to manage, not ours to `rmdir`.
 fn sweep_stale_scopes(target: &Path) {
-    let Ok(entries) = fs::read_dir(target) else { return };
+    let Ok(entries) = fs::read_dir(target) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid_str) = name
@@ -556,7 +551,9 @@ fn sweep_stale_scopes(target: &Path) {
         else {
             continue;
         };
-        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
         if pid == std::process::id() || !owner_is_gone(pid) {
             continue;
         }
@@ -593,7 +590,10 @@ fn sweep_scope_neighbors_if_due(own: &Path) {
     sweep_stale_scopes(&user_app_slice(CGROUP_ROOT, uid));
     sweep_stale_leaves(
         own,
-        |name| name.strip_prefix("nanosandbox-supervisor-").and_then(|s| s.split('-').next()),
+        |name| {
+            name.strip_prefix("nanosandbox-supervisor-")
+                .and_then(|s| s.split('-').next())
+        },
         owner_is_gone,
     );
 }
@@ -674,7 +674,9 @@ fn owner_is_gone(pid: u32) -> bool {
 /// to ever match its pid against again — without this, its lock file
 /// would otherwise never be revisited or removed by anything.
 fn sweep_stale_locks(dir: &Path) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid_str) = name
@@ -684,7 +686,9 @@ fn sweep_stale_locks(dir: &Path) {
         else {
             continue;
         };
-        let Ok(pid) = pid_str.parse::<u32>() else { continue };
+        let Ok(pid) = pid_str.parse::<u32>() else {
+            continue;
+        };
         if pid != std::process::id() && owner_is_gone_in(dir, pid) {
             let _ = fs::remove_file(entry.path());
         }
@@ -799,7 +803,9 @@ fn relocate_into_delegated_scope(preferred_slice: Option<&str>) -> Result<()> {
         .map_err(SandboxError::CgroupCreation)
 }
 
-fn try_relocate_into_delegated_scope(preferred_slice: Option<&str>) -> std::result::Result<(), String> {
+fn try_relocate_into_delegated_scope(
+    preferred_slice: Option<&str>,
+) -> std::result::Result<(), String> {
     use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::blocking::Proxy;
     use zbus::zvariant::{OwnedObjectPath, Value};
@@ -857,8 +863,9 @@ fn try_relocate_into_delegated_scope(preferred_slice: Option<&str>) -> std::resu
 }
 
 fn read_controller_list(path: &Path) -> Result<Vec<String>> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| SandboxError::CgroupCreation(format!("cannot read {}: {e}", path.display())))?;
+    let content = fs::read_to_string(path).map_err(|e| {
+        SandboxError::CgroupCreation(format!("cannot read {}: {e}", path.display()))
+    })?;
     Ok(content.split_whitespace().map(str::to_string).collect())
 }
 
@@ -963,9 +970,7 @@ mod tests {
         let path = user_app_slice("/sys/fs/cgroup", 1000);
         assert_eq!(
             path,
-            PathBuf::from(
-                "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice"
-            )
+            PathBuf::from("/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice")
         );
     }
 
@@ -982,10 +987,16 @@ mod tests {
         let locks = tempfile::tempdir().unwrap();
         let pid = 424_242;
 
-        assert!(!owner_is_gone_in(locks.path(), pid), "no lock file at all -> unknown, not gone");
+        assert!(
+            !owner_is_gone_in(locks.path(), pid),
+            "no lock file at all -> unknown, not gone"
+        );
 
         let held = lock_file(locks.path(), pid).unwrap();
-        assert!(!owner_is_gone_in(locks.path(), pid), "lock held -> not gone");
+        assert!(
+            !owner_is_gone_in(locks.path(), pid),
+            "lock held -> not gone"
+        );
 
         drop(held);
         assert!(owner_is_gone_in(locks.path(), pid), "lock released -> gone");
@@ -1001,8 +1012,14 @@ mod tests {
 
         sweep_stale_locks(locks.path());
 
-        assert!(locks.path().join(format!("nanosandbox-{alive_pid}.lock")).exists());
-        assert!(!locks.path().join(format!("nanosandbox-{dead_pid}.lock")).exists());
+        assert!(locks
+            .path()
+            .join(format!("nanosandbox-{alive_pid}.lock"))
+            .exists());
+        assert!(!locks
+            .path()
+            .join(format!("nanosandbox-{dead_pid}.lock"))
+            .exists());
     }
 
     #[test]
@@ -1014,12 +1031,26 @@ mod tests {
         let _held = lock_file(locks.path(), alive_pid).unwrap();
         drop(lock_file(locks.path(), dead_pid).unwrap()); // acquired then released
 
-        let our_leaf = dir.path().join(format!("nanosandbox-supervisor-{}", std::process::id()));
-        let alive_leaf = dir.path().join(format!("nanosandbox-supervisor-{alive_pid}"));
-        let dead_leaf = dir.path().join(format!("nanosandbox-supervisor-{dead_pid}"));
-        let unknown_leaf = dir.path().join(format!("nanosandbox-supervisor-{unknown_pid}"));
+        let our_leaf = dir
+            .path()
+            .join(format!("nanosandbox-supervisor-{}", std::process::id()));
+        let alive_leaf = dir
+            .path()
+            .join(format!("nanosandbox-supervisor-{alive_pid}"));
+        let dead_leaf = dir
+            .path()
+            .join(format!("nanosandbox-supervisor-{dead_pid}"));
+        let unknown_leaf = dir
+            .path()
+            .join(format!("nanosandbox-supervisor-{unknown_pid}"));
         let unrelated = dir.path().join("something-else");
-        for p in [&our_leaf, &alive_leaf, &dead_leaf, &unknown_leaf, &unrelated] {
+        for p in [
+            &our_leaf,
+            &alive_leaf,
+            &dead_leaf,
+            &unknown_leaf,
+            &unrelated,
+        ] {
             fs::create_dir(p).unwrap();
         }
         make_readonly(&dead_leaf); // no real cgroup.kill here to write instead
@@ -1031,10 +1062,19 @@ mod tests {
         );
 
         assert!(our_leaf.exists(), "must not remove our own leaf");
-        assert!(alive_leaf.exists(), "must not remove a leaf whose owner still holds its lock");
-        assert!(unknown_leaf.exists(), "no lock file at all must not be removed");
+        assert!(
+            alive_leaf.exists(),
+            "must not remove a leaf whose owner still holds its lock"
+        );
+        assert!(
+            unknown_leaf.exists(),
+            "no lock file at all must not be removed"
+        );
         assert!(unrelated.exists(), "must not touch unrelated entries");
-        assert!(!dead_leaf.exists(), "must remove a leaf whose owner's lock is released");
+        assert!(
+            !dead_leaf.exists(),
+            "must remove a leaf whose owner's lock is released"
+        );
     }
 
     #[test]

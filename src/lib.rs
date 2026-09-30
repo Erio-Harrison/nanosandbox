@@ -27,18 +27,18 @@
 //! println!("{}", result.stdout);
 //! ```
 
-pub mod error;
-pub(crate) mod platform;
-pub mod sandbox;
 pub mod builder;
-pub mod result;
+pub mod error;
 pub mod network;
+pub(crate) mod platform;
+pub mod result;
+pub mod sandbox;
 
 // Re-exports
+pub use builder::{NetworkMode, Permission, SandboxBuilder, SeccompProfile};
 pub use error::{Result, SandboxError};
-pub use sandbox::Sandbox;
-pub use builder::{SandboxBuilder, Permission, NetworkMode, SeccompProfile};
 pub use result::ExecutionResult;
+pub use sandbox::Sandbox;
 
 /// 1 KB in bytes
 pub const KB: u64 = 1024;

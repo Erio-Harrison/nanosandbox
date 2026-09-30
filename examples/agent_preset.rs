@@ -87,7 +87,10 @@ print("Task completed successfully!")
     // Example: Execute shell commands (common for agents)
     println!("\n--- Shell command example ---");
     let result = sandbox
-        .run("sh", &["-c", "echo 'Files in workspace:' && ls -la /workspace"])
+        .run(
+            "sh",
+            &["-c", "echo 'Files in workspace:' && ls -la /workspace"],
+        )
         .unwrap();
     println!("{}", result.stdout);
 

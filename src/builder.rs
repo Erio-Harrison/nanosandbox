@@ -24,9 +24,7 @@ pub enum NetworkMode {
     /// Use host network (not recommended, breaks isolation)
     Host,
     /// Network access through proxy with domain whitelist
-    Proxied {
-        allowed_domains: Vec<String>,
-    },
+    Proxied { allowed_domains: Vec<String> },
 }
 
 /// Seccomp security profile (syscall filtering)
@@ -328,7 +326,7 @@ impl SandboxBuilder {
             // Check sandbox-exec availability
             if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
                 return Err(SandboxError::Config(
-                    "sandbox-exec not found at /usr/bin/sandbox-exec".into()
+                    "sandbox-exec not found at /usr/bin/sandbox-exec".into(),
                 ));
             }
 
@@ -373,9 +371,7 @@ mod tests {
 
     #[test]
     fn test_builder_env() {
-        let builder = SandboxBuilder::new()
-            .env("FOO", "bar")
-            .env("BAZ", "qux");
+        let builder = SandboxBuilder::new().env("FOO", "bar").env("BAZ", "qux");
         assert_eq!(builder.config.env.get("FOO"), Some(&"bar".to_string()));
         assert_eq!(builder.config.env.get("BAZ"), Some(&"qux".to_string()));
     }
@@ -396,12 +392,18 @@ mod tests {
         assert!(matches!(builder.config.network_mode, NetworkMode::Host));
 
         let builder = SandboxBuilder::new().allow_network(&["example.com"]);
-        assert!(matches!(builder.config.network_mode, NetworkMode::Proxied { .. }));
+        assert!(matches!(
+            builder.config.network_mode,
+            NetworkMode::Proxied { .. }
+        ));
     }
 
     #[test]
     fn test_seccomp_profile() {
         let builder = SandboxBuilder::new().seccomp_profile(SeccompProfile::Strict);
-        assert!(matches!(builder.config.seccomp_profile, SeccompProfile::Strict));
+        assert!(matches!(
+            builder.config.seccomp_profile,
+            SeccompProfile::Strict
+        ));
     }
 }

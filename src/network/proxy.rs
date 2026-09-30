@@ -169,8 +169,10 @@ impl HttpProxy {
         // Connect to target with timeout
         let remote = match tokio::time::timeout(
             CONNECT_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", host, port))
-        ).await {
+            TcpStream::connect(format!("{}:{}", host, port)),
+        )
+        .await
+        {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 tracing::debug!("Failed to connect to {}:{}: {}", host, port, e);
@@ -194,23 +196,21 @@ impl HttpProxy {
         let client_to_remote = tokio::io::copy(&mut cr, &mut rw);
         let remote_to_client = tokio::io::copy(&mut rr, &mut cw);
 
-        let transfer_result = tokio::time::timeout(
-            TRANSFER_TIMEOUT,
-            async {
-                tokio::select! {
-                    r1 = client_to_remote => {
-                        if let Err(e) = r1 {
-                            tracing::debug!("Client to remote error: {}", e);
-                        }
+        let transfer_result = tokio::time::timeout(TRANSFER_TIMEOUT, async {
+            tokio::select! {
+                r1 = client_to_remote => {
+                    if let Err(e) = r1 {
+                        tracing::debug!("Client to remote error: {}", e);
                     }
-                    r2 = remote_to_client => {
-                        if let Err(e) = r2 {
-                            tracing::debug!("Remote to client error: {}", e);
-                        }
+                }
+                r2 = remote_to_client => {
+                    if let Err(e) = r2 {
+                        tracing::debug!("Remote to client error: {}", e);
                     }
                 }
             }
-        ).await;
+        })
+        .await;
 
         if transfer_result.is_err() {
             tracing::debug!("Transfer timeout for CONNECT tunnel");
@@ -284,17 +284,31 @@ impl HttpProxy {
         let mut headers = rewritten_first_line;
         // Skip the first line from all_headers, append the rest
         if let Some(rest) = all_headers.find("\r\n").or(all_headers.find("\n")) {
-            headers.push_str(&all_headers[rest + if all_headers[rest..].starts_with("\r\n") { 2 } else { 1 }..]);
+            headers.push_str(
+                &all_headers[rest
+                    + if all_headers[rest..].starts_with("\r\n") {
+                        2
+                    } else {
+                        1
+                    }..],
+            );
         }
 
         // Connect to target with timeout
         let mut remote = match tokio::time::timeout(
             CONNECT_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", target_host, target_port))
-        ).await {
+            TcpStream::connect(format!("{}:{}", target_host, target_port)),
+        )
+        .await
+        {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                tracing::debug!("Failed to connect to {}:{}: {}", target_host, target_port, e);
+                tracing::debug!(
+                    "Failed to connect to {}:{}: {}",
+                    target_host,
+                    target_port,
+                    e
+                );
                 return Self::send_error(&mut client, 502, "Bad Gateway").await;
             }
             Err(_) => {
@@ -308,10 +322,8 @@ impl HttpProxy {
 
         // For HTTP: wait for response to complete (server closes connection)
         // Unlike CONNECT tunnels, HTTP is request-response, not bidirectional
-        let transfer_result = tokio::time::timeout(
-            TRANSFER_TIMEOUT,
-            tokio::io::copy(&mut remote, &mut client)
-        ).await;
+        let transfer_result =
+            tokio::time::timeout(TRANSFER_TIMEOUT, tokio::io::copy(&mut remote, &mut client)).await;
 
         match transfer_result {
             Ok(Ok(bytes)) => {

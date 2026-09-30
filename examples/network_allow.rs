@@ -60,18 +60,21 @@ fn main() {
 
     // This should work - httpbin.org is whitelisted
     println!("\n   Testing httpbin.org (whitelisted):");
-    let result = sandbox
-        .run(
-            "curl",
-            &["-s", "--connect-timeout", "5", "http://httpbin.org/ip"],
-        );
+    let result = sandbox.run(
+        "curl",
+        &["-s", "--connect-timeout", "5", "http://httpbin.org/ip"],
+    );
 
     match result {
         Ok(r) if r.success() && !r.stdout.is_empty() => {
             println!("   [ALLOWED] Response: {}", r.stdout.trim());
         }
         Ok(r) => {
-            println!("   [BLOCKED/ERROR] exit={}, stderr={}", r.exit_code, r.stderr.trim());
+            println!(
+                "   [BLOCKED/ERROR] exit={}, stderr={}",
+                r.exit_code,
+                r.stderr.trim()
+            );
         }
         Err(e) => {
             println!("   [ERROR] {}", e);
@@ -82,12 +85,7 @@ fn main() {
     println!("\n   Testing api.github.com (matches *.github.com):");
     let result = sandbox.run(
         "curl",
-        &[
-            "-s",
-            "--connect-timeout",
-            "5",
-            "https://api.github.com/zen",
-        ],
+        &["-s", "--connect-timeout", "5", "https://api.github.com/zen"],
     );
 
     match result {
@@ -124,7 +122,10 @@ fn main() {
             println!("   [BLOCKED] Request failed (expected)");
         }
         Ok(r) => {
-            println!("   [?] Response: {}", r.stdout.chars().take(100).collect::<String>());
+            println!(
+                "   [?] Response: {}",
+                r.stdout.chars().take(100).collect::<String>()
+            );
         }
         Err(e) => {
             println!("   [ERROR] {}", e);

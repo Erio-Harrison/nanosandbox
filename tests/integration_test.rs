@@ -20,9 +20,15 @@ fn test_simple_command() {
         .build()
         .expect("Failed to build sandbox");
 
-    let result = sandbox.run("echo", &["hello", "world"]).expect("Failed to run command");
+    let result = sandbox
+        .run("echo", &["hello", "world"])
+        .expect("Failed to run command");
 
-    assert!(result.success(), "Command failed: {:?}", result.failure_reason());
+    assert!(
+        result.success(),
+        "Command failed: {:?}",
+        result.failure_reason()
+    );
     assert_eq!(result.stdout.trim(), "hello world");
     // Not asserted empty outright: on a kernel where AppArmor confines a
     // freshly-created user namespace to its "unprivileged_userns" profile
@@ -101,7 +107,7 @@ fn test_timeout() {
     assert!(!result.success());
     assert!(result.killed_by_timeout);
     assert!(result.duration >= Duration::from_millis(450)); // Allow some tolerance
-    assert!(result.duration < Duration::from_secs(2));      // Should not take full 10s
+    assert!(result.duration < Duration::from_secs(2)); // Should not take full 10s
 }
 
 #[test]
@@ -201,14 +207,21 @@ fn test_macos_sandbox_restrictions() {
         .expect("Failed to build sandbox");
 
     // Try to access a network resource - should fail or timeout
-    let result = sandbox.run("curl", &["-s", "--connect-timeout", "2", "https://example.com"]);
+    let result = sandbox.run(
+        "curl",
+        &["-s", "--connect-timeout", "2", "https://example.com"],
+    );
 
     // The command should either fail or return an error
     match result {
         Ok(r) => {
             // If curl runs, it should fail due to network restrictions
-            println!("curl result: exit_code={}, stdout={}, stderr={}",
-                     r.exit_code, r.stdout.len(), r.stderr);
+            println!(
+                "curl result: exit_code={}, stdout={}, stderr={}",
+                r.exit_code,
+                r.stdout.len(),
+                r.stderr
+            );
         }
         Err(e) => {
             // Expected - curl might not be able to run or network is blocked
@@ -234,8 +247,12 @@ fn test_proxied_network_setup() {
     // Verify env vars are correctly set
     let env_vars = proxy.env_vars();
     assert_eq!(env_vars.len(), 4);
-    assert!(env_vars.iter().any(|(k, v)| k == "HTTP_PROXY" && v.contains(&proxy.port().to_string())));
-    assert!(env_vars.iter().any(|(k, v)| k == "HTTPS_PROXY" && v.contains(&proxy.port().to_string())));
+    assert!(env_vars
+        .iter()
+        .any(|(k, v)| k == "HTTP_PROXY" && v.contains(&proxy.port().to_string())));
+    assert!(env_vars
+        .iter()
+        .any(|(k, v)| k == "HTTPS_PROXY" && v.contains(&proxy.port().to_string())));
 
     // Cleanup
     proxy.shutdown();
@@ -251,7 +268,8 @@ fn test_sandbox_with_proxied_network() {
         .expect("Failed to build sandbox");
 
     // Run a simple command to verify sandbox works with proxy
-    let result = sandbox.run("echo", &["proxy test"])
+    let result = sandbox
+        .run("echo", &["proxy test"])
         .expect("Failed to run command");
 
     assert!(result.success());
@@ -267,11 +285,15 @@ fn test_proxy_env_vars_in_sandbox() {
         .expect("Failed to build sandbox");
 
     // Verify proxy env vars are set inside sandbox
-    let result = sandbox.run("sh", &["-c", "echo $HTTP_PROXY"])
+    let result = sandbox
+        .run("sh", &["-c", "echo $HTTP_PROXY"])
         .expect("Failed to run command");
 
     assert!(result.success());
     // The proxy URL should be set
-    assert!(result.stdout.contains("127.0.0.1"), "HTTP_PROXY should be set: {}", result.stdout);
+    assert!(
+        result.stdout.contains("127.0.0.1"),
+        "HTTP_PROXY should be set: {}",
+        result.stdout
+    );
 }
-

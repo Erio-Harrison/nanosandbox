@@ -26,7 +26,10 @@ fn test_macos_memory_limit_enforced() {
     let result = sandbox
         .run("perl", &["-e", "$x = 'a' x 200_000_000; sleep 5"])
         .unwrap();
-    assert!(result.killed_by_oom, "200MB allocation should exceed the 50MB limit");
+    assert!(
+        result.killed_by_oom,
+        "200MB allocation should exceed the 50MB limit"
+    );
     assert!(!result.success());
     assert!(!result.killed_by_timeout);
 }
@@ -45,7 +48,10 @@ fn test_macos_memory_limit_counts_escaped_child() {
     // A variable length keeps perl from folding the allocation into the parent at compile time.
     let script = "use POSIX; if (fork() == 0) { POSIX::setsid(); $n = 200_000_000; $x = 'a' x $n; sleep 5; exit 0 } sleep 6;";
     let result = sandbox.run("perl", &["-e", script]).unwrap();
-    assert!(result.killed_by_oom, "escaped child's memory should be counted");
+    assert!(
+        result.killed_by_oom,
+        "escaped child's memory should be counted"
+    );
     assert!(result.duration < Duration::from_secs(4));
 }
 
@@ -81,7 +87,9 @@ fn test_macos_timeout_kills_escaped_child() {
         .unwrap()
         .success();
     if alive {
-        let _ = std::process::Command::new("kill").args(["-9", pid]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", pid])
+            .status();
     }
     let _ = std::fs::remove_file(&pid_file);
     assert!(!alive, "escaped child survived the timeout kill");
@@ -149,11 +157,7 @@ fn test_max_open_files_enforced() {
     // Should show our limit
     if output != "unlimited" {
         let limit: u32 = output.parse().unwrap_or(0);
-        assert!(
-            limit <= 20,
-            "RLIMIT_NOFILE should be 20, got {}",
-            limit
-        );
+        assert!(limit <= 20, "RLIMIT_NOFILE should be 20, got {}", limit);
     }
 }
 
@@ -165,7 +169,6 @@ fn test_max_open_files_enforced() {
 #[cfg(target_os = "linux")]
 fn test_linux_cgroup_cleanup() {
     use std::fs;
-    use std::path::Path;
 
     let cgroup_base = "/sys/fs/cgroup";
 
@@ -223,13 +226,21 @@ fn test_linux_oom_detection() {
         .unwrap();
 
     // Force an OOM condition
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Allocate memory until we OOM
         data=""
         while true; do
             data="${data}$(head -c 1048576 /dev/zero | tr '\0' 'x')"
         done
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Should be killed (by OOM or timeout)
     assert!(
@@ -243,8 +254,7 @@ fn test_linux_oom_detection() {
         assert!(
             result.killed_by_oom,
             "OOM kill not detected. Exit code: {}, signal: {:?}",
-            result.exit_code,
-            result.signal
+            result.exit_code, result.signal
         );
     }
 }
@@ -264,11 +274,19 @@ fn test_peak_memory_collection() {
         .unwrap();
 
     // Allocate known amount of memory
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Allocate ~10MB
         dd if=/dev/zero bs=1M count=10 2>/dev/null | cat > /dev/null
         echo "done"
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     assert_eq!(result.exit_code, 0);
 
@@ -302,14 +320,22 @@ fn test_cpu_time_collection() {
         .unwrap();
 
     // Do some CPU work
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Burn some CPU
         i=0
         while [ $i -lt 100000 ]; do
             i=$((i + 1))
         done
         echo "done"
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     assert_eq!(result.exit_code, 0);
 

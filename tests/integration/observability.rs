@@ -11,10 +11,7 @@ use std::time::Duration;
 /// Test: ExecutionResult should contain timing information
 #[test]
 fn test_result_contains_timing() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("sleep", &["0.1"]).unwrap();
 
@@ -34,15 +31,9 @@ fn test_result_contains_timing() {
 /// Test: Sandbox should have unique, traceable ID
 #[test]
 fn test_sandbox_has_traceable_id() {
-    let sandbox1 = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox1 = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    let sandbox2 = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox2 = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let id1 = sandbox1.id();
     let id2 = sandbox2.id();
@@ -56,7 +47,8 @@ fn test_sandbox_has_traceable_id() {
 
     // IDs should be suitable for logging (no special chars)
     assert!(
-        id1.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+        id1.chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
         "Sandbox ID should be log-friendly: {}",
         id1
     );
@@ -65,10 +57,7 @@ fn test_sandbox_has_traceable_id() {
 /// Test: Platform should be identifiable
 #[test]
 fn test_platform_identifiable() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let platform = sandbox.platform();
 
@@ -93,14 +82,13 @@ fn test_platform_identifiable() {
 /// Test: Exit codes should be accurately captured
 #[test]
 fn test_exit_code_accuracy() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Test various exit codes
     for expected_code in [0, 1, 42, 127, 255] {
-        let result = sandbox.run("sh", &["-c", &format!("exit {}", expected_code)]).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", &format!("exit {}", expected_code)])
+            .unwrap();
         assert_eq!(
             result.exit_code, expected_code,
             "Exit code mismatch: expected {}, got {}",
@@ -150,18 +138,20 @@ fn test_timeout_flag_accuracy() {
 
     // Command that does timeout
     let result = sandbox.run("sleep", &["10"]).unwrap();
-    assert!(result.killed_by_timeout, "sleep 10 should timeout with 100ms limit");
+    assert!(
+        result.killed_by_timeout,
+        "sleep 10 should timeout with 100ms limit"
+    );
 }
 
 /// Test: Stdout and stderr should be properly separated
 #[test]
 fn test_output_separation() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    let result = sandbox.run("sh", &["-c", "echo STDOUT; echo STDERR >&2"]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "echo STDOUT; echo STDERR >&2"])
+        .unwrap();
 
     assert!(
         result.stdout.contains("STDOUT"),
@@ -206,10 +196,7 @@ fn test_resource_metrics_structure() {
 /// Test: Duration should be accurate for various execution times
 #[test]
 fn test_duration_accuracy() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Short command
     let result = sandbox.run("true", &[]).unwrap();
@@ -236,14 +223,13 @@ fn test_duration_accuracy() {
 /// Test: Multiple runs should each have independent metrics
 #[test]
 fn test_independent_metrics() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let results: Vec<_> = (0..3)
         .map(|i| {
-            sandbox.run("sh", &["-c", &format!("sleep 0.{}; echo {}", i + 1, i)]).unwrap()
+            sandbox
+                .run("sh", &["-c", &format!("sleep 0.{}; echo {}", i + 1, i)])
+                .unwrap()
         })
         .collect();
 
@@ -265,18 +251,23 @@ fn test_independent_metrics() {
 /// Test: Error output should be captured completely
 #[test]
 fn test_error_output_capture() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Generate multi-line error
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         echo "Error line 1" >&2
         echo "Error line 2" >&2
         echo "Error line 3" >&2
         exit 1
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     assert_eq!(result.exit_code, 1);
     assert!(result.stderr.contains("Error line 1"));
@@ -322,16 +313,21 @@ fn test_large_output_capture() {
 /// Test: Binary output should not corrupt results
 #[test]
 fn test_binary_output_handling() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Output some binary data
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         printf '\x00\x01\x02\x03'
         echo "text after binary"
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Should not crash, text should be present
     assert!(

@@ -5,7 +5,11 @@ use nanosandbox::Sandbox;
 #[test]
 fn test_echo() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
@@ -21,15 +25,23 @@ fn test_echo() {
 #[test]
 fn test_exit_code_propagation() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
     for code in [0, 1, 42] {
         #[cfg(target_os = "windows")]
-        let result = sandbox.run("cmd", &["/c", &format!("exit {}", code)]).unwrap();
+        let result = sandbox
+            .run("cmd", &["/c", &format!("exit {}", code)])
+            .unwrap();
         #[cfg(not(target_os = "windows"))]
-        let result = sandbox.run("sh", &["-c", &format!("exit {}", code)]).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", &format!("exit {}", code)])
+            .unwrap();
 
         assert_eq!(result.exit_code, code);
     }
@@ -38,7 +50,11 @@ fn test_exit_code_propagation() {
 #[test]
 fn test_stderr_capture() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
@@ -53,7 +69,11 @@ fn test_stderr_capture() {
 #[test]
 fn test_stdin_input() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
@@ -69,7 +89,11 @@ fn test_stdin_input() {
 #[test]
 fn test_environment_variables() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .env("FOO", "bar")
         .env("BAZ", "qux")
         .build()
@@ -87,10 +111,7 @@ fn test_environment_variables() {
 #[test]
 #[cfg(not(target_os = "windows"))]
 fn test_working_directory() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("pwd", &[]).unwrap();
     assert!(result.stdout.contains("/tmp") || result.stdout.contains("/private/tmp"));
@@ -99,7 +120,11 @@ fn test_working_directory() {
 #[test]
 fn test_command_not_found() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
@@ -110,13 +135,22 @@ fn test_command_not_found() {
 #[test]
 fn test_long_output() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
     #[cfg(not(target_os = "windows"))]
     {
-        let result = sandbox.run("sh", &["-c", "for i in $(seq 1 1000); do echo line$i; done"]).unwrap();
+        let result = sandbox
+            .run(
+                "sh",
+                &["-c", "for i in $(seq 1 1000); do echo line$i; done"],
+            )
+            .unwrap();
         assert!(result.success());
         assert!(result.stdout.contains("line1"));
         assert!(result.stdout.contains("line1000"));
@@ -126,14 +160,20 @@ fn test_long_output() {
 #[test]
 fn test_binary_output() {
     let sandbox = Sandbox::builder()
-        .working_dir(if cfg!(windows) { "C:\\Windows\\Temp" } else { "/tmp" })
+        .working_dir(if cfg!(windows) {
+            "C:\\Windows\\Temp"
+        } else {
+            "/tmp"
+        })
         .build()
         .unwrap();
 
     #[cfg(not(target_os = "windows"))]
     {
         // Output some binary data
-        let result = sandbox.run("sh", &["-c", "printf '\\x00\\x01\\x02'"]).unwrap();
+        let result = sandbox
+            .run("sh", &["-c", "printf '\\x00\\x01\\x02'"])
+            .unwrap();
         assert!(result.success());
     }
 }

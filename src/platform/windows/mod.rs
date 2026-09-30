@@ -125,20 +125,15 @@ impl PlatformExecutor for WindowsExecutor {
 
 impl WindowsExecutor {
     #[cfg(windows)]
-    fn apply_job_limits(
-        &self,
-        child: &std::process::Child,
-        config: &SandboxConfig,
-    ) -> Result<()> {
+    fn apply_job_limits(&self, child: &std::process::Child, config: &SandboxConfig) -> Result<()> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::System::JobObjects::*;
 
         unsafe {
             // Create Job Object
-            let job = CreateJobObjectW(None, None).map_err(|e| {
-                SandboxError::JobObjectCreation(e.to_string())
-            })?;
+            let job = CreateJobObjectW(None, None)
+                .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
 
             // Set basic limits
             let mut basic_limits = JOBOBJECT_BASIC_LIMIT_INFORMATION::default();
@@ -163,7 +158,8 @@ impl WindowsExecutor {
             // CPU limit
             if let Some(cpu) = config.cpu_limit {
                 let cpu_rate = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
-                    ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
+                    ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
+                        | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
                     Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 {
                         CpuRate: (cpu * 10000.0) as u32, // In hundredths of a percent
                     },

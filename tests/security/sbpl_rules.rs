@@ -7,10 +7,7 @@ use std::time::Duration;
 
 #[test]
 fn test_basic_sandbox_works() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("echo", &["hello from sandbox"]).unwrap();
     assert!(result.success());
@@ -27,7 +24,10 @@ fn test_no_network_blocks_connections() {
         .unwrap();
 
     // Try to make a network connection - should fail
-    let result = sandbox.run("curl", &["-s", "--connect-timeout", "2", "https://example.com"]);
+    let result = sandbox.run(
+        "curl",
+        &["-s", "--connect-timeout", "2", "https://example.com"],
+    );
 
     match result {
         Ok(r) => {
@@ -65,12 +65,19 @@ fn test_read_only_filesystem() {
     let result = sandbox
         .run("cat", &[&format!("{}/test.txt", temp_str)])
         .unwrap();
-    assert!(result.success(), "Read failed: {:?}", result.failure_reason());
+    assert!(
+        result.success(),
+        "Read failed: {:?}",
+        result.failure_reason()
+    );
     assert!(result.stdout.contains("original content"));
 
     // Writing should fail (or succeed but file content protected by OS)
     let _result = sandbox
-        .run("sh", &["-c", &format!("echo modified > {}/test.txt", temp_str)])
+        .run(
+            "sh",
+            &["-c", &format!("echo modified > {}/test.txt", temp_str)],
+        )
         .unwrap();
     // On macOS, the write might silently fail or the file content may be protected
     // Check that the original content is still there
@@ -96,7 +103,10 @@ fn test_read_write_filesystem() {
     // Writing should work
     let file_path = temp_path.join("new_file.txt");
     let result = sandbox
-        .run("sh", &["-c", &format!("echo 'hello' > {}", file_path.display())])
+        .run(
+            "sh",
+            &["-c", &format!("echo 'hello' > {}", file_path.display())],
+        )
         .unwrap();
 
     // Check if file was created
@@ -109,10 +119,7 @@ fn test_read_write_filesystem() {
 #[test]
 fn test_sandbox_exec_profile_applied() {
     // Verify that sandbox-exec is actually being used
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Check that we're running under sandbox
     // On macOS, sandbox-exec sets some environment
@@ -130,7 +137,9 @@ fn test_process_limits() {
         .unwrap();
 
     // Try to create many processes - should be limited
-    let result = sandbox.run("sh", &["-c", "for i in 1 2 3; do true & done; wait"]).unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "for i in 1 2 3; do true & done; wait"])
+        .unwrap();
     // Should complete (may or may not hit limit with just 3)
     assert!(result.success());
 }
@@ -177,7 +186,10 @@ fn test_environment_isolation() {
         .unwrap();
 
     let result = sandbox
-        .run("sh", &["-c", "echo SANDBOX=$SANDBOX_VAR PARENT=$PARENT_SECRET"])
+        .run(
+            "sh",
+            &["-c", "echo SANDBOX=$SANDBOX_VAR PARENT=$PARENT_SECRET"],
+        )
         .unwrap();
 
     assert!(result.success());
@@ -189,18 +201,18 @@ fn test_environment_isolation() {
 fn test_cannot_access_home_directory() {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
 
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Try to list home directory - may be restricted
     let result = sandbox.run("ls", &[&home]);
 
     // This test is informational - macOS default sandbox may allow some access
     if let Ok(r) = result {
-        println!("Home directory access: exit_code={}, stdout_len={}",
-                 r.exit_code, r.stdout.len());
+        println!(
+            "Home directory access: exit_code={}, stdout_len={}",
+            r.exit_code,
+            r.stdout.len()
+        );
     }
 }
 

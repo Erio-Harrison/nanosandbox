@@ -28,7 +28,12 @@ fn test_ip_bypass_blocked() {
 
     // Try to connect directly to an IP (Google's DNS for example)
     // This should be blocked since it bypasses the domain whitelist
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Try direct IP connection (should fail if properly secured)
         if command -v curl >/dev/null 2>&1; then
             curl -s --connect-timeout 3 http://8.8.8.8/ 2>&1 && echo "DIRECT_IP_WORKED"
@@ -37,7 +42,10 @@ fn test_ip_bypass_blocked() {
         else
             echo "NO_TOOLS"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Direct IP connection should NOT work
     assert!(
@@ -59,7 +67,12 @@ fn test_non_whitelisted_domain_blocked() {
         .unwrap();
 
     // Try to access a non-whitelisted domain through the proxy
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             # Proxy env vars should be set by nanosandbox
             response=$(curl -s --connect-timeout 5 http://httpbin.org/get 2>&1)
@@ -71,7 +84,10 @@ fn test_non_whitelisted_domain_blocked() {
         else
             echo "NO_CURL"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Non-whitelisted domain should be blocked
     let output = result.stdout.trim();
@@ -94,7 +110,12 @@ fn test_whitelisted_domain_allowed() {
         .unwrap();
 
     // Access whitelisted domain
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if ! command -v curl >/dev/null 2>&1; then
             echo "NO_CURL"
             exit 0
@@ -110,7 +131,10 @@ fn test_whitelisted_domain_allowed() {
         else
             echo "RESPONSE:$response"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
 
@@ -138,14 +162,22 @@ fn test_wildcard_domain_matching() {
         .unwrap();
 
     // Test via environment variables (since we can't easily test actual connections)
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Check that proxy env vars are set
         if [ -n "$http_proxy" ] || [ -n "$HTTP_PROXY" ]; then
             echo "PROXY_SET"
         else
             echo "NO_PROXY"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Proxy should be configured
     assert!(
@@ -171,7 +203,12 @@ fn test_https_tunnel_respects_whitelist() {
         .unwrap();
 
     // Try HTTPS to non-whitelisted domain through proxy
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if ! command -v curl >/dev/null 2>&1; then
             echo "NO_CURL"
             exit 0
@@ -184,7 +221,10 @@ fn test_https_tunnel_respects_whitelist() {
         else
             echo "ALLOWED"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     let output = result.stdout.trim();
     assert!(
@@ -206,7 +246,12 @@ fn test_network_none_blocks_all() {
         .unwrap();
 
     // Any network access should fail
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         if command -v curl >/dev/null 2>&1; then
             curl -s --connect-timeout 3 http://google.com 2>&1
             echo "EXIT:$?"
@@ -217,7 +262,10 @@ fn test_network_none_blocks_all() {
             # Try raw socket (likely to fail without tools)
             echo "NO_TOOLS"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // Network operations should fail
     let output = result.stdout.trim();
@@ -232,7 +280,6 @@ fn test_network_none_blocks_all() {
     );
 }
 
-
 /// Test: Localhost connections should always work (for proxy)
 #[test]
 #[cfg(unix)]
@@ -245,7 +292,12 @@ fn test_localhost_always_allowed() {
         .unwrap();
 
     // Localhost should work (proxy runs there)
-    let result = sandbox.run("sh", &["-c", r#"
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                r#"
         # Localhost should be reachable
         if command -v nc >/dev/null 2>&1; then
             # Try to connect to a random localhost port (will fail but shouldn't be blocked)
@@ -254,7 +306,10 @@ fn test_localhost_always_allowed() {
         else
             echo "NO_NC"
         fi
-    "#]).unwrap();
+    "#,
+            ],
+        )
+        .unwrap();
 
     // The connection attempt itself might fail (no service), but shouldn't be blocked
     let output = result.stdout.trim();
