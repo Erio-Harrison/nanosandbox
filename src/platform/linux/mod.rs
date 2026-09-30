@@ -276,26 +276,30 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Parent process
 
-        // Close child's end of pipes
-        close_raw(ready_read).map_err(|e| SandboxError::Internal(format!("close sync pipe read end in parent: {e}")))?;
-        close_raw(stdout_write).map_err(|e| SandboxError::Internal(format!("close stdout pipe write end in parent: {e}")))?;
-        close_raw(stderr_write).map_err(|e| SandboxError::Internal(format!("close stderr pipe write end in parent: {e}")))?;
-        if let Some(fd) = stdin_read {
-            close_raw(fd).map_err(|e| SandboxError::Internal(format!("close stdin pipe read end in parent: {e}")))?;
-        }
-
-        // Write UID/GID mappings
-        user_ns.write_mappings(child_pid.as_raw())?;
-
-        // The only cgroup step that needs child_pid. The child is still
-        // parked on the ready pipe at this point, so on failure we kill and
-        // reap it here instead of leaving it stuck and leaking its fds.
-        if let Some(ref cg) = cgroup {
-            if let Err(e) = cg.add_process(child_pid.as_raw() as u32) {
-                let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
-                let _ = nix::sys::wait::waitpid(child_pid, None);
-                return Err(e);
+        // Everything here runs before the child is ever signaled to
+        // continue past its ready-pipe wait (below) — it's stuck there
+        // regardless of what we do, so any failure in this block must
+        // kill and reap it before returning, not just propagate the error
+        // and leave it parked forever. Folded into one closure so every
+        // early return here goes through that same cleanup, rather than
+        // needing it repeated (and, before, missed) at each fallible step.
+        let setup: Result<()> = (|| {
+            close_raw(ready_read).map_err(|e| SandboxError::Internal(format!("close sync pipe read end in parent: {e}")))?;
+            close_raw(stdout_write).map_err(|e| SandboxError::Internal(format!("close stdout pipe write end in parent: {e}")))?;
+            close_raw(stderr_write).map_err(|e| SandboxError::Internal(format!("close stderr pipe write end in parent: {e}")))?;
+            if let Some(fd) = stdin_read {
+                close_raw(fd).map_err(|e| SandboxError::Internal(format!("close stdin pipe read end in parent: {e}")))?;
             }
+            user_ns.write_mappings(child_pid.as_raw())?;
+            if let Some(ref cg) = cgroup {
+                cg.add_process(child_pid.as_raw() as u32)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = setup {
+            let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
+            let _ = nix::sys::wait::waitpid(child_pid, None);
+            return Err(e);
         }
 
         // Write stdin if provided
