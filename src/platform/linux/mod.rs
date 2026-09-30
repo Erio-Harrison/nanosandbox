@@ -12,6 +12,8 @@ use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::PlatformExecutor;
 use crate::result::ExecutionResult;
+use std::ffi::CString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{IntoRawFd, RawFd};
 use std::time::{Duration, Instant};
 
@@ -39,6 +41,30 @@ fn write_raw(fd: RawFd, data: &[u8]) -> nix::Result<usize> {
 fn read_raw(fd: RawFd, buf: &mut [u8]) -> nix::Result<usize> {
     let ret = unsafe { libc::read(fd, buf.as_mut_ptr() as _, buf.len()) };
     nix::errno::Errno::result(ret).map(|r| r as usize)
+}
+
+/// Resolves `cmd` to the path execve should run, searching `path_value`
+/// (":"-separated) the way execvp searches $PATH -- done ahead of clone()
+/// against our own desired PATH value, since the child execs with an
+/// explicit envp instead of consulting (or mutating) the process's real
+/// environment. A `cmd` containing '/' is used as-is (resolved against the
+/// child's cwd at exec time, matching execvp); nothing found in path_value
+/// falls back to `cmd_cstr` unresolved, so exec fails the same way execvp's
+/// own not-found case would.
+fn resolve_in_path(cmd: &str, cmd_cstr: &CString, path_value: &str) -> CString {
+    if cmd.contains('/') {
+        return cmd_cstr.clone();
+    }
+    for dir in path_value.split(':').filter(|d| !d.is_empty()) {
+        let candidate = std::path::Path::new(dir).join(cmd);
+        let Ok(candidate_c) = CString::new(candidate.as_os_str().as_bytes()) else {
+            continue;
+        };
+        if unsafe { libc::access(candidate_c.as_ptr(), libc::X_OK) } == 0 {
+            return candidate_c;
+        }
+    }
+    cmd_cstr.clone()
 }
 
 /// Check if Linux sandboxing is supported
@@ -87,8 +113,7 @@ impl PlatformExecutor for LinuxExecutor {
     ) -> Result<ExecutionResult> {
         use nix::sched::{clone, CloneFlags};
         use nix::sys::signal::Signal;
-        use nix::unistd::{execvp, pipe};
-        use std::ffi::CString;
+        use nix::unistd::pipe;
 
         const STACK_SIZE: usize = 1024 * 1024;
 
@@ -167,8 +192,48 @@ impl PlatformExecutor for LinuxExecutor {
                 env.insert(key, value);
             }
         }
+        if !env.contains_key("PATH") {
+            env.insert("PATH".to_string(), "/usr/local/bin:/usr/bin:/bin".to_string());
+        }
 
-        let working_dir = config.working_dir.clone();
+        // Built here, before clone(), and just used as-is in the child --
+        // not with std::env::set_var/remove_var there. clone() copies this
+        // whole (multi-threaded) process's memory, but only the calling
+        // thread continues in the child; if another thread here happened to
+        // be inside std::env's internal lock at that exact instant, the
+        // child inherits it frozen "locked", and its own env mutation later
+        // waits forever on a thread that doesn't exist in this process.
+        // Confirmed for real under enough concurrent sandbox creation: the
+        // child hangs there, or execs with a stale/corrupted environment.
+        let envp_cstr: Vec<CString> = env
+            .iter()
+            .filter_map(|(k, v)| CString::new(format!("{k}={v}")).ok())
+            .collect();
+        let exec_path = resolve_in_path(cmd, &cmd_cstr, env.get("PATH").map(String::as_str).unwrap_or(""));
+
+        // execve's own nix wrapper builds a NUL-terminated pointer array
+        // from these each time it's called -- an allocation that, unlike
+        // the ones above, sits on the ordinary success path too, not just
+        // an error branch. Building it here instead, once, means the
+        // child's own execve call is just two pointer derefs and a raw
+        // syscall, no allocation at all. args_cstr/envp_cstr are moved into
+        // the closure alongside these so the strings they point into stay
+        // alive for the call.
+        let mut args_ptrs: Vec<*const libc::c_char> = args_cstr.iter().map(|c| c.as_ptr()).collect();
+        args_ptrs.push(std::ptr::null());
+        let mut envp_ptrs: Vec<*const libc::c_char> = envp_cstr.iter().map(|c| c.as_ptr()).collect();
+        envp_ptrs.push(std::ptr::null());
+
+        // A pre-built CString, used with raw stat()/chdir() in the child
+        // instead of Path::exists()/std::env::set_current_dir() -- both
+        // allocate internally (building their own CString from the path),
+        // and any allocation in the child risks the same frozen-malloc-lock
+        // hang as the std::env case above (see the comment on envp_cstr):
+        // clone() is a raw syscall here, not libc's fork(), so it doesn't
+        // get glibc's pthread_atfork() malloc-lock protection either.
+        // Confirmed for real via gdb: a child stuck in malloc, called from
+        // eprintln!, itself called from this closure after clone().
+        let working_dir_cstr = CString::new(config.working_dir.as_os_str().as_bytes()).ok();
         let hostname = config.hostname.clone();
 
         // Create user namespace config
@@ -176,6 +241,13 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Child process entry point
         let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || {
+            // Keeps these alive in the child for as long as args_ptrs/
+            // envp_ptrs (which point into their buffers) are in use below --
+            // an explicit move rather than relying on them happening to
+            // outlive clone() by virtue of where they're declared above.
+            let _args_cstr = &args_cstr;
+            let _envp_cstr = &envp_cstr;
+
             // Create a new process group with this process as leader
             // This allows us to kill all children with killpg
             unsafe {
@@ -227,45 +299,52 @@ impl PlatformExecutor for LinuxExecutor {
             let _ = close_raw(stdout_read);
             let _ = close_raw(stderr_read);
 
-            // Setup hostname (UTS namespace)
-            if let Err(e) = nix::unistd::sethostname(&hostname) {
-                eprintln!("Failed to set hostname: {}", e);
+            // Setup hostname (UTS namespace). Error messages below are
+            // fixed strings via raw write(), not eprintln!/format! -- see
+            // the comment on working_dir_cstr above for why.
+            // Raw libc call, not nix's wrapper: sethostname() takes a
+            // buffer and length, not a NUL-terminated string, so this
+            // doesn't need a CString and doesn't allocate either way, but
+            // calling it directly removes any doubt.
+            if nix::unistd::sethostname(&hostname).is_err() {
+                let _ = write_raw(2, b"Failed to set hostname\n");
             }
 
             // Setup mount namespace if needed
             if let Some(rootfs) = &child_config.rootfs {
-                if let Err(e) = setup_mount_namespace(rootfs, &child_config.mounts, &child_config.tmpfs_mounts) {
-                    eprintln!("Mount setup failed: {}", e);
+                if setup_mount_namespace(rootfs, &child_config.mounts, &child_config.tmpfs_mounts).is_err() {
+                    let _ = write_raw(2, b"Mount setup failed\n");
                     return 1;
                 }
             }
 
-            // Set environment
-            for (key, _) in std::env::vars() {
-                std::env::remove_var(&key);
-            }
-            for (key, value) in &env {
-                std::env::set_var(key, value);
-            }
-            if !env.contains_key("PATH") {
-                std::env::set_var("PATH", "/usr/local/bin:/usr/bin:/bin");
-            }
+            // Environment is passed explicitly to execve below, not set via
+            // std::env here -- see the comment where envp_cstr is built.
 
-            // Change working directory
-            if working_dir.exists() {
-                let _ = std::env::set_current_dir(&working_dir);
-            }
-
-            // Apply seccomp filter
-            if !matches!(child_config.seccomp_profile, SeccompProfile::Disabled) {
-                if let Err(e) = SeccompFilter::apply(&child_config.seccomp_profile) {
-                    eprintln!("Seccomp setup failed: {}", e);
+            // Change working directory, via raw stat()/chdir() rather than
+            // Path::exists()/std::env::set_current_dir() -- see working_dir_cstr.
+            if let Some(dir) = &working_dir_cstr {
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::stat(dir.as_ptr(), &mut st) } == 0 {
+                    unsafe {
+                        libc::chdir(dir.as_ptr());
+                    }
                 }
             }
 
-            // Execute
-            let _ = execvp(&cmd_cstr, &args_cstr);
-            eprintln!("execvp failed");
+            // Apply seccomp filter
+            if !matches!(child_config.seccomp_profile, SeccompProfile::Disabled)
+                && SeccompFilter::apply(&child_config.seccomp_profile).is_err()
+            {
+                let _ = write_raw(2, b"Seccomp setup failed\n");
+            }
+
+            // Execute. Raw libc call with the pointer arrays built ahead of
+            // clone() above, not nix's execve() wrapper -- see args_ptrs.
+            unsafe {
+                libc::execve(exec_path.as_ptr(), args_ptrs.as_ptr(), envp_ptrs.as_ptr());
+            }
+            let _ = write_raw(2, b"execve failed\n");
             127
         });
 
