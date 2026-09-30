@@ -166,11 +166,19 @@ impl Sandbox {
         input_dir: impl Into<PathBuf>,
         output_dir: impl Into<PathBuf>,
     ) -> SandboxBuilder {
+        // working_dir must be a path that actually exists once the sandbox
+        // starts. "/input"/"/output" are just SBPL write-rule targets on
+        // macOS (no filesystem remapping happens there at all) and are only
+        // made real on Linux by pivot_root, which itself only runs when a
+        // rootfs is also configured -- neither of which this preset does.
+        // The real, caller-supplied directory is the one path guaranteed to
+        // exist either way.
+        let output_dir: PathBuf = output_dir.into();
         Sandbox::builder()
             .mount(input_dir, "/input", Permission::ReadOnly)
-            .mount(output_dir, "/output", Permission::ReadWrite)
+            .mount(output_dir.clone(), "/output", Permission::ReadWrite)
             .tmpfs("/tmp", 256 * 1024 * 1024) // 256MB tmp
-            .working_dir("/workspace")
+            .working_dir(output_dir)
             .memory_limit(2 * 1024 * 1024 * 1024) // 2GB
             .cpu_limit(2.0)
             .wall_time_limit(Duration::from_secs(300)) // 5 minutes
@@ -196,10 +204,14 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn code_judge(code_dir: impl Into<PathBuf>) -> SandboxBuilder {
+        // See data_analysis() above: working_dir needs a path that's real
+        // without any rootfs/pivot_root, so use the caller's own directory
+        // instead of the "/workspace" alias.
+        let code_dir: PathBuf = code_dir.into();
         Sandbox::builder()
-            .mount(code_dir, "/workspace", Permission::ReadOnly)
+            .mount(code_dir.clone(), "/workspace", Permission::ReadOnly)
             .tmpfs("/tmp", 64 * 1024 * 1024) // 64MB tmp
-            .working_dir("/workspace")
+            .working_dir(code_dir)
             .memory_limit(256 * 1024 * 1024) // 256MB
             .cpu_limit(1.0)
             .wall_time_limit(Duration::from_secs(10))
@@ -226,16 +238,22 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn agent_executor(workspace: impl Into<PathBuf>) -> SandboxBuilder {
+        // See data_analysis() above: working_dir (and HOME, since it should
+        // agree with where we actually chdir'd) needs a path that's real
+        // without any rootfs/pivot_root, so use the caller's own directory
+        // instead of the "/workspace" alias.
+        let workspace: PathBuf = workspace.into();
+        let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace, "/workspace", Permission::ReadWrite)
+            .mount(workspace.clone(), "/workspace", Permission::ReadWrite)
             .tmpfs("/tmp", 512 * 1024 * 1024)
-            .working_dir("/workspace")
+            .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB
             .cpu_limit(4.0)
             .wall_time_limit(Duration::from_secs(600)) // 10 minutes
             .max_pids(256)
             .seccomp_profile(SeccompProfile::Standard)
-            .env("HOME", "/workspace")
+            .env("HOME", home)
             .env("USER", "sandbox")
     }
 
@@ -254,17 +272,22 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn interactive(workspace: impl Into<PathBuf>) -> SandboxBuilder {
+        // See data_analysis() above: working_dir (and HOME) needs a path
+        // that's real without any rootfs/pivot_root, so use the caller's
+        // own directory instead of the "/workspace" alias.
+        let workspace: PathBuf = workspace.into();
+        let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace, "/workspace", Permission::ReadWrite)
+            .mount(workspace.clone(), "/workspace", Permission::ReadWrite)
             .tmpfs("/tmp", 1024 * 1024 * 1024) // 1GB tmp
-            .working_dir("/workspace")
+            .working_dir(workspace)
             .memory_limit(8 * 1024 * 1024 * 1024) // 8GB
             .cpu_limit(4.0)
             .max_pids(512)
             .seccomp_profile(SeccompProfile::Permissive)
             .hostname("sandbox")
             .env("TERM", "xterm-256color")
-            .env("HOME", "/workspace")
+            .env("HOME", home)
             .env("USER", "sandbox")
             .env("SHELL", "/bin/bash")
     }
