@@ -422,20 +422,21 @@ impl PlatformExecutor for MacOSExecutor {
 
         let child_pid = child.id() as i32;
 
-        // Write stdin if provided
-        if let Some(stdin_data) = stdin {
-            if let Some(mut stdin_pipe) = child.stdin.take() {
-                let _ = stdin_pipe.write_all(stdin_data);
-                // Drop stdin to close the pipe and signal EOF
-                drop(stdin_pipe);
-            }
-        }
-
         // Wait with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         // The proxy is owned by the Sandbox, not this call, so it stays up
         // for the next run() instead of being shut down here.
-        self.wait_with_timeout(&mut child, child_pid, timeout, config.memory_limit, start)
+        //
+        // stdin is written inside wait_with_timeout's own loop, interleaved
+        // with draining stdout/stderr -- not all upfront here. A program
+        // that echoes input to output as it goes (e.g. `cat`) can block on
+        // writing its own output once enough of it is buffered and unread,
+        // which stops it reading more stdin in turn; writing stdin to
+        // completion before anything drains stdout/stderr deadlocks against
+        // that once either side exceeds one pipe buffer (confirmed for real
+        // with 200KB of stdin, and independently with >64KB of output alone
+        // and no stdin at all).
+        self.wait_with_timeout(&mut child, child_pid, stdin, timeout, config.memory_limit, start)
     }
 
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {
@@ -458,6 +459,7 @@ impl MacOSExecutor {
         &self,
         child: &mut std::process::Child,
         child_pid: i32,
+        stdin_data: Option<&[u8]>,
         timeout: Duration,
         memory_limit: Option<u64>,
         start: Instant,
@@ -465,8 +467,52 @@ impl MacOSExecutor {
         let mut killed_by_timeout = false;
         let mut killed_by_oom = false;
 
+        let mut stdin_pipe = child.stdin.take();
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        for fd in [
+            stdin_pipe.as_ref().map(|p| p.as_raw_fd()),
+            stdout_pipe.as_ref().map(|p| p.as_raw_fd()),
+            stderr_pipe.as_ref().map(|p| p.as_raw_fd()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+
+        let mut stdin_remaining = stdin_data.unwrap_or(&[]);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
         // Use wait4 with WNOHANG for non-blocking wait with rusage collection
         loop {
+            // Write more stdin and drain whatever output is available, non-
+            // blocking, interleaved on every iteration -- not all stdin
+            // upfront then all output after exit, which deadlocks once
+            // either side fills its pipe buffer before the other side has
+            // drained it (confirmed for real).
+            if !stdin_remaining.is_empty() {
+                if let Some(pipe) = stdin_pipe.as_mut() {
+                    match pipe.write(stdin_remaining) {
+                        Ok(n) if n > 0 => stdin_remaining = &stdin_remaining[n..],
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                        // Either wrote 0 (shouldn't happen for non-empty
+                        // data) or the reader's gone (e.g. EPIPE) -- nothing
+                        // more to usefully write either way.
+                        _ => stdin_remaining = &[],
+                    }
+                }
+            }
+            if stdin_remaining.is_empty() {
+                stdin_pipe = None; // drop closes the fd, signaling EOF
+            }
+            drain_available(&mut stdout_pipe, &mut stdout);
+            drain_available(&mut stderr_pipe, &mut stderr);
+
             let mut status: libc::c_int = 0;
             let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
 
@@ -475,16 +521,9 @@ impl MacOSExecutor {
             };
 
             if result == child_pid {
-                // Process exited, collect output
-                let mut stdout = String::new();
-                let mut stderr = String::new();
-
-                if let Some(mut stdout_pipe) = child.stdout.take() {
-                    let _ = stdout_pipe.read_to_string(&mut stdout);
-                }
-                if let Some(mut stderr_pipe) = child.stderr.take() {
-                    let _ = stderr_pipe.read_to_string(&mut stderr);
-                }
+                // Catch anything written in the child's last moments.
+                drain_available(&mut stdout_pipe, &mut stdout);
+                drain_available(&mut stderr_pipe, &mut stderr);
 
                 // Extract exit code and signal
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
@@ -511,8 +550,8 @@ impl MacOSExecutor {
                 let cpu_time = Some(user_time + sys_time);
 
                 return Ok(ExecutionResult {
-                    stdout,
-                    stderr,
+                    stdout: String::from_utf8_lossy(&stdout).to_string(),
+                    stderr: String::from_utf8_lossy(&stderr).to_string(),
                     exit_code,
                     duration: start.elapsed(),
                     killed_by_timeout,
@@ -547,6 +586,27 @@ impl MacOSExecutor {
                 return Err(SandboxError::ExecutionFailed(
                     format!("wait4 failed: {}", std::io::Error::last_os_error())
                 ));
+            }
+        }
+    }
+}
+
+/// Read whatever is available on a non-blocking pipe without blocking.
+/// EOF (Ok(0)) or a hard error drops the handle so later iterations skip it.
+fn drain_available<R: Read>(pipe: &mut Option<R>, buf: &mut Vec<u8>) {
+    let Some(p) = pipe else { return };
+    let mut tmp = [0u8; 4096];
+    loop {
+        match p.read(&mut tmp) {
+            Ok(0) => {
+                *pipe = None;
+                break;
+            }
+            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => {
+                *pipe = None;
+                break;
             }
         }
     }
