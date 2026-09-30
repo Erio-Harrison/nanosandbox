@@ -97,7 +97,7 @@ impl Default for SandboxConfig {
             cpu_limit: None,
             wall_time_limit: None,
             cpu_time_limit: None,
-            max_pids: Some(64),
+            max_pids: None,
             max_file_size: None,
             max_open_files: None,
 
@@ -316,37 +316,12 @@ impl SandboxBuilder {
 
     /// Pre-check platform capabilities before building sandbox
     fn pre_check_platform(&self) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            // Check cgroup v2 support
-            if !std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
-                return Err(SandboxError::Config(
-                    "cgroups v2 not available. Ensure cgroup v2 is mounted at /sys/fs/cgroup".into()
-                ));
-            }
-
-            // Check if we can create cgroups (write permission)
-            if self.config.memory_limit.is_some()
-                || self.config.cpu_limit.is_some()
-                || self.config.max_pids.is_some()
-            {
-                let cgroup_base = std::path::Path::new("/sys/fs/cgroup");
-                if !cgroup_base.join("cgroup.subtree_control").exists() {
-                    return Err(SandboxError::Config(
-                        "cgroup subtree_control not available. Resource limits may not work".into()
-                    ));
-                }
-            }
-
-            // Check user namespace support
-            if let Ok(content) = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone") {
-                if content.trim() == "0" {
-                    return Err(SandboxError::Config(
-                        "Unprivileged user namespaces disabled. Run: sudo sysctl kernel.unprivileged_userns_clone=1".into()
-                    ));
-                }
-            }
-        }
+        // Linux: no check here. `LinuxExecutor::check_support()` (called right
+        // after this, from `Sandbox::from_builder()`) does the real thing —
+        // including, for resource limits, actually resolving and validating
+        // the cgroup v2 subtree instead of just checking a path exists.
+        // Duplicating a weaker check here previously let `build()` succeed on
+        // configs `check_support()` would immediately reject.
 
         #[cfg(target_os = "macos")]
         {
@@ -374,7 +349,7 @@ mod tests {
         let config = builder.config;
         assert!(config.mounts.is_empty());
         assert!(config.memory_limit.is_none());
-        assert_eq!(config.max_pids, Some(64));
+        assert_eq!(config.max_pids, None);
         assert!(matches!(config.network_mode, NetworkMode::None));
     }
 

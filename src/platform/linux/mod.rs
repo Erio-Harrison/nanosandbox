@@ -125,6 +125,29 @@ impl PlatformExecutor for LinuxExecutor {
             clone_flags |= CloneFlags::CLONE_NEWNET;
         }
 
+        // Create and configure the cgroup leaf *before* clone(), so a failure
+        // here (rootless with no delegated subtree, a missing controller...)
+        // never leaves a half-started child stuck on the ready pipe. Adding
+        // the process to it is the only step that needs child_pid, so it's
+        // the only cgroup step that still happens after clone() below.
+        let cgroup_controllers = needed_cgroup_controllers(config);
+        let cgroup = if !cgroup_controllers.is_empty() {
+            let leaf_id = cgroup::next_leaf_id();
+            let cg = CgroupManager::create(&leaf_id, &cgroup_controllers)?;
+            if let Some(memory) = config.memory_limit {
+                cg.set_memory_limit(memory)?;
+            }
+            if let Some(cpu) = config.cpu_limit {
+                cg.set_cpu_limit(cpu)?;
+            }
+            if let Some(pids) = config.max_pids {
+                cg.set_pids_limit(pids)?;
+            }
+            Some(cg)
+        } else {
+            None
+        };
+
         // Prepare command arguments
         let cmd_cstr = CString::new(cmd)?;
         let args_cstr: Vec<CString> = std::iter::once(cmd_cstr.clone())
@@ -249,24 +272,16 @@ impl PlatformExecutor for LinuxExecutor {
         // Write UID/GID mappings
         user_ns.write_mappings(child_pid.as_raw())?;
 
-        // Create and configure cgroup
-        let sandbox_id = format!("nanobox-{}", child_pid.as_raw());
-        let cgroup = if needs_cgroup(config) {
-            let cg = CgroupManager::create(&sandbox_id)?;
-            if let Some(memory) = config.memory_limit {
-                cg.set_memory_limit(memory)?;
+        // The only cgroup step that needs child_pid. The child is still
+        // parked on the ready pipe at this point, so on failure we kill and
+        // reap it here instead of leaving it stuck and leaking its fds.
+        if let Some(ref cg) = cgroup {
+            if let Err(e) = cg.add_process(child_pid.as_raw() as u32) {
+                let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
+                let _ = nix::sys::wait::waitpid(child_pid, None);
+                return Err(e);
             }
-            if let Some(cpu) = config.cpu_limit {
-                cg.set_cpu_limit(cpu)?;
-            }
-            if let Some(pids) = config.max_pids {
-                cg.set_pids_limit(pids)?;
-            }
-            cg.add_process(child_pid.as_raw() as u32)?;
-            Some(cg)
-        } else {
-            None
-        };
+        }
 
         // Write stdin if provided
         if let (Some(data), Some(fd)) = (stdin, stdin_write) {
@@ -308,19 +323,34 @@ impl PlatformExecutor for LinuxExecutor {
         })
     }
 
-    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
+    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
         if !check_user_namespace_support() {
             return Err(SandboxError::UserNamespaceDisabled);
         }
         if !check_cgroup_v2_support() {
             return Err(SandboxError::CgroupV2Unavailable);
         }
+        let needed = needed_cgroup_controllers(config);
+        if !needed.is_empty() {
+            CgroupManager::ensure_support(&needed)?;
+        }
         Ok(())
     }
 }
 
-fn needs_cgroup(config: &SandboxConfig) -> bool {
-    config.memory_limit.is_some() || config.cpu_limit.is_some() || config.max_pids.is_some()
+/// Which cgroup v2 controllers this config's limits actually need.
+fn needed_cgroup_controllers(config: &SandboxConfig) -> Vec<&'static str> {
+    let mut needed = Vec::new();
+    if config.memory_limit.is_some() {
+        needed.push("memory");
+    }
+    if config.cpu_limit.is_some() {
+        needed.push("cpu");
+    }
+    if config.max_pids.is_some() {
+        needed.push("pids");
+    }
+    needed
 }
 
 fn setup_mount_namespace(
