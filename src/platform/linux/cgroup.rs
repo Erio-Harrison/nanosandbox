@@ -412,6 +412,20 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     )
     .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
 
+    // Anything still directly in `own` is a child this process forked
+    // between landing in `own` (StartTransientUnit, or already there) and
+    // the move above -- e.g. a sandbox run that needs no cgroup and so never
+    // waits on this function. Such a child stays put after we move, and
+    // blocks enabling `own`'s controllers (EBUSY) until it exits. Confirmed
+    // for real: a `sleep` child of this process, sitting in `own`'s root.
+    // Children forked after our own move inherit `supervisor`, so one pass
+    // here is enough.
+    let leftovers = fs::read_to_string(own.join("cgroup.procs")).unwrap_or_default();
+    for pid in leftovers.split_whitespace() {
+        // Already exited between the read and the write is fine.
+        let _ = fs::write(supervisor.join("cgroup.procs"), pid);
+    }
+
     Ok(own)
 }
 
@@ -931,9 +945,28 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             }
         }
     }
+    // EBUSY here usually means the no-internal-process rule: something sits
+    // directly in `dir` itself. Name it, so the error says who.
+    let procs = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
+    let described: Vec<String> = procs
+        .split_whitespace()
+        .map(|pid| {
+            let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+            let field = |k: &str| {
+                status
+                    .lines()
+                    .find_map(|l| l.strip_prefix(k))
+                    .map(str::trim)
+                    .unwrap_or("?")
+                    .to_string()
+            };
+            format!("{pid}({} ppid={})", field("Name:"), field("PPid:"))
+        })
+        .collect();
     Err(SandboxError::CgroupCreation(format!(
-        "cannot enable '{value}' in {} (still busy after retries): {}",
+        "cannot enable '{value}' in {} (still busy after retries; processes directly in it: [{}]): {}",
         subtree_path.display(),
+        described.join(" "),
         last_err.expect("loop only exits via return or after recording an EBUSY error")
     )))
 }
