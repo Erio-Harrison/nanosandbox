@@ -6,7 +6,7 @@
 //! - **Restricted Tokens**: Security token restrictions
 //! - **AppContainer**: Application isolation (Windows 8+)
 
-use crate::builder::{NetworkMode, SandboxConfig, SeccompProfile};
+use crate::builder::{NetworkMode, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::PlatformExecutor;
@@ -47,7 +47,7 @@ impl PlatformExecutor for WindowsExecutor {
     ) -> Result<ExecutionResult> {
         // Windows implementation using Job Objects and Restricted Tokens
 
-        use std::io::{Read, Write};
+        use std::io::Write;
         use std::process::{Command, Stdio};
         use std::time::Instant;
 
@@ -117,8 +117,27 @@ impl PlatformExecutor for WindowsExecutor {
         self.wait_with_timeout(&mut child, timeout, start)
     }
 
-    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
-        // Windows always supports basic sandboxing
+    /// Refuses what this executor can't enforce, instead of running the
+    /// program with it silently missing. The process runs as the calling
+    /// user, with the user's own file and network access.
+    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
+        if !matches!(config.network_mode, NetworkMode::Host) {
+            // no_network() is the default, so this covers sandboxes that
+            // never mention the network too.
+            return Err(SandboxError::PlatformFeatureUnavailable {
+                feature: "network isolation on Windows (no_network() is the default, and \
+                          allow_network() can't be enforced either); call host_network() to run \
+                          with the host's network"
+                    .into(),
+            });
+        }
+        if config.rootfs.is_some() || !config.mounts.is_empty() || !config.tmpfs_mounts.is_empty() {
+            return Err(SandboxError::PlatformFeatureUnavailable {
+                feature: "rootfs, mount and tmpfs on Windows; the process sees the host's \
+                          file system as the calling user"
+                    .into(),
+            });
+        }
         Ok(())
     }
 }
@@ -175,7 +194,7 @@ impl WindowsExecutor {
             }
 
             // Assign process to job
-            let process_handle = HANDLE(child.as_raw_handle() as isize);
+            let process_handle = HANDLE(child.as_raw_handle());
             AssignProcessToJobObject(job, process_handle)
                 .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
         }

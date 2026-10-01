@@ -9,7 +9,7 @@
 //! |----------|------------|--------|
 //! | Linux | namespaces, cgroups v2, seccomp | Full support |
 //! | macOS | sandbox-exec, App Sandbox | Full support |
-//! | Windows | Job Objects, Restricted Tokens | Full support |
+//! | Windows | Job Objects | Memory and CPU limits only |
 
 #[cfg(target_os = "linux")]
 pub mod linux;

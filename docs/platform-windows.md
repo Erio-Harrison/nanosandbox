@@ -137,6 +137,16 @@ fn create_restricted_token() -> Result<HANDLE> {
 }
 ```
 
+## What's Enforced Today
+
+Only the Job Object's memory and CPU limits. The process runs as the calling
+user, with that user's file system and network access; Restricted Tokens and
+AppContainer below are design notes, not implemented. So `build()` refuses
+what can't be enforced instead of quietly running without it:
+
+- `no_network()` (the default) and `allow_network()`: call `host_network()`.
+- `rootfs`, `mount` and `tmpfs`.
+
 ## Feature Limitations
 
 ### Compared to Linux
