@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 
@@ -16,6 +16,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Data transfer timeout (idle timeout)
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Request line plus headers. The proxy runs in the host process, so a client
+/// that never ends its headers mustn't be able to grow this without bound.
+const MAX_HEADER_BYTES: u64 = 64 * 1024;
+
+/// How long a client gets to send its request headers.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// HTTP Proxy server with domain whitelist
 pub struct HttpProxy {
@@ -32,7 +39,13 @@ impl HttpProxy {
     /// * `port` - Port to listen on (use 0 for random available port)
     pub fn new(allowed_domains: Vec<String>, port: u16) -> Self {
         Self {
-            allowed_domains: Arc::new(allowed_domains.into_iter().collect()),
+            // Hosts are lowercased before matching, so patterns must be too.
+            allowed_domains: Arc::new(
+                allowed_domains
+                    .into_iter()
+                    .map(|d| d.to_lowercase())
+                    .collect(),
+            ),
             listen_addr: SocketAddr::from(([127, 0, 0, 1], port)),
         }
     }
@@ -130,20 +143,20 @@ impl HttpProxy {
     ) -> std::io::Result<()> {
         // Read ALL headers at once to avoid BufReader buffering issues
         let mut reader = BufReader::new(&mut client);
-        let mut all_headers = String::new();
-
-        // Read headers until empty line
-        loop {
-            let mut line = String::new();
-            let n = reader.read_line(&mut line).await?;
-            if n == 0 {
-                break; // EOF
-            }
-            all_headers.push_str(&line);
-            if line == "\r\n" || line == "\n" {
-                break; // End of headers
-            }
-        }
+        let all_headers =
+            match tokio::time::timeout(HEADER_TIMEOUT, Self::read_headers(&mut reader)).await {
+                Ok(Ok(Some(headers))) => headers,
+                Ok(Ok(None)) => {
+                    drop(reader);
+                    return Self::send_error(&mut client, 431, "Request Header Fields Too Large")
+                        .await;
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => {
+                    tracing::debug!("Timed out waiting for request headers");
+                    return Ok(());
+                }
+            };
 
         let first_line = all_headers.lines().next().unwrap_or("");
 
@@ -153,6 +166,28 @@ impl HttpProxy {
         } else {
             // Regular HTTP request
             Self::handle_http(client, first_line, &all_headers, allowed).await
+        }
+    }
+
+    /// Reads up to and including the blank line ending the headers, or to EOF.
+    /// `None` if they run past `MAX_HEADER_BYTES`.
+    async fn read_headers<R: AsyncBufRead + Unpin>(
+        reader: &mut R,
+    ) -> std::io::Result<Option<String>> {
+        let mut all_headers = String::new();
+        loop {
+            let budget = MAX_HEADER_BYTES - all_headers.len() as u64;
+            let mut line = String::new();
+            let n = (&mut *reader).take(budget).read_line(&mut line).await?;
+            all_headers.push_str(&line);
+            if n == 0 || line == "\r\n" || line == "\n" {
+                return Ok(Some(all_headers));
+            }
+            if !line.ends_with('\n') {
+                // Either the budget ran out mid-line, or EOF did.
+                let within = (all_headers.len() as u64) < MAX_HEADER_BYTES;
+                return Ok(within.then_some(all_headers));
+            }
         }
     }
 
@@ -372,13 +407,13 @@ impl HttpProxy {
 
         // Wildcard match (*.example.com)
         for pattern in allowed.iter() {
-            if let Some(stripped) = pattern.strip_prefix("*.") {
-                // stripped is ".example.com"
-                if domain.ends_with(stripped) {
-                    return true;
-                }
-                // Also match the base domain (*.example.com matches example.com)
-                if domain == stripped {
+            // "*.example.com": example.com itself, or anything ending in
+            // ".example.com". Keeping the dot is what stops it matching
+            // "evilexample.com".
+            if let Some(dot_base) = pattern.strip_prefix('*') {
+                if dot_base.starts_with('.')
+                    && (domain.ends_with(dot_base) || domain == dot_base[1..])
+                {
                     return true;
                 }
             }
@@ -422,6 +457,33 @@ mod tests {
         assert!(HttpProxy::is_allowed("deep.sub.example.com", &allowed));
         assert!(HttpProxy::is_allowed("example.com", &allowed)); // Base domain also matches
         assert!(!HttpProxy::is_allowed("other.com", &allowed));
+        // Only on a label boundary.
+        assert!(!HttpProxy::is_allowed("evilexample.com", &allowed));
+        assert!(!HttpProxy::is_allowed("evilexample.com:443", &allowed));
+        assert!(!HttpProxy::is_allowed("example.com.evil.com", &allowed));
+    }
+
+    #[test]
+    fn test_whitelist_entries_are_case_insensitive() {
+        let proxy = HttpProxy::new(vec!["Mixed.Org".into(), "*.Upper.COM".into()], 0);
+        assert!(HttpProxy::is_allowed("mixed.org", &proxy.allowed_domains));
+        assert!(HttpProxy::is_allowed("a.upper.com", &proxy.allowed_domains));
+    }
+
+    #[tokio::test]
+    async fn test_header_size_is_capped() {
+        let mut ok: &[u8] = b"GET http://a/ HTTP/1.1\r\nHost: a\r\n\r\nbody";
+        assert_eq!(
+            HttpProxy::read_headers(&mut ok).await.unwrap().as_deref(),
+            Some("GET http://a/ HTTP/1.1\r\nHost: a\r\n\r\n")
+        );
+
+        // One endless line, then many short ones: both stop at the cap
+        // instead of buffering everything.
+        let long = vec![b'a'; 1024 * 1024];
+        assert_eq!(HttpProxy::read_headers(&mut &long[..]).await.unwrap(), None);
+        let many = b"X: y\r\n".repeat(100_000);
+        assert_eq!(HttpProxy::read_headers(&mut &many[..]).await.unwrap(), None);
     }
 
     #[test]
