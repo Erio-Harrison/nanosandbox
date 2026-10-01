@@ -34,7 +34,7 @@ fn test_pid_namespace_isolation() {
 #[cfg(target_os = "linux")]
 fn test_cannot_see_host_processes() {
     // The sandbox only gets its own /proc where it can mount one.
-    if crate::common::skip_without_mounts() {
+    if crate::common::skip_without_userns_privileges() {
         return;
     }
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
@@ -153,7 +153,7 @@ fn test_environment_isolation() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_working_directory_confinement() {
-    if crate::common::skip_without_mounts() {
+    if crate::common::skip_without_userns_privileges() {
         return;
     }
     let source = tempfile::tempdir().unwrap();
@@ -190,7 +190,7 @@ fn test_mount_target_must_exist_without_rootfs() {
     let err = result
         .err()
         .expect("build() should refuse a missing target");
-    if !crate::common::skip_without_mounts() {
+    if !crate::common::skip_without_userns_privileges() {
         assert!(err.to_string().contains("does not exist"), "{err}");
     }
 }

@@ -1,5 +1,8 @@
 //! Integration tests entry point
 
+#[path = "common/mod.rs"]
+mod common;
+
 #[path = "integration/basic_exec.rs"]
 mod basic_exec;
 

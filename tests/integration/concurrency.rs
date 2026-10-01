@@ -137,6 +137,9 @@ fn test_cgroup_no_conflicts() {
 /// Test: Concurrent proxy operations should not conflict
 #[test]
 fn test_concurrent_proxy_no_conflicts() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let mut handles = vec![];
 
     // Run multiple sandboxes with proxied network in parallel

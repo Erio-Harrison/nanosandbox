@@ -14,7 +14,7 @@ use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::io::{IntoRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
 mod cgroup;
@@ -151,9 +151,18 @@ impl PlatformExecutor for LinuxExecutor {
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWIPC;
 
-        if matches!(config.network_mode, NetworkMode::None) {
+        // Proxied gets its own network namespace too, with the proxy as its
+        // only way out (see `ProxyLink`). Without one, the domain whitelist
+        // only held for programs that chose to honor HTTP_PROXY -- confirmed
+        // for real: `curl --noproxy '*'` reached 1.1.1.1, example.org and
+        // github.com straight past it.
+        if !matches!(config.network_mode, NetworkMode::Host) {
             clone_flags |= CloneFlags::CLONE_NEWNET;
         }
+        let mut proxy_link = match (&config.network_mode, proxy) {
+            (NetworkMode::Proxied { .. }, Some(proxy)) => Some(ProxyLink::new(proxy.port())?),
+            _ => None,
+        };
 
         // Create and configure the cgroup leaf *before* clone(), so a failure
         // here (rootless with no delegated subtree, a missing controller...)
@@ -252,7 +261,7 @@ impl PlatformExecutor for LinuxExecutor {
         // user namespace, skip both instead of having every run log their
         // failure to the program's stderr. check_mounts already refused any
         // mounts the caller asked for here at build() time.
-        let userns_restricted = userns_mounts_denied();
+        let userns_restricted = userns_restricted_by_apparmor();
         if userns_restricted {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
@@ -302,6 +311,8 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Create user namespace config
         let user_ns = UserNamespace::new(config.uid, config.gid);
+
+        let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
 
         // Child process entry point
         let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || {
@@ -412,6 +423,17 @@ impl PlatformExecutor for LinuxExecutor {
                 }
             }
 
+            // Before the rlimits: a small max_open_files could stop these
+            // sockets from opening.
+            if let Some(link) = proxy_link_child {
+                if let Err(step) = link.bind_and_send() {
+                    let _ = write_raw(2, b"Network setup failed: ");
+                    let _ = write_raw(2, step.as_bytes());
+                    let _ = write_raw(2, b"\n");
+                    return 1;
+                }
+            }
+
             for (resource, value, failure) in &rlimits {
                 let limit = libc::rlimit {
                     rlim_cur: *value as libc::rlim_t,
@@ -451,6 +473,10 @@ impl PlatformExecutor for LinuxExecutor {
         .map_err(|e| SandboxError::Internal(format!("clone sandboxed process: {e}")))?;
 
         // Parent process
+
+        if let Some(link) = &mut proxy_link {
+            link.close_child_end();
+        }
 
         // Everything here runs before the child is ever signaled to
         // continue past its ready-pipe wait (below) — it's stuck there
@@ -493,6 +519,25 @@ impl PlatformExecutor for LinuxExecutor {
             SandboxError::Internal(format!("close sync pipe write end after signaling: {e}"))
         })?;
 
+        // Serve the proxy on the listener the child just bound inside its
+        // network namespace, for exactly as long as this run lasts: kept
+        // open, it would also keep that namespace alive. No listener means
+        // the child failed its network setup, and already said why on its
+        // stderr before exiting, which the wait below collects.
+        let proxy_attachment = match (&proxy_link, proxy) {
+            (Some(link), Some(proxy)) => match link.receive().map(|l| proxy.attach(l)) {
+                Some(Err(e)) => {
+                    let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
+                    let _ = nix::sys::wait::waitpid(child_pid, None);
+                    return Err(SandboxError::Internal(format!(
+                        "serve the proxy inside the sandbox: {e}"
+                    )));
+                }
+                attached => attached.transpose().ok().flatten(),
+            },
+            _ => None,
+        };
+
         // Stdin is written inside wait_with_timeout's own loop, interleaved
         // with draining stdout/stderr — not sequentially before it. A
         // program that echoes input to output as it goes (e.g. `cat`) can
@@ -509,6 +554,7 @@ impl PlatformExecutor for LinuxExecutor {
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         let (stdout, stderr, exit_code, killed_by_timeout, signal, rusage) =
             wait_with_timeout(child_pid, stdout_read, stderr_read, stdin_pipe, timeout)?;
+        drop(proxy_attachment);
 
         // Without a cgroup, these used to be None. wait4's rusage is the
         // fallback: its CPU time sums the child and the descendants it waited
@@ -556,6 +602,7 @@ impl PlatformExecutor for LinuxExecutor {
             return Err(SandboxError::CgroupV2Unavailable);
         }
         check_mounts(config)?;
+        check_network(config)?;
         let needed = needed_cgroup_controllers(config);
         if !needed.is_empty() {
             CgroupManager::ensure_support(&needed)?;
@@ -808,12 +855,14 @@ impl MountPlan {
 
 /// Ubuntu 23.10+: a fresh user namespace created by an unprivileged,
 /// unconfined process lands in AppArmor's `unprivileged_userns` profile,
-/// which denies mounting (and sethostname) inside it even though the kernel's
-/// own capability model allows both there. Confirmed for real via dmesg
-/// (`apparmor="DENIED" operation="mount" profile="unprivileged_userns"`).
+/// which denies mounting, sethostname, and bringing up a network namespace's
+/// loopback (CAP_NET_ADMIN) inside it, even though the kernel's own
+/// capability model allows all three there. Confirmed for real via dmesg
+/// (`apparmor="DENIED" ... profile="unprivileged_userns"`, for both
+/// `operation="mount"` and `capname="net_admin"`).
 /// Root isn't affected, and neither is an executable with its own AppArmor
 /// profile that allows `userns`.
-fn userns_mounts_denied() -> bool {
+fn userns_restricted_by_apparmor() -> bool {
     if unsafe { libc::geteuid() } == 0 {
         return false;
     }
@@ -828,13 +877,29 @@ fn userns_mounts_denied() -> bool {
 
 /// Refuses, at build() time, mount setups that can only fail or silently do
 /// something other than asked once the sandbox runs.
+fn check_network(config: &SandboxConfig) -> Result<()> {
+    if matches!(config.network_mode, NetworkMode::Proxied { .. }) && userns_restricted_by_apparmor()
+    {
+        // Falling back to the host network would make the whitelist
+        // advisory again: any program ignoring HTTP_PROXY gets straight out.
+        return Err(SandboxError::Config(
+            "allow_network needs to bring up loopback in the sandbox's own network namespace, \
+             which AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
+             unprivileged, unconfined process). Run as root, set that sysctl to 0, or give \
+             this executable an AppArmor profile that allows userns"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn check_mounts(config: &SandboxConfig) -> Result<()> {
     let plan = MountPlan::new(
         config.rootfs.as_deref(),
         &config.mounts,
         &config.tmpfs_mounts,
     )?;
-    if plan.requested() && userns_mounts_denied() {
+    if plan.requested() && userns_restricted_by_apparmor() {
         return Err(SandboxError::Config(
             "rootfs/mount/tmpfs need to mount inside the sandbox's user namespace, which \
              AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
@@ -882,6 +947,176 @@ fn check_mounts(config: &SandboxConfig) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Gets the proxy into a Proxied sandbox's own network namespace, where
+/// nothing else is reachable. The child binds the listener in there -- the
+/// parent can't enter that namespace without CAP_SYS_ADMIN in its own --
+/// and hands it back over a socketpair made before clone(). The parent's
+/// proxy then accepts on it, while connecting out from its own network.
+struct ProxyLink {
+    port: u16,
+    parent: OwnedFd,
+    child: Option<OwnedFd>,
+}
+
+/// The child's half of a `ProxyLink`, copied into the clone() closure.
+#[derive(Clone, Copy)]
+struct ProxyLinkChild {
+    port: u16,
+    fd: RawFd,
+}
+
+/// Fits one cmsghdr carrying a single fd (CMSG_SPACE(sizeof(int)) is 24 on
+/// 64-bit Linux), aligned like one. A stack buffer, so building or reading
+/// it never allocates.
+#[repr(C, align(8))]
+struct FdControl([u8; 32]);
+
+impl ProxyLink {
+    fn new(port: u16) -> Result<Self> {
+        let mut fds = [0; 2];
+        let flags = libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC;
+        if unsafe { libc::socketpair(libc::AF_UNIX, flags, 0, fds.as_mut_ptr()) } != 0 {
+            return Err(SandboxError::Internal(format!(
+                "create proxy socketpair: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        let [parent, child] = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
+        Ok(Self {
+            port,
+            parent,
+            child: Some(child),
+        })
+    }
+
+    fn child_side(&self) -> ProxyLinkChild {
+        ProxyLinkChild {
+            port: self.port,
+            fd: self
+                .child
+                .as_ref()
+                .expect("taken only after clone")
+                .as_raw_fd(),
+        }
+    }
+
+    /// Parent, right after clone(): drop our copy of the child's end, so
+    /// `receive` sees EOF if the child exits or execs without sending.
+    fn close_child_end(&mut self) {
+        self.child = None;
+    }
+
+    /// The child's listener, or None if it never sent one -- it failed, and
+    /// its stderr says why.
+    fn receive(&self) -> Option<std::net::TcpListener> {
+        let mut byte = 0u8;
+        let mut iov = libc::iovec {
+            iov_base: &mut byte as *mut u8 as *mut libc::c_void,
+            iov_len: 1,
+        };
+        let mut control = FdControl([0; 32]);
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.0.as_mut_ptr() as *mut libc::c_void;
+        msg.msg_controllen = control.0.len() as _;
+        loop {
+            let n =
+                unsafe { libc::recvmsg(self.parent.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC) };
+            if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if n <= 0 {
+                return None;
+            }
+            break;
+        }
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            if cmsg.is_null()
+                || (*cmsg).cmsg_level != libc::SOL_SOCKET
+                || (*cmsg).cmsg_type != libc::SCM_RIGHTS
+            {
+                return None;
+            }
+            let fd = std::ptr::read_unaligned(libc::CMSG_DATA(cmsg) as *const libc::c_int);
+            Some(std::net::TcpListener::from_raw_fd(fd))
+        }
+    }
+}
+
+impl ProxyLinkChild {
+    /// Runs in the child between clone() and exec(): raw syscalls only.
+    /// The error names the step that failed, as a static string.
+    fn bind_and_send(self) -> std::result::Result<(), &'static str> {
+        unsafe {
+            // A new network namespace's loopback starts down.
+            let s = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+            if s < 0 {
+                return Err("open a socket to configure loopback");
+            }
+            let mut ifr: libc::ifreq = std::mem::zeroed();
+            ifr.ifr_name[0] = b'l' as libc::c_char;
+            ifr.ifr_name[1] = b'o' as libc::c_char;
+            let up = libc::ioctl(s, libc::SIOCGIFFLAGS as _, &mut ifr) == 0 && {
+                ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+                libc::ioctl(s, libc::SIOCSIFFLAGS as _, &ifr) == 0
+            };
+            libc::close(s);
+            if !up {
+                return Err("bring up loopback");
+            }
+
+            let listener = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if listener < 0 {
+                return Err("open the proxy listener");
+            }
+            let addr = libc::sockaddr_in {
+                sin_family: libc::AF_INET as libc::sa_family_t,
+                sin_port: self.port.to_be(),
+                sin_addr: libc::in_addr {
+                    s_addr: u32::from(std::net::Ipv4Addr::LOCALHOST).to_be(),
+                },
+                sin_zero: [0; 8],
+            };
+            let addr_len = std::mem::size_of_val(&addr) as libc::socklen_t;
+            if libc::bind(
+                listener,
+                &addr as *const _ as *const libc::sockaddr,
+                addr_len,
+            ) != 0
+                || libc::listen(listener, 128) != 0
+            {
+                libc::close(listener);
+                return Err("listen for the proxy");
+            }
+
+            let mut byte = 0u8;
+            let mut iov = libc::iovec {
+                iov_base: &mut byte as *mut u8 as *mut libc::c_void,
+                iov_len: 1,
+            };
+            let mut control = FdControl([0; 32]);
+            let mut msg: libc::msghdr = std::mem::zeroed();
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.0.as_mut_ptr() as *mut libc::c_void;
+            msg.msg_controllen = libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) as _;
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
+            std::ptr::write_unaligned(libc::CMSG_DATA(cmsg) as *mut libc::c_int, listener);
+            let sent = libc::sendmsg(self.fd, &msg, 0);
+            libc::close(listener);
+            if sent != 1 {
+                return Err("hand the proxy listener to the parent");
+            }
+        }
+        Ok(())
+    }
 }
 
 fn path_cstring(path: &std::path::Path) -> Result<CString> {

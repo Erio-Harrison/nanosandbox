@@ -15,6 +15,18 @@ pub struct ProxiedNetwork {
     proxy_url: String,
     shutdown_tx: watch::Sender<bool>,
     thread: Option<JoinHandle<()>>,
+    /// The proxy thread's runtime and whitelist, for `attach`.
+    #[cfg(target_os = "linux")]
+    runtime: tokio::runtime::Handle,
+    #[cfg(target_os = "linux")]
+    allowed: std::sync::Arc<std::collections::HashSet<String>>,
+}
+
+/// Keeps serving an attached listener; dropping it stops that and closes
+/// the listener.
+#[cfg(target_os = "linux")]
+pub(crate) struct Attachment {
+    _stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl ProxiedNetwork {
@@ -35,6 +47,11 @@ impl ProxiedNetwork {
         // is no separate "reserve a port, then bind it again" step, so there is no
         // window for another process to grab the port in between.
         let (bound_tx, bound_rx) = mpsc::channel::<std::io::Result<std::net::SocketAddr>>();
+        let proxy = HttpProxy::new(allowed_domains, 0);
+        #[cfg(target_os = "linux")]
+        let allowed = proxy.allowed_domains();
+        #[cfg(target_os = "linux")]
+        let (runtime_tx, runtime_rx) = mpsc::channel::<tokio::runtime::Handle>();
 
         // The runtime is built and dropped entirely on this dedicated OS thread,
         // so it never nests inside whatever runtime the caller happens to be on.
@@ -56,10 +73,11 @@ impl ProxiedNetwork {
                         return;
                     }
                 };
+                #[cfg(target_os = "linux")]
+                let _ = runtime_tx.send(rt.handle().clone());
                 rt.block_on(async move {
-                    // Port 0: ask the OS for any free ephemeral port, reported back
-                    // once run() has actually bound it.
-                    let proxy = HttpProxy::new(allowed_domains, 0);
+                    // Port 0 (see `proxy` above): ask the OS for any free
+                    // ephemeral port, reported back once run() has bound it.
                     if let Err(e) = proxy.run(shutdown_rx, Some(bound_tx)).await {
                         tracing::error!("Proxy error: {e}");
                     }
@@ -87,7 +105,34 @@ impl ProxiedNetwork {
             proxy_url: format!("http://127.0.0.1:{proxy_port}"),
             shutdown_tx,
             thread: Some(thread),
+            // Sent before run() binds, so it's here once bound_rx said so.
+            #[cfg(target_os = "linux")]
+            runtime: runtime_rx
+                .recv()
+                .map_err(|_| SandboxError::Internal("proxy runtime went away".into()))?,
+            #[cfg(target_os = "linux")]
+            allowed,
         })
+    }
+
+    /// Also serves the proxy on `listener` -- one bound inside a sandbox's
+    /// own network namespace, where the sandbox can reach it but nothing
+    /// else -- until the returned `Attachment` is dropped. Connections made
+    /// on the sandbox's behalf still go out from this process's network.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn attach(&self, listener: std::net::TcpListener) -> std::io::Result<Attachment> {
+        listener.set_nonblocking(true)?;
+        let listener = {
+            let _runtime = self.runtime.enter();
+            tokio::net::TcpListener::from_std(listener)?
+        };
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let stop = async move {
+            let _ = stop_rx.await;
+        };
+        self.runtime
+            .spawn(HttpProxy::serve(listener, self.allowed.clone(), stop));
+        Ok(Attachment { _stop: stop_tx })
     }
 
     /// Get the proxy port

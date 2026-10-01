@@ -84,7 +84,7 @@ fn test_cpu_bomb_contained() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_disk_bomb_contained_tmpfs() {
-    if crate::common::skip_without_mounts() {
+    if crate::common::skip_without_userns_privileges() {
         return;
     }
     let sandbox = Sandbox::builder()
@@ -166,7 +166,7 @@ print(f'opened {len(fds)} fds')
 #[test]
 #[cfg(target_os = "linux")]
 fn test_directory_bomb_contained() {
-    if crate::common::skip_without_mounts() {
+    if crate::common::skip_without_userns_privileges() {
         return;
     }
     let sandbox = Sandbox::builder()

@@ -2,13 +2,15 @@
 
 /// Ubuntu 23.10+ confines a fresh user namespace created by an unprivileged,
 /// unconfined process to AppArmor's `unprivileged_userns` profile, which
-/// denies mounting inside it. Mirrors the library's own check, which then
-/// refuses rootfs/mount/tmpfs at build() and skips the private /proc.
+/// denies the capabilities nanosandbox needs inside it (mounting, bringing up
+/// a network namespace's loopback). Mirrors the library's own check, which
+/// then refuses rootfs/mount/tmpfs and allow_network at build(), and skips
+/// the private /proc.
 ///
 /// Prints why and returns true when that applies, so a test that needs
-/// mounts can return early instead of failing on the environment.
+/// those can return early instead of failing on the environment.
 #[allow(dead_code)]
-pub fn skip_without_mounts() -> bool {
+pub fn skip_without_userns_privileges() -> bool {
     #[cfg(target_os = "linux")]
     {
         let restricted =
@@ -19,8 +21,8 @@ pub fn skip_without_mounts() -> bool {
             .map_or(true, |label| label.trim() == "unconfined");
         if restricted && unconfined && unsafe { libc::geteuid() } != 0 {
             eprintln!(
-                "skipping: kernel.apparmor_restrict_unprivileged_userns=1 denies mounts in the \
-                 sandbox's user namespace"
+                "skipping: kernel.apparmor_restrict_unprivileged_userns=1 denies capabilities \
+                 in the sandbox's user namespace"
             );
             return true;
         }

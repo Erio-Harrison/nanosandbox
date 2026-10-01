@@ -8,50 +8,67 @@
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: Direct IP connections should be blocked when using domain whitelist
+/// Test: with a domain whitelist, the proxy is the only way out. A client
+/// that skips it (`--noproxy`) must not reach anything, and asking the proxy
+/// for a non-whitelisted address must get a 403.
 ///
-/// KNOWN LIMITATION: Currently, sandboxed processes can bypass the domain whitelist
-/// by connecting directly via IP. Proper fix requires network namespace (Linux) or
-/// PF firewall rules (macOS) to force all traffic through the proxy.
-///
-/// This test is ignored until the fix is implemented.
+/// The target is a local server, so this needs no internet and can count
+/// connections: it must never see one. It used to check `curl -s ... &&`,
+/// which counted the proxy's own 403 page as a successful connection.
 #[test]
-#[ignore = "P0 TODO: Direct IP bypass prevention not yet implemented"]
 #[cfg(unix)]
 fn test_ip_bypass_blocked() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server_hits = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nreached");
+        }
+    });
+
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .allow_network(&["example.com"]) // Only example.com allowed
-        .wall_time_limit(Duration::from_secs(10))
+        .allow_network(&["example.com"])
+        .wall_time_limit(Duration::from_secs(15))
         .build()
         .unwrap();
 
-    // Try to connect directly to an IP (Google's DNS for example)
-    // This should be blocked since it bypasses the domain whitelist
-    let result = sandbox
-        .run(
-            "sh",
-            &[
-                "-c",
-                r#"
-        # Try direct IP connection (should fail if properly secured)
-        if command -v curl >/dev/null 2>&1; then
-            curl -s --connect-timeout 3 http://8.8.8.8/ 2>&1 && echo "DIRECT_IP_WORKED"
-        elif command -v nc >/dev/null 2>&1; then
-            echo "GET / HTTP/1.0\r\n\r\n" | nc -w 3 8.8.8.8 80 2>&1 && echo "DIRECT_IP_WORKED"
-        else
-            echo "NO_TOOLS"
-        fi
-    "#,
-            ],
-        )
-        .unwrap();
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         echo direct=$(curl -s -o /dev/null -w '%{{http_code}}' --noproxy '*' --connect-timeout 3 http://127.0.0.1:{port}/)
+         echo proxied=$(curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 http://127.0.0.1:{port}/)"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    let out = result.stdout.trim();
+    if out == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
 
-    // Direct IP connection should NOT work
     assert!(
-        !result.stdout.contains("DIRECT_IP_WORKED"),
-        "SECURITY: Direct IP bypass succeeded! Sandboxed process connected to 8.8.8.8 despite domain whitelist. Stdout: {}",
-        result.stdout
+        out.contains("direct=000"),
+        "SECURITY: bypassing the proxy reached a host service: {out}"
+    );
+    assert!(
+        out.contains("proxied=403"),
+        "proxy didn't refuse a non-whitelisted address: {out}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "SECURITY: the target saw a connection from the sandbox ({out})"
     );
 }
 
@@ -59,6 +76,9 @@ fn test_ip_bypass_blocked() {
 #[test]
 #[cfg(unix)]
 fn test_non_whitelisted_domain_blocked() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["api.example.com"]) // Only api.example.com allowed
@@ -102,6 +122,9 @@ fn test_non_whitelisted_domain_blocked() {
 #[test]
 #[cfg(unix)]
 fn test_whitelisted_domain_allowed() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -154,6 +177,9 @@ fn test_whitelisted_domain_allowed() {
 #[test]
 #[cfg(unix)]
 fn test_wildcard_domain_matching() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["*.example.com"])
@@ -188,13 +214,15 @@ fn test_wildcard_domain_matching() {
 
 /// Test: HTTPS (CONNECT) tunneling should respect whitelist
 ///
-/// KNOWN LIMITATION: HTTPS blocking requires the connection to go through
-/// the proxy. If the client bypasses the proxy (direct connection), this
-/// test will fail. See test_ip_bypass_blocked for the related issue.
+/// Checks the CONNECT response code itself. The proxy refuses before
+/// connecting anywhere, so this needs no internet. It used to grep `curl -s`
+/// output, but `-s` hides the CONNECT failure, so a refusal read as ALLOWED.
 #[test]
-#[ignore = "P0 TODO: HTTPS blocking depends on preventing proxy bypass"]
 #[cfg(unix)]
 fn test_https_tunnel_respects_whitelist() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["api.github.com"])
@@ -202,35 +230,25 @@ fn test_https_tunnel_respects_whitelist() {
         .build()
         .unwrap();
 
-    // Try HTTPS to non-whitelisted domain through proxy
     let result = sandbox
         .run(
             "sh",
             &[
                 "-c",
-                r#"
-        if ! command -v curl >/dev/null 2>&1; then
-            echo "NO_CURL"
-            exit 0
-        fi
-
-        # Force use of proxy for HTTPS
-        response=$(curl -s --connect-timeout 5 --proxy "$https_proxy" https://google.com 2>&1)
-        if echo "$response" | grep -iq "403\|forbidden\|whitelist\|failed\|proxy"; then
-            echo "BLOCKED"
-        else
-            echo "ALLOWED"
-        fi
-    "#,
+                "command -v curl >/dev/null || { echo NO_CURL; exit 0; }
+                 curl -s -o /dev/null -w '%{http_connect}' --connect-timeout 5 https://google.com/",
             ],
         )
         .unwrap();
 
     let output = result.stdout.trim();
-    assert!(
-        output.contains("BLOCKED") || output.contains("NO_CURL") || result.exit_code != 0,
-        "HTTPS to non-whitelisted domain was not blocked: {}",
-        output
+    if output == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert_eq!(
+        output, "403",
+        "CONNECT to a non-whitelisted domain wasn't refused"
     );
 }
 
@@ -284,6 +302,9 @@ fn test_network_none_blocks_all() {
 #[test]
 #[cfg(unix)]
 fn test_localhost_always_allowed() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["example.com"]) // Whitelist mode

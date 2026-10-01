@@ -36,7 +36,7 @@ These three subsystems were **developed independently**, each with its own API, 
 | User | UID/GID mapping | `CLONE_NEWUSER` |
 | PID | Process IDs | `CLONE_NEWPID` |
 | Mount | Filesystem mounts | `CLONE_NEWNS` |
-| Network | Network stack | `CLONE_NEWNET` |
+| Network | Network stack (`no_network()`, `allow_network()`; not `host_network()`) | `CLONE_NEWNET` |
 | UTS | Hostname | `CLONE_NEWUTS` |
 | IPC | Inter-process communication | `CLONE_NEWIPC` |
 
@@ -119,6 +119,26 @@ All of this runs between `clone()` and `exec()`, using paths prepared
 beforehand and raw syscalls only: `clone()` copies the whole multi-threaded
 parent, and allocating in the child can deadlock on a lock another thread
 held at that moment.
+
+### Network Namespace
+
+`no_network()` gives the sandbox an empty network namespace. `allow_network()`
+gives it one too, with the domain-whitelisting proxy as its only way out:
+
+1. Before `exec`, the child brings up loopback in its namespace, listens on
+   `127.0.0.1:<proxy port>` there, and sends that listener to the parent over
+   a socketpair made before `clone()` (`SCM_RIGHTS`). The parent can't do
+   this itself: entering the child's namespace takes `CAP_SYS_ADMIN` in the
+   parent's own user namespace.
+2. The parent's proxy accepts on that listener for the length of the run,
+   and opens the outbound connections from the host's network. Closing the
+   listener when the run ends lets the namespace go away.
+
+`HTTP_PROXY`/`HTTPS_PROXY` point at `127.0.0.1:<proxy port>`, so this is
+transparent to programs that use them. A program that doesn't gets nowhere:
+there are no other interfaces and no DNS, and connections fail immediately
+rather than timing out. Without this, the whitelist only held for programs
+that chose to honor the proxy variables.
 
 ## 2. Cgroups v2 (Resource Limits)
 
@@ -291,6 +311,10 @@ root nor running under its own AppArmor profile. For such a caller:
 
 - `build()` refuses `rootfs(...)`, `mount(...)` and `tmpfs(...)`, with an
   error that says why.
+- `build()` refuses `allow_network(...)` too: loopback can't be brought up in
+  the sandbox's network namespace (`CAP_NET_ADMIN` is denied), and falling
+  back to the host network would let programs skip the proxy.
+  `no_network()` still works.
 - The sandbox gets no private `/proc` and no `hostname`. Both are skipped
   quietly, with one `tracing` warning per process, instead of writing to the
   program's stderr on every run.

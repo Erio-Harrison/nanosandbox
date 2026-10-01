@@ -69,12 +69,39 @@ impl HttpProxy {
         }
         tracing::info!("HTTP proxy listening on {}", actual_addr);
 
+        let stop = async move {
+            while shutdown.changed().await.is_ok() {
+                if *shutdown.borrow() {
+                    break;
+                }
+            }
+            tracing::info!("Proxy shutting down");
+        };
+        Self::serve(listener, Arc::clone(&self.allowed_domains), stop).await;
+        Ok(())
+    }
+
+    /// The domains this proxy lets through.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn allowed_domains(&self) -> Arc<HashSet<String>> {
+        Arc::clone(&self.allowed_domains)
+    }
+
+    /// Accepts and proxies connections on `listener` until `stop` completes.
+    /// Also used for listeners bound inside a sandbox's own network namespace
+    /// (see `ProxiedNetwork::attach`), so it doesn't need `&self`.
+    pub(crate) async fn serve(
+        listener: TcpListener,
+        allowed: Arc<HashSet<String>>,
+        stop: impl std::future::Future<Output = ()>,
+    ) {
+        tokio::pin!(stop);
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
-                            let allowed = Arc::clone(&self.allowed_domains);
+                            let allowed = Arc::clone(&allowed);
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, &allowed).await {
                                     tracing::debug!("Connection from {} error: {}", addr, e);
@@ -86,16 +113,9 @@ impl HttpProxy {
                         }
                     }
                 }
-                _ = shutdown.changed() => {
-                    if *shutdown.borrow() {
-                        tracing::info!("Proxy shutting down");
-                        break;
-                    }
-                }
+                _ = &mut stop => break,
             }
         }
-
-        Ok(())
     }
 
     /// Run the proxy server without shutdown signal (for simpler use cases)

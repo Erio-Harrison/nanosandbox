@@ -166,7 +166,7 @@ fn test_sandbox_id_unique() {
 fn test_presets() {
     // Presets mount these directories in place and a private tmpfs on /tmp
     // -- which needs mounts, and directories outside /tmp.
-    if common::skip_without_mounts() {
+    if common::skip_without_userns_privileges() {
         return;
     }
     let temp =
@@ -258,6 +258,9 @@ fn test_proxied_network_setup() {
 
 #[test]
 fn test_sandbox_with_proxied_network() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["example.com"])
@@ -276,6 +279,9 @@ fn test_sandbox_with_proxied_network() {
 
 #[test]
 fn test_proxy_env_vars_in_sandbox() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["api.example.com"])

@@ -16,6 +16,9 @@ use std::time::Duration;
 #[test]
 #[cfg(unix)]
 fn test_proxy_chunked_transfer() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -70,6 +73,9 @@ fn test_proxy_chunked_transfer() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_keepalive() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -116,6 +122,9 @@ fn test_proxy_keepalive() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_large_response() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -160,6 +169,9 @@ fn test_proxy_large_response() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_connection_refused() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["localhost"])
@@ -205,6 +217,9 @@ fn test_proxy_connection_refused() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_malformed_response() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -238,6 +253,9 @@ fn test_proxy_malformed_response() {
 /// Test: Multiple proxied sandboxes should get unique ports
 #[test]
 fn test_proxy_unique_ports() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let mut ports = vec![];
 
     for _ in 0..5 {
@@ -281,6 +299,9 @@ fn test_proxy_unique_ports() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_https_connect() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])
@@ -326,6 +347,9 @@ fn test_proxy_https_connect() {
 #[test]
 #[cfg(unix)]
 fn test_proxy_concurrent_requests() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .allow_network(&["httpbin.org"])

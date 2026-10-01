@@ -1,6 +1,6 @@
 //! Custom rootfs tests (Linux): mounts, tmpfs and pivot_root.
 
-use crate::common::skip_without_mounts;
+use crate::common::skip_without_userns_privileges;
 use nanosandbox::{Permission, Sandbox};
 use std::path::Path;
 
@@ -19,7 +19,7 @@ fn minimal_rootfs(root: &Path) -> nanosandbox::SandboxBuilder {
 
 #[test]
 fn test_readonly_mount_rejects_writes() {
-    if skip_without_mounts() {
+    if skip_without_userns_privileges() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -42,7 +42,7 @@ fn test_readonly_mount_rejects_writes() {
 
 #[test]
 fn test_readwrite_mount_and_tmpfs() {
-    if skip_without_mounts() {
+    if skip_without_userns_privileges() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -71,7 +71,7 @@ fn test_readwrite_mount_and_tmpfs() {
 /// directory, so concurrent runs on the same rootfs failed setup.
 #[test]
 fn test_concurrent_sandboxes_share_rootfs() {
-    if skip_without_mounts() {
+    if skip_without_userns_privileges() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
