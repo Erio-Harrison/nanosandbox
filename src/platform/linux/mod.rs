@@ -111,9 +111,17 @@ impl PlatformExecutor for LinuxExecutor {
         stdin: Option<&[u8]>,
         proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
+        use nix::fcntl::OFlag;
         use nix::sched::{clone, CloneFlags};
         use nix::sys::signal::Signal;
-        use nix::unistd::pipe;
+        use nix::unistd::pipe2;
+
+        // Close-on-exec, so no sandboxed program inherits them. Without it,
+        // a run on another thread that clone()s while these are open hands
+        // them to its own program: it could read this run's stdin, write
+        // into its output, and hold its stdin open so it never sees EOF.
+        // dup2() onto 0/1/2 in our own child clears the flag on those.
+        let pipe = || pipe2(OFlag::O_CLOEXEC);
 
         const STACK_SIZE: usize = 1024 * 1024;
 
@@ -362,10 +370,8 @@ impl PlatformExecutor for LinuxExecutor {
                 }
                 let _ = close_raw(stdin_fd);
             }
-            // clone() inherited our copy of the write end too (pipe() isn't
-            // O_CLOEXEC); left open, it survives execvp and keeps the pipe's
-            // write side alive under the exec'd program, so it never sees
-            // EOF on stdin. Close it — we (the child) never write to it.
+            // clone() inherited our copy of the write end too. It's
+            // close-on-exec, but close it now anyway: we never write to it.
             if let Some(fd) = stdin_write {
                 let _ = close_raw(fd);
             }

@@ -319,3 +319,48 @@ fn test_parallel_cleanup() {
         zombies
     );
 }
+
+/// Test: a sandboxed program gets only its own stdin/stdout/stderr, even
+/// while other runs on other threads have their pipes open. They used to
+/// leak in, letting one sandbox read and write another's I/O.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_no_fds_leak_between_concurrent_runs() {
+    let sandbox = Arc::new(
+        Sandbox::builder()
+            .working_dir("/tmp")
+            .wall_time_limit(Duration::from_secs(10))
+            .build()
+            .unwrap(),
+    );
+
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let sandbox = Arc::clone(&sandbox);
+            thread::spawn(move || {
+                let mut leaks = Vec::new();
+                for _ in 0..15 {
+                    // `ls` itself holds the directory open as fd 3.
+                    let result = sandbox
+                        .run_with_input(
+                            "sh",
+                            &["-c", "cat >/dev/null; ls /proc/self/fd"],
+                            Some(b"in"),
+                        )
+                        .unwrap();
+                    let fds: Vec<&str> = result.stdout.split_whitespace().collect();
+                    if fds != ["0", "1", "2", "3"] {
+                        leaks.push(result.stdout);
+                    }
+                }
+                leaks
+            })
+        })
+        .collect();
+
+    let leaks: Vec<String> = handles
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    assert!(leaks.is_empty(), "fds leaked into sandboxes: {leaks:?}");
+}
