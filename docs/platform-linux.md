@@ -283,21 +283,30 @@ ls /sys/fs/cgroup/cgroup.controllers
 
 Ubuntu's AppArmor confines a freshly-created unprivileged user namespace to its
 `unprivileged_userns` profile (security hardening against user-namespace-based
-privilege escalation). That profile denies some `CAP_SYS_ADMIN`-requiring
-calls even though the kernel's own capability model would allow them for the
-namespace's creator — in particular, `sethostname()`, so the in-sandbox
-hostname can silently not take effect on these systems. Confirmed via
-`dmesg | grep apparmor` showing an `operation="userns_create" ...
-target="unprivileged_userns"` transition line, and reproduced with a minimal
-`clone(CLONE_NEWUSER | CLONE_NEWUTS)` program outside of nanosandbox
-entirely. This doesn't affect sandbox isolation itself — only that one
-cosmetic setting — and the platform code already logs it and continues
-rather than failing the run:
+privilege escalation). That profile denies `CAP_SYS_ADMIN`-requiring calls
+even though the kernel's own capability model would allow them for the
+namespace's creator. Confirmed via `dmesg | grep apparmor` and reproduced with
+a minimal `clone(CLONE_NEWUSER | CLONE_NEWUTS)` program outside of
+nanosandbox entirely. For a non-root caller this means:
+
+- `hostname(...)` silently doesn't take effect. The run continues; stderr
+  gets `Failed to set hostname`.
+- `rootfs(...)` fails every run with `Mount setup failed: mark all mounts as
+  private`, along with the `mount(...)`/`tmpfs(...)` that only apply under a
+  rootfs.
+
+Running as root, or turning the restriction off, avoids both:
 
 ```bash
 # Confirm this is what's happening
 sudo dmesg | grep -i "unprivileged_userns"
+
+# Lift it until the next reboot (or persist it in /etc/sysctl.d/)
+sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
 ```
+
+The rootfs tests in `tests/security/rootfs.rs` skip themselves when this
+restriction applies.
 
 ## References
 

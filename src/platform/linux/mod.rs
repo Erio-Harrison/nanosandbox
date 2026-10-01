@@ -187,8 +187,7 @@ impl PlatformExecutor for LinuxExecutor {
         // Allocate stack for child
         let mut stack = vec![0u8; STACK_SIZE];
 
-        // Clone config for child
-        let child_config = config.clone();
+        let seccomp_profile = config.seccomp_profile.clone();
         let mut env = config.env.clone();
 
         // Add proxy environment variables if using proxied network
@@ -249,6 +248,14 @@ impl PlatformExecutor for LinuxExecutor {
         // eprintln!, itself called from this closure after clone().
         let working_dir_cstr = CString::new(config.working_dir.as_os_str().as_bytes()).ok();
         let hostname = config.hostname.clone();
+        let mount_plan = match &config.rootfs {
+            Some(rootfs) => Some(MountPlan::new(
+                rootfs,
+                &config.mounts,
+                &config.tmpfs_mounts,
+            )?),
+            None => None,
+        };
 
         // Create user namespace config
         let user_ns = UserNamespace::new(config.uid, config.gid);
@@ -325,11 +332,11 @@ impl PlatformExecutor for LinuxExecutor {
             }
 
             // Setup mount namespace if needed
-            if let Some(rootfs) = &child_config.rootfs {
-                if setup_mount_namespace(rootfs, &child_config.mounts, &child_config.tmpfs_mounts)
-                    .is_err()
-                {
-                    let _ = write_raw(2, b"Mount setup failed\n");
+            if let Some(plan) = &mount_plan {
+                if let Err(step) = plan.apply() {
+                    let _ = write_raw(2, b"Mount setup failed: ");
+                    let _ = write_raw(2, step.as_bytes());
+                    let _ = write_raw(2, b"\n");
                     return 1;
                 }
             }
@@ -349,8 +356,8 @@ impl PlatformExecutor for LinuxExecutor {
             }
 
             // Apply seccomp filter
-            if !matches!(child_config.seccomp_profile, SeccompProfile::Disabled)
-                && SeccompFilter::apply(&child_config.seccomp_profile).is_err()
+            if !matches!(seccomp_profile, SeccompProfile::Disabled)
+                && SeccompFilter::apply(&seccomp_profile).is_err()
             {
                 let _ = write_raw(2, b"Seccomp setup failed\n");
             }
@@ -493,96 +500,193 @@ fn needed_cgroup_controllers(config: &SandboxConfig) -> Vec<&'static str> {
     needed
 }
 
-fn setup_mount_namespace(
-    rootfs: &std::path::Path,
-    mounts: &[Mount],
-    tmpfs_mounts: &[(std::path::PathBuf, u64)],
-) -> Result<()> {
-    use nix::mount::{mount, MsFlags};
+/// One mount-namespace setup step, with every path and option string
+/// already built -- see `MountPlan`.
+enum MountStep {
+    /// `mkdir`, EEXIST ignored. Issued per path component, in order with the
+    /// mounts, so a target nested inside an earlier mount is created inside
+    /// that mount, same as `create_dir_all` right before each mount was.
+    Mkdir(CString),
+    /// `readonly` holds the source's locked flags (nosuid/nodev/noexec) to
+    /// repeat on the read-only remount: in a user namespace, a remount that
+    /// drops a locked flag fails with EPERM.
+    Bind {
+        source: CString,
+        target: CString,
+        readonly: Option<libc::c_ulong>,
+    },
+    Tmpfs {
+        target: CString,
+        options: CString,
+    },
+}
 
-    // Make everything private
-    mount::<str, str, str, str>(None, "/", None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None)
-        .map_err(|e| SandboxError::Internal(format!("mark all mounts as private: {e}")))?;
+/// Everything the child needs to set up its mount namespace, built before
+/// clone() so the child only issues raw syscalls -- the same
+/// no-allocation-after-clone() rule as envp_cstr/working_dir_cstr.
+struct MountPlan {
+    rootfs: CString,
+    steps: Vec<MountStep>,
+}
 
-    // Bind mount rootfs
-    mount(
-        Some(rootfs),
-        rootfs,
-        None::<&str>,
-        MsFlags::MS_BIND | MsFlags::MS_REC,
-        None::<&str>,
-    )
-    .map_err(|e| {
-        SandboxError::Internal(format!("bind mount rootfs at {}: {e}", rootfs.display()))
-    })?;
-
-    // Setup mounts
-    for m in mounts {
-        let target = rootfs.join(m.target.strip_prefix("/").unwrap_or(&m.target));
-        std::fs::create_dir_all(&target)?;
-
-        let mut flags = MsFlags::MS_BIND;
-        if m.permission == Permission::ReadOnly {
-            flags |= MsFlags::MS_RDONLY;
+impl MountPlan {
+    fn new(
+        rootfs: &std::path::Path,
+        mounts: &[Mount],
+        tmpfs_mounts: &[(std::path::PathBuf, u64)],
+    ) -> Result<Self> {
+        let mut steps = Vec::new();
+        for m in mounts {
+            let target = Self::push_mkdirs(&mut steps, rootfs, &m.target)?;
+            let source = path_cstring(&m.source)?;
+            let readonly = (m.permission == Permission::ReadOnly).then(|| locked_flags(&source));
+            steps.push(MountStep::Bind {
+                source,
+                target,
+                readonly,
+            });
         }
-
-        mount(Some(&m.source), &target, None::<&str>, flags, None::<&str>).map_err(|e| {
-            SandboxError::Internal(format!(
-                "bind mount {} -> {}: {e}",
-                m.source.display(),
-                m.target.display()
-            ))
-        })?;
+        for (path, size) in tmpfs_mounts {
+            let target = Self::push_mkdirs(&mut steps, rootfs, path)?;
+            let options = CString::new(format!("size={size}")).expect("no NUL in a number");
+            steps.push(MountStep::Tmpfs { target, options });
+        }
+        Ok(Self {
+            rootfs: path_cstring(rootfs)?,
+            steps,
+        })
     }
 
-    // Setup tmpfs mounts
-    for (path, size) in tmpfs_mounts {
-        let target = rootfs.join(path.strip_prefix("/").unwrap_or(path));
-        std::fs::create_dir_all(&target)?;
-
-        let options = format!("size={}", size);
-        mount(
-            None::<&str>,
-            &target,
-            Some("tmpfs"),
-            MsFlags::empty(),
-            Some(options.as_str()),
-        )
-        .map_err(|e| {
-            SandboxError::Internal(format!(
-                "mount tmpfs at {} (size={}): {e}",
-                path.display(),
-                size
-            ))
-        })?;
+    /// Queues a mkdir for each component of `target` under `rootfs`, returning
+    /// the full target path.
+    fn push_mkdirs(
+        steps: &mut Vec<MountStep>,
+        rootfs: &std::path::Path,
+        target: &std::path::Path,
+    ) -> Result<CString> {
+        let mut path = rootfs.to_path_buf();
+        for component in target.strip_prefix("/").unwrap_or(target).components() {
+            path.push(component);
+            steps.push(MountStep::Mkdir(path_cstring(&path)?));
+        }
+        path_cstring(&path)
     }
 
-    // Pivot root
-    let old_root = rootfs.join("old_root");
-    std::fs::create_dir_all(&old_root)?;
+    /// Runs in the child between clone() and exec(): raw syscalls only.
+    /// The error names the step that failed, as a static string.
+    fn apply(&self) -> std::result::Result<(), &'static str> {
+        let null = std::ptr::null();
+        unsafe {
+            if libc::mount(
+                null,
+                c"/".as_ptr(),
+                null,
+                libc::MS_REC | libc::MS_PRIVATE,
+                null as _,
+            ) != 0
+            {
+                return Err("mark all mounts as private");
+            }
+            let rootfs = self.rootfs.as_ptr();
+            if libc::mount(
+                rootfs,
+                rootfs,
+                null,
+                libc::MS_BIND | libc::MS_REC,
+                null as _,
+            ) != 0
+            {
+                return Err("bind mount rootfs");
+            }
+            for step in &self.steps {
+                match step {
+                    MountStep::Mkdir(path) => {
+                        if libc::mkdir(path.as_ptr(), 0o755) != 0
+                            && *libc::__errno_location() != libc::EEXIST
+                        {
+                            return Err("create mount target");
+                        }
+                    }
+                    MountStep::Bind {
+                        source,
+                        target,
+                        readonly,
+                    } => {
+                        if libc::mount(
+                            source.as_ptr(),
+                            target.as_ptr(),
+                            null,
+                            libc::MS_BIND,
+                            null as _,
+                        ) != 0
+                        {
+                            return Err("bind mount");
+                        }
+                        // MS_RDONLY is ignored when a bind mount is created;
+                        // it only takes effect on a remount. Confirmed for
+                        // real: a ReadOnly mount without this was writable,
+                        // and the write landed on the host directory.
+                        if let Some(locked) = readonly {
+                            let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | locked;
+                            if libc::mount(null, target.as_ptr(), null, flags, null as _) != 0 {
+                                return Err("remount bind mount read-only");
+                            }
+                        }
+                    }
+                    MountStep::Tmpfs { target, options } => {
+                        let tmpfs = c"tmpfs".as_ptr();
+                        if libc::mount(tmpfs, target.as_ptr(), tmpfs, 0, options.as_ptr() as _) != 0
+                        {
+                            return Err("mount tmpfs");
+                        }
+                    }
+                }
+            }
+            // pivot_root(".", ".") then detaching "." stacks the old root on
+            // the new one and drops it, with no put_old directory. Every
+            // sandbox used to share one `<rootfs>/old_root`, so concurrent
+            // runs on the same rootfs raced creating, pivoting into, and
+            // removing it -- confirmed for real as "Mount setup failed" under
+            // 20 concurrent runs. Same approach as runc.
+            if libc::chdir(rootfs) != 0 {
+                return Err("chdir into rootfs");
+            }
+            if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) != 0 {
+                return Err("pivot_root");
+            }
+            if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
+                return Err("detach old root");
+            }
+            if libc::chdir(c"/".as_ptr()) != 0 {
+                return Err("chdir to new root");
+            }
+        }
+        Ok(())
+    }
+}
 
-    nix::unistd::pivot_root(rootfs, &old_root).map_err(|e| {
-        SandboxError::Internal(format!(
-            "pivot_root into sandbox at {}: {e}",
-            rootfs.display()
-        ))
-    })?;
-    std::env::set_current_dir("/")?;
+fn path_cstring(path: &std::path::Path) -> Result<CString> {
+    CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| SandboxError::Config(format!("path contains a NUL byte: {}", path.display())))
+}
 
-    // Unmount old root
-    mount::<str, str, str, str>(
-        None,
-        "/old_root",
-        None,
-        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
-        None,
-    )
-    .map_err(|e| SandboxError::Internal(format!("mark /old_root as private mount: {e}")))?;
-    nix::mount::umount2("/old_root", nix::mount::MntFlags::MNT_DETACH)
-        .map_err(|e| SandboxError::Internal(format!("detach /old_root mount: {e}")))?;
-    std::fs::remove_dir("/old_root")?;
-
-    Ok(())
+/// nosuid/nodev/noexec currently set on the mount holding `path`.
+fn locked_flags(path: &CString) -> libc::c_ulong {
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut st) } != 0 {
+        return 0;
+    }
+    let mut flags = 0;
+    for (st_flag, ms_flag) in [
+        (libc::ST_NOSUID, libc::MS_NOSUID),
+        (libc::ST_NODEV, libc::MS_NODEV),
+        (libc::ST_NOEXEC, libc::MS_NOEXEC),
+    ] {
+        if st.f_flag & st_flag != 0 {
+            flags |= ms_flag;
+        }
+    }
+    flags
 }
 
 fn wait_with_timeout(
