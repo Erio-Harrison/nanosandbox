@@ -10,7 +10,7 @@
 use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig, SeccompProfile};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
-use crate::platform::PlatformExecutor;
+use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -257,6 +257,34 @@ impl PlatformExecutor for LinuxExecutor {
             None => None,
         };
 
+        // Applied with raw setrlimit() in the child; built here for the same
+        // no-allocation-after-clone() reason as everything above. These used
+        // to be silently ignored on Linux -- confirmed for real: `ulimit -n`
+        // reported 1024 under max_open_files(20), and cpu_time_limit (the
+        // code_judge preset's main limit) wasn't applied at all.
+        let mut rlimits = Vec::new();
+        if let Some(n) = config.max_open_files {
+            rlimits.push((
+                libc::RLIMIT_NOFILE,
+                u64::from(n),
+                &b"Failed to apply max_open_files\n"[..],
+            ));
+        }
+        if let Some(size) = config.max_file_size {
+            rlimits.push((
+                libc::RLIMIT_FSIZE,
+                size,
+                &b"Failed to apply max_file_size\n"[..],
+            ));
+        }
+        if let Some(cpu) = config.cpu_time_limit {
+            rlimits.push((
+                libc::RLIMIT_CPU,
+                rlimit_cpu_secs(cpu),
+                &b"Failed to apply cpu_time_limit\n"[..],
+            ));
+        }
+
         // Create user namespace config
         let user_ns = UserNamespace::new(config.uid, config.gid);
 
@@ -352,6 +380,17 @@ impl PlatformExecutor for LinuxExecutor {
                     unsafe {
                         libc::chdir(dir.as_ptr());
                     }
+                }
+            }
+
+            for (resource, value, failure) in &rlimits {
+                let limit = libc::rlimit {
+                    rlim_cur: *value as libc::rlim_t,
+                    rlim_max: *value as libc::rlim_t,
+                };
+                if unsafe { libc::setrlimit(*resource, &limit) } != 0 {
+                    let _ = write_raw(2, failure);
+                    return 1;
                 }
             }
 

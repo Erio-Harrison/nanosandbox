@@ -25,6 +25,14 @@ use crate::error::Result;
 use crate::network::ProxiedNetwork;
 use crate::result::ExecutionResult;
 
+/// `cpu_time_limit` as RLIMIT_CPU, which counts whole seconds: rounded up,
+/// and never below 1. Truncating instead meant a sub-second limit became 0
+/// and was skipped, i.e. no limit at all.
+#[cfg(unix)]
+pub(crate) fn rlimit_cpu_secs(limit: std::time::Duration) -> u64 {
+    (limit.as_secs() + u64::from(limit.subsec_nanos() > 0)).max(1)
+}
+
 /// Platform-specific sandbox executor trait
 ///
 /// This trait defines the interface that all platform implementations must provide.
@@ -161,5 +169,15 @@ mod tests {
         let executor = get_executor();
         // Just verify we can get an executor
         let _ = executor;
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rlimit_cpu_secs_rounds_up_and_is_never_zero() {
+        use std::time::Duration;
+        assert_eq!(rlimit_cpu_secs(Duration::ZERO), 1);
+        assert_eq!(rlimit_cpu_secs(Duration::from_millis(500)), 1);
+        assert_eq!(rlimit_cpu_secs(Duration::from_secs(2)), 2);
+        assert_eq!(rlimit_cpu_secs(Duration::from_millis(2001)), 3);
     }
 }

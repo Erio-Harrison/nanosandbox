@@ -12,7 +12,7 @@
 use crate::builder::{NetworkMode, Permission, SandboxConfig, SeccompProfile};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
-use crate::platform::PlatformExecutor;
+use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -180,11 +180,8 @@ impl MacOSExecutor {
                 .map_err(|e| Self::report_limit_failure(report_fd, LIMIT_FILE_SIZE, e))?;
         }
         if let Some(cpu_time) = cpu_time_limit {
-            let secs = cpu_time.as_secs();
-            if secs > 0 {
-                Self::set_rlimit(libc::RLIMIT_CPU, secs)
-                    .map_err(|e| Self::report_limit_failure(report_fd, LIMIT_CPU_TIME, e))?;
-            }
+            Self::set_rlimit(libc::RLIMIT_CPU, rlimit_cpu_secs(cpu_time))
+                .map_err(|e| Self::report_limit_failure(report_fd, LIMIT_CPU_TIME, e))?;
         }
         Ok(())
     }
@@ -243,7 +240,7 @@ impl MacOSExecutor {
             ),
             LIMIT_CPU_TIME => (
                 "cpu_time_limit",
-                format!("{}s", config.cpu_time_limit?.as_secs()),
+                format!("{}s", rlimit_cpu_secs(config.cpu_time_limit?)),
                 "RLIMIT_CPU",
             ),
             _ => return None,
