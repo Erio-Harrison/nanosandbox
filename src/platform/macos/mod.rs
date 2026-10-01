@@ -40,14 +40,16 @@ const DEFAULT_WRITABLE: [&str; 4] = [
     "/private/var/tmp",
 ];
 
-/// Two gaps in the base policy found by running real toolchains under it:
+/// Gaps in the base policy found by running real programs under it:
 /// `sysctl`(1) reads `sysctl.oidfmt.*` / `sysctl.name.*` metadata nodes to format
-/// and name a value, on top of the name it was actually asked for; and clang
+/// and name a value, on top of the name it was actually asked for; clang
 /// needs dirhelper to resolve its scratch directory (falling back to
-/// `/private/var/tmp` without it).
+/// `/private/var/tmp` without it); and `echo > /dev/stdout` writes to
+/// `/dev/fd/1`, which only duplicates a descriptor the program already has.
 const EXTRA_BASE_POLICY: &str = r#"
 (allow sysctl-read (sysctl-name-prefix "sysctl."))
 (allow mach-lookup (global-name "com.apple.bsd.dirhelper"))
+(allow file-write-data (regex #"^/dev/fd/[0-9]+$"))
 "#;
 
 /// Seatbelt policy text and the `-D key=value` definitions it refers to
