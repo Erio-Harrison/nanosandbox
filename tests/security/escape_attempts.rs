@@ -234,10 +234,11 @@ fn test_code_judge_cannot_write_its_code_dir() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-/// Test: by default, nothing outside the temp directories is writable. The
-/// default working directory is "/", which used to make all of it writable.
+/// Test: by default, nothing outside the temp directories is writable. On
+/// macOS the default working directory, "/", used to make all of it
+/// writable; on Linux without a rootfs, everything the user could write was.
 #[test]
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 fn test_default_sandbox_cannot_write_host_files() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().to_str().unwrap();
@@ -247,4 +248,36 @@ fn test_default_sandbox_cannot_write_host_files() {
     let result = sandbox.run("sh", &["-c", &script]).unwrap();
     assert_ne!(result.exit_code, 0, "default sandbox wrote to {path}");
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// Test: what programs need to write to still works by default, and a
+/// ReadWrite mount of a host directory onto itself makes it writable. That
+/// needs no actual mount, so it works under AppArmor's userns restriction
+/// too.
+#[test]
+#[cfg(unix)]
+fn test_writable_places_still_writable() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let path = dir.path().to_str().unwrap();
+
+    let sandbox = Sandbox::builder()
+        .mount(dir.path(), dir.path(), Permission::ReadWrite)
+        .working_dir(dir.path())
+        .build()
+        .unwrap();
+    let script = format!(
+        "set -e
+         echo a > /dev/null
+         echo b > /dev/stdout
+         t=$(mktemp) && echo c > $t && rm $t
+         echo d > '{path}/out' && mkdir '{path}/sub' && mv '{path}/out' '{path}/sub/out'
+         echo e | cat"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    assert_eq!(result.stdout, "b\ne\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("sub/out")).unwrap(),
+        "d\n"
+    );
 }

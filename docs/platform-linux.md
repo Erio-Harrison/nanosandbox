@@ -13,7 +13,7 @@ Linux uses three kernel subsystems combined to implement sandboxing:
 │  │Isolation│ │ Limits  │ │ Filter  │   │
 │  └─────────┘ └─────────┘ └─────────┘   │
 ├─────────────────────────────────────────┤
-│            Linux Kernel 5.10+           │
+│            Linux Kernel 5.13+           │
 └─────────────────────────────────────────┘
 ```
 
@@ -119,6 +119,30 @@ All of this runs between `clone()` and `exec()`, using paths prepared
 beforehand and raw syscalls only: `clone()` copies the whole multi-threaded
 parent, and allocating in the child can deadlock on a lock another thread
 held at that moment.
+
+### Landlock (Writes Without a Rootfs)
+
+Without a `rootfs` the sandbox sees the host's file system, as the calling
+user, and used to be able to write anything that user can: `~/.bashrc`,
+`~/.ssh`, the code next to it. Landlock now limits writes to:
+
+- `Permission::ReadWrite` mounts and `tmpfs()` mounts,
+- `/tmp`, `/var/tmp` and `/dev/shm`, which programs expect to write to,
+- existing files under `/dev` (`/dev/null`, a terminal), without creating
+  or removing anything there.
+
+Reading is still allowed everywhere. Writing covers opening for writing,
+creating, removing, renaming and (Landlock ABI 3, Linux 6.2) truncating.
+
+Landlock is unprivileged: no mounts and no capabilities, so this works
+under the AppArmor restriction below too. A `ReadWrite` mount of a path onto
+itself is the way to open up a host directory there: it needs no actual
+mount, only a Landlock rule. Like seccomp, the rules are prepared in the
+parent and applied in the child just before `exec`.
+
+`build()` refuses a sandbox without a rootfs on a kernel without Landlock
+(Linux 5.13+, with `landlock` in `/sys/kernel/security/lsm`). With a rootfs
+the sandbox only sees that directory, which is the caller's to write to.
 
 ### Network Namespace
 
@@ -270,6 +294,14 @@ Parent Process                    Child Process
 ## System Requirements
 
 ### Kernel Configuration
+
+Linux 5.13 or newer with Landlock enabled, unless every sandbox has a
+`rootfs`:
+
+```bash
+# Should include "landlock"
+cat /sys/kernel/security/lsm
+```
 
 ```bash
 # Check user namespace

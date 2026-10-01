@@ -6,7 +6,7 @@
 //!
 //! | Platform | Implementation | Status |
 //! |----------|----------------|--------|
-//! | Linux | namespaces, cgroups v2, seccomp | ✅ Full support |
+//! | Linux | namespaces, cgroups v2, seccomp, Landlock | ✅ Full support |
 //! | macOS | sandbox-exec, App Sandbox | ✅ Full support |
 //! | Windows | Job Objects | Memory and CPU limits only; no file system or network isolation |
 //!

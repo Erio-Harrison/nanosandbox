@@ -5,6 +5,7 @@
 //! - **Namespaces**: PID, mount, network, user, UTS, IPC isolation
 //! - **Cgroups v2**: Resource limits (memory, CPU, PIDs)
 //! - **Seccomp-BPF**: Syscall filtering
+//! - **Landlock**: Writes only where allowed, without a rootfs
 //! - **HTTP Proxy**: Domain whitelisting for proxied network mode
 
 use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig};
@@ -18,6 +19,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
 mod cgroup;
+mod landlock;
 mod namespace;
 mod seccomp;
 
@@ -321,6 +323,10 @@ impl PlatformExecutor for LinuxExecutor {
 
         let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
 
+        // Without a rootfs: writes only to ReadWrite mounts, tmpfs and the
+        // temp directories. check_support refused a kernel without Landlock.
+        let write_rules = landlock::WriteRules::new(config)?;
+
         // check_support refused seccomp(true) where there's no filter.
         let syscall_filter = if config.seccomp {
             SyscallFilter::new()
@@ -440,6 +446,16 @@ impl PlatformExecutor for LinuxExecutor {
             if let Some(link) = proxy_link_child {
                 if let Err(step) = link.bind_and_send() {
                     let _ = write_raw(2, b"Network setup failed: ");
+                    let _ = write_raw(2, step.as_bytes());
+                    let _ = write_raw(2, b"\n");
+                    return 1;
+                }
+            }
+
+            // Before the rlimits too: it opens a file descriptor per path.
+            if let Some(rules) = &write_rules {
+                if let Err(step) = rules.apply() {
+                    let _ = write_raw(2, b"File system rules failed: ");
                     let _ = write_raw(2, step.as_bytes());
                     let _ = write_raw(2, b"\n");
                     return 1;
@@ -616,6 +632,7 @@ impl PlatformExecutor for LinuxExecutor {
             return Err(SandboxError::CgroupV2Unavailable);
         }
         check_mounts(config)?;
+        landlock::check(config)?;
         check_network(config)?;
         if config.seccomp && !SyscallFilter::supported() {
             return Err(SandboxError::PlatformFeatureUnavailable {

@@ -212,8 +212,10 @@ pub fn was_oom_killed(&self) -> bool {
 3. clone() with namespace flags
 4. Child:
    a. Pivot root to new filesystem
-   b. Apply seccomp filter (if enabled)
-   c. execve() target command
+   b. Without a rootfs: Landlock rules, so writes only go to ReadWrite
+      mounts, tmpfs and the temp directories
+   c. Apply seccomp filter (if enabled)
+   d. execve() target command
 5. Parent:
    a. Add child to cgroup
    b. Wait with timeout

@@ -8,7 +8,7 @@ Docker is overkill for running a single script. Cloud sandboxes (E2B, etc.) add 
 
 | Platform | How it works |
 |----------|--------------|
-| Linux | namespaces + cgroups v2 + seccomp |
+| Linux | namespaces + cgroups v2 + seccomp + Landlock |
 | macOS | sandbox-exec (Seatbelt/SBPL) |
 | Windows | Job Objects + Restricted Tokens |
 
@@ -107,7 +107,7 @@ cargo test
 cargo bench --no-run  # compile benchmarks
 ```
 
-Run on Linux with cgroups v2. On macOS, sandbox-exec is available by default. Windows needs no special setup.
+Run on Linux 5.13+ with cgroups v2 and Landlock. On macOS, sandbox-exec is available by default. Windows needs no special setup.
 
 ## Documentation
 
