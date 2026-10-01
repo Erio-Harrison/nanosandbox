@@ -2,6 +2,9 @@
 //!
 //! These tests verify that the sandbox actually works on the current platform.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
@@ -30,19 +33,10 @@ fn test_simple_command() {
         result.failure_reason()
     );
     assert_eq!(result.stdout.trim(), "hello world");
-    // Not asserted empty outright: on a kernel where AppArmor confines a
-    // freshly-created user namespace to its "unprivileged_userns" profile
-    // (Ubuntu 23.10+), that profile denies CAP_SYS_ADMIN-requiring calls
-    // like sethostname even though the kernel's own capability model would
-    // allow them -- confirmed for real via a minimal clone()-only C
-    // reproduction and dmesg's apparmor=AUDIT userns_create log line. The
-    // sandbox itself is unaffected; this only means the in-sandbox hostname
-    // silently doesn't take effect, which the platform code already logs
-    // and continues past rather than failing the run over.
-    let stderr = result.stderr.trim();
     assert!(
-        stderr.is_empty() || stderr == "Failed to set hostname",
-        "unexpected stderr: {stderr:?}"
+        result.stderr.trim().is_empty(),
+        "unexpected stderr: {:?}",
+        result.stderr
     );
 }
 
@@ -170,9 +164,13 @@ fn test_sandbox_id_unique() {
 
 #[test]
 fn test_presets() {
-    use tempfile::tempdir;
-
-    let temp = tempdir().expect("Failed to create temp dir");
+    // Presets mount these directories in place and a private tmpfs on /tmp
+    // -- which needs mounts, and directories outside /tmp.
+    if common::skip_without_mounts() {
+        return;
+    }
+    let temp =
+        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp dir");
     let path = temp.path();
 
     // Just verify presets build without error

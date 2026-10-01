@@ -20,6 +20,9 @@ fn test_strict_allows_basic_io() {
 
 #[test]
 fn test_standard_allows_file_operations() {
+    if crate::common::skip_without_mounts() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .seccomp_profile(SeccompProfile::Standard)
@@ -49,6 +52,11 @@ fn test_standard_allows_process_creation() {
 
 #[test]
 fn test_permissive_allows_most_operations() {
+    // AppArmor's unprivileged_userns profile denies reading `/` itself,
+    // whatever the seccomp profile is.
+    if crate::common::skip_without_mounts() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .seccomp_profile(SeccompProfile::Permissive)

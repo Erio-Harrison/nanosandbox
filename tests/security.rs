@@ -1,5 +1,8 @@
 //! Security tests entry point
 
+#[path = "common/mod.rs"]
+mod common;
+
 #[path = "security/escape_attempts.rs"]
 mod escape_attempts;
 

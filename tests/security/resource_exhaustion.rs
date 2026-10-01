@@ -84,6 +84,9 @@ fn test_cpu_bomb_contained() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_disk_bomb_contained_tmpfs() {
+    if crate::common::skip_without_mounts() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB tmpfs
@@ -163,6 +166,9 @@ print(f'opened {len(fds)} fds')
 #[test]
 #[cfg(target_os = "linux")]
 fn test_directory_bomb_contained() {
+    if crate::common::skip_without_mounts() {
+        return;
+    }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB

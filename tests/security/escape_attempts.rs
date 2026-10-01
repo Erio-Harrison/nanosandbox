@@ -33,6 +33,10 @@ fn test_pid_namespace_isolation() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_see_host_processes() {
+    // The sandbox only gets its own /proc where it can mount one.
+    if crate::common::skip_without_mounts() {
+        return;
+    }
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("ps", &["aux"]).unwrap();
@@ -143,28 +147,52 @@ fn test_environment_isolation() {
     std::env::remove_var("SECRET_VAR");
 }
 
-/// Test working directory confinement
+/// Without a rootfs, a mount goes over the host's own path, inside the
+/// sandbox only: writes there land in the mount's source, and the host's
+/// copy of the target is untouched.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_working_directory_confinement() {
-    use tempfile::tempdir;
-
-    let tmpdir = tempdir().unwrap();
+    if crate::common::skip_without_mounts() {
+        return;
+    }
+    let source = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
 
     let sandbox = Sandbox::builder()
-        .mount(tmpdir.path(), "/workspace", Permission::ReadWrite)
-        .working_dir("/workspace")
+        .mount(source.path(), target.path(), Permission::ReadWrite)
+        .working_dir(target.path())
         .build()
         .unwrap();
 
-    // Should be able to write in workspace
-    let result = sandbox
-        .run("sh", &["-c", "echo test > /workspace/file.txt"])
-        .unwrap();
-    assert!(result.success());
+    let result = sandbox.run("sh", &["-c", "echo test > file.txt"]).unwrap();
+    assert!(result.success(), "stderr: {}", result.stderr);
 
-    // File should exist in temp dir
-    assert!(tmpdir.path().join("file.txt").exists());
+    assert!(source.path().join("file.txt").exists());
+    assert!(!target.path().join("file.txt").exists());
+}
+
+/// Without a rootfs there's nowhere to create a missing target, so build()
+/// says so instead of the mount silently not happening.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_mount_target_must_exist_without_rootfs() {
+    let source = tempfile::tempdir().unwrap();
+    let result = Sandbox::builder()
+        .mount(
+            source.path(),
+            "/nanosandbox-no-such-target",
+            Permission::ReadWrite,
+        )
+        .working_dir("/tmp")
+        .build();
+
+    let err = result
+        .err()
+        .expect("build() should refuse a missing target");
+    if !crate::common::skip_without_mounts() {
+        assert!(err.to_string().contains("does not exist"), "{err}");
+    }
 }
 
 /// Test working directory confinement on macOS

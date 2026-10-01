@@ -248,13 +248,28 @@ impl PlatformExecutor for LinuxExecutor {
         // eprintln!, itself called from this closure after clone().
         let working_dir_cstr = CString::new(config.working_dir.as_os_str().as_bytes()).ok();
         let hostname = config.hostname.clone();
-        let mount_plan = match &config.rootfs {
-            Some(rootfs) => Some(MountPlan::new(
-                rootfs,
+        // Where AppArmor denies mounting and sethostname in the sandbox's
+        // user namespace, skip both instead of having every run log their
+        // failure to the program's stderr. check_mounts already refused any
+        // mounts the caller asked for here at build() time.
+        let userns_restricted = userns_mounts_denied();
+        if userns_restricted {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                tracing::warn!(
+                    "AppArmor's unprivileged_userns profile applies here, so sandboxes get no \
+                     private /proc or hostname (see docs/platform-linux.md)"
+                )
+            });
+        }
+        let mount_plan = if userns_restricted {
+            None
+        } else {
+            Some(MountPlan::new(
+                config.rootfs.as_deref(),
                 &config.mounts,
                 &config.tmpfs_mounts,
-            )?),
-            None => None,
+            )?)
         };
 
         // Applied with raw setrlimit() in the child; built here for the same
@@ -350,22 +365,36 @@ impl PlatformExecutor for LinuxExecutor {
 
             // Setup hostname (UTS namespace). Error messages below are
             // fixed strings via raw write(), not eprintln!/format! -- see
-            // the comment on working_dir_cstr above for why.
-            // Raw libc call, not nix's wrapper: sethostname() takes a
-            // buffer and length, not a NUL-terminated string, so this
-            // doesn't need a CString and doesn't allocate either way, but
-            // calling it directly removes any doubt.
-            if nix::unistd::sethostname(&hostname).is_err() {
+            // the comment on working_dir_cstr above for why. nix's
+            // sethostname passes the &str's bytes and length straight to
+            // libc (no CString), so it doesn't allocate.
+            if !userns_restricted && nix::unistd::sethostname(&hostname).is_err() {
                 let _ = write_raw(2, b"Failed to set hostname\n");
             }
 
-            // Setup mount namespace if needed
+            // Mount namespace: caller's rootfs/mounts/tmpfs, then a private
+            // /proc, then pivot into the rootfs if any. A failure in what the
+            // caller asked for fails the run; /proc alone is best effort.
             if let Some(plan) = &mount_plan {
-                if let Err(step) = plan.apply() {
+                let fatal = |step: &str| {
                     let _ = write_raw(2, b"Mount setup failed: ");
                     let _ = write_raw(2, step.as_bytes());
                     let _ = write_raw(2, b"\n");
-                    return 1;
+                    1
+                };
+                match plan.apply() {
+                    Err(step) if plan.requested() => return fatal(step),
+                    Err(_) => {
+                        let _ = write_raw(2, b"Failed to mount /proc\n");
+                    }
+                    Ok(()) => {
+                        if !plan.mount_proc() {
+                            let _ = write_raw(2, b"Failed to mount /proc\n");
+                        }
+                        if let Err(step) = plan.enter_rootfs() {
+                            return fatal(step);
+                        }
+                    }
                 }
             }
 
@@ -526,6 +555,7 @@ impl PlatformExecutor for LinuxExecutor {
         if !check_cgroup_v2_support() {
             return Err(SandboxError::CgroupV2Unavailable);
         }
+        check_mounts(config)?;
         let needed = needed_cgroup_controllers(config);
         if !needed.is_empty() {
             CgroupManager::ensure_support(&needed)?;
@@ -573,20 +603,31 @@ enum MountStep {
 /// Everything the child needs to set up its mount namespace, built before
 /// clone() so the child only issues raw syscalls -- the same
 /// no-allocation-after-clone() rule as envp_cstr/working_dir_cstr.
+///
+/// With a rootfs, targets are created under it and the child pivots into it.
+/// Without one, mounts go straight over the host's own paths, inside the
+/// child's private mount namespace, so the host never sees them. Such a
+/// target must already exist (an unprivileged child can't create one in a
+/// host directory like `/`), which `check_mounts` enforces at build() time.
+/// Without a rootfs these used to be silently ignored.
 struct MountPlan {
-    rootfs: CString,
+    rootfs: Option<CString>,
     steps: Vec<MountStep>,
+    /// Where a fresh procfs goes, so `/proc` shows the sandbox's own pid
+    /// namespace instead of every host process. Confirmed for real:
+    /// `ps aux` listed host processes before.
+    proc_target: CString,
 }
 
 impl MountPlan {
     fn new(
-        rootfs: &std::path::Path,
+        rootfs: Option<&std::path::Path>,
         mounts: &[Mount],
         tmpfs_mounts: &[(std::path::PathBuf, u64)],
     ) -> Result<Self> {
         let mut steps = Vec::new();
-        for m in mounts {
-            let target = Self::push_mkdirs(&mut steps, rootfs, &m.target)?;
+        for m in mounts.iter().filter(|m| !Self::is_noop(rootfs, m)) {
+            let target = Self::target(&mut steps, rootfs, &m.target)?;
             let source = path_cstring(&m.source)?;
             let readonly = (m.permission == Permission::ReadOnly).then(|| locked_flags(&source));
             steps.push(MountStep::Bind {
@@ -596,29 +637,51 @@ impl MountPlan {
             });
         }
         for (path, size) in tmpfs_mounts {
-            let target = Self::push_mkdirs(&mut steps, rootfs, path)?;
+            let target = Self::target(&mut steps, rootfs, path)?;
             let options = CString::new(format!("size={size}")).expect("no NUL in a number");
             steps.push(MountStep::Tmpfs { target, options });
         }
+        let proc_target = match rootfs {
+            Some(rootfs) => path_cstring(&rootfs.join("proc"))?,
+            None => c"/proc".to_owned(),
+        };
         Ok(Self {
-            rootfs: path_cstring(rootfs)?,
+            rootfs: rootfs.map(path_cstring).transpose()?,
             steps,
+            proc_target,
         })
     }
 
-    /// Queues a mkdir for each component of `target` under `rootfs`, returning
-    /// the full target path.
-    fn push_mkdirs(
+    /// Without a rootfs, a read-write mount of a path onto itself changes
+    /// nothing, so it isn't worth a mount (or an AppArmor refusal).
+    fn is_noop(rootfs: Option<&std::path::Path>, m: &Mount) -> bool {
+        rootfs.is_none()
+            && m.permission == Permission::ReadWrite
+            && std::fs::canonicalize(&m.source).ok() == std::fs::canonicalize(&m.target).ok()
+    }
+
+    /// The full path to mount at. Under a rootfs, also queues a mkdir for
+    /// each component of it; without one it must already exist.
+    fn target(
         steps: &mut Vec<MountStep>,
-        rootfs: &std::path::Path,
+        rootfs: Option<&std::path::Path>,
         target: &std::path::Path,
     ) -> Result<CString> {
+        let Some(rootfs) = rootfs else {
+            return path_cstring(target);
+        };
         let mut path = rootfs.to_path_buf();
         for component in target.strip_prefix("/").unwrap_or(target).components() {
             path.push(component);
             steps.push(MountStep::Mkdir(path_cstring(&path)?));
         }
         path_cstring(&path)
+    }
+
+    /// Whether the caller asked for anything here (a rootfs, a mount, a
+    /// tmpfs), as opposed to just the `/proc` this plan always adds.
+    fn requested(&self) -> bool {
+        self.rootfs.is_some() || !self.steps.is_empty()
     }
 
     /// Runs in the child between clone() and exec(): raw syscalls only.
@@ -636,16 +699,18 @@ impl MountPlan {
             {
                 return Err("mark all mounts as private");
             }
-            let rootfs = self.rootfs.as_ptr();
-            if libc::mount(
-                rootfs,
-                rootfs,
-                null,
-                libc::MS_BIND | libc::MS_REC,
-                null as _,
-            ) != 0
-            {
-                return Err("bind mount rootfs");
+            if let Some(rootfs) = &self.rootfs {
+                let rootfs = rootfs.as_ptr();
+                if libc::mount(
+                    rootfs,
+                    rootfs,
+                    null,
+                    libc::MS_BIND | libc::MS_REC,
+                    null as _,
+                ) != 0
+                {
+                    return Err("bind mount rootfs");
+                }
             }
             for step in &self.steps {
                 match step {
@@ -691,6 +756,33 @@ impl MountPlan {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Mounts the fresh procfs. Best effort: a failure here is logged by the
+    /// child but doesn't stop the run. Must happen before `enter_rootfs`: the
+    /// kernel only allows a new proc mount while a fully visible one is still
+    /// in the mount namespace, and pivoting drops the host's.
+    fn mount_proc(&self) -> bool {
+        let target = self.proc_target.as_ptr();
+        unsafe {
+            if libc::mkdir(target, 0o555) != 0 && *libc::__errno_location() != libc::EEXIST {
+                return false;
+            }
+            let proc = c"proc".as_ptr();
+            let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+            libc::mount(proc, target, proc, flags, std::ptr::null()) == 0
+        }
+    }
+
+    /// Pivots into the rootfs, if there is one.
+    fn enter_rootfs(&self) -> std::result::Result<(), &'static str> {
+        let Some(rootfs) = &self.rootfs else {
+            return Ok(());
+        };
+        let rootfs = rootfs.as_ptr();
+        unsafe {
             // pivot_root(".", ".") then detaching "." stacks the old root on
             // the new one and drops it, with no put_old directory. Every
             // sandbox used to share one `<rootfs>/old_root`, so concurrent
@@ -712,6 +804,84 @@ impl MountPlan {
         }
         Ok(())
     }
+}
+
+/// Ubuntu 23.10+: a fresh user namespace created by an unprivileged,
+/// unconfined process lands in AppArmor's `unprivileged_userns` profile,
+/// which denies mounting (and sethostname) inside it even though the kernel's
+/// own capability model allows both there. Confirmed for real via dmesg
+/// (`apparmor="DENIED" operation="mount" profile="unprivileged_userns"`).
+/// Root isn't affected, and neither is an executable with its own AppArmor
+/// profile that allows `userns`.
+fn userns_mounts_denied() -> bool {
+    if unsafe { libc::geteuid() } == 0 {
+        return false;
+    }
+    let restricted =
+        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+            .is_ok_and(|v| v.trim() == "1");
+    restricted
+        && std::fs::read_to_string("/proc/self/attr/apparmor/current")
+            .or_else(|_| std::fs::read_to_string("/proc/self/attr/current"))
+            .map_or(true, |label| label.trim() == "unconfined")
+}
+
+/// Refuses, at build() time, mount setups that can only fail or silently do
+/// something other than asked once the sandbox runs.
+fn check_mounts(config: &SandboxConfig) -> Result<()> {
+    let plan = MountPlan::new(
+        config.rootfs.as_deref(),
+        &config.mounts,
+        &config.tmpfs_mounts,
+    )?;
+    if plan.requested() && userns_mounts_denied() {
+        return Err(SandboxError::Config(
+            "rootfs/mount/tmpfs need to mount inside the sandbox's user namespace, which \
+             AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
+             unprivileged, unconfined process). Run as root, set that sysctl to 0, or give \
+             this executable an AppArmor profile that allows userns"
+                .into(),
+        ));
+    }
+    let binds = config
+        .mounts
+        .iter()
+        .filter(|m| !MountPlan::is_noop(config.rootfs.as_deref(), m));
+    if config.rootfs.is_none() {
+        for target in binds
+            .clone()
+            .map(|m| &m.target)
+            .chain(config.tmpfs_mounts.iter().map(|(p, _)| p))
+        {
+            if !target.exists() {
+                return Err(SandboxError::Config(format!(
+                    "mount target {} does not exist; without a rootfs, mounts go over the \
+                     host's own paths, so the target must already exist",
+                    target.display()
+                )));
+            }
+        }
+    }
+    // A tmpfs mounts after the binds, and starts empty: anything under it
+    // would be hidden.
+    for (tmpfs, _) in &config.tmpfs_mounts {
+        let hidden = |path: &std::path::Path| path != tmpfs && path.starts_with(tmpfs);
+        if let Some(m) = binds.clone().find(|m| hidden(&m.target)) {
+            return Err(SandboxError::Config(format!(
+                "mount target {} is inside tmpfs {}, which would hide it",
+                m.target.display(),
+                tmpfs.display()
+            )));
+        }
+        if hidden(&config.working_dir) {
+            return Err(SandboxError::Config(format!(
+                "working_dir {} is inside tmpfs {}, which would hide it",
+                config.working_dir.display(),
+                tmpfs.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn path_cstring(path: &std::path::Path) -> Result<CString> {

@@ -1,24 +1,8 @@
 //! Custom rootfs tests (Linux): mounts, tmpfs and pivot_root.
 
+use crate::common::skip_without_mounts;
 use nanosandbox::{Permission, Sandbox};
 use std::path::Path;
-
-/// Ubuntu 23.10+ confines a fresh unprivileged user namespace to AppArmor's
-/// `unprivileged_userns` profile, which denies the mounts a rootfs needs.
-/// There is nothing to test there, so say so instead of failing.
-fn rootfs_unsupported() -> bool {
-    let restricted =
-        std::fs::read_to_string("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false);
-    if restricted && unsafe { libc::geteuid() } != 0 {
-        eprintln!(
-            "skipping: kernel.apparmor_restrict_unprivileged_userns=1 denies unprivileged mounts"
-        );
-        return true;
-    }
-    false
-}
 
 /// A rootfs that borrows the host's /usr, read-only.
 fn minimal_rootfs(root: &Path) -> nanosandbox::SandboxBuilder {
@@ -35,7 +19,7 @@ fn minimal_rootfs(root: &Path) -> nanosandbox::SandboxBuilder {
 
 #[test]
 fn test_readonly_mount_rejects_writes() {
-    if rootfs_unsupported() {
+    if skip_without_mounts() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -58,7 +42,7 @@ fn test_readonly_mount_rejects_writes() {
 
 #[test]
 fn test_readwrite_mount_and_tmpfs() {
-    if rootfs_unsupported() {
+    if skip_without_mounts() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
@@ -87,7 +71,7 @@ fn test_readwrite_mount_and_tmpfs() {
 /// directory, so concurrent runs on the same rootfs failed setup.
 #[test]
 fn test_concurrent_sandboxes_share_rootfs() {
-    if rootfs_unsupported() {
+    if skip_without_mounts() {
         return;
     }
     let root = tempfile::tempdir().unwrap();

@@ -145,6 +145,13 @@ impl Sandbox {
     }
 
     // ========== Preset configurations ==========
+    //
+    // Presets mount the caller's directories at their own paths, not at
+    // aliases like "/workspace": without a rootfs, Linux mounts go over the
+    // host's own paths and need the target to exist (and macOS never remaps
+    // paths at all), so an alias would fail at build(). Each preset also puts
+    // a private tmpfs on /tmp, so the directories passed in must not be under
+    // /tmp -- on Linux, build() refuses that rather than hiding them.
 
     /// Data analysis preset
     ///
@@ -166,17 +173,15 @@ impl Sandbox {
         input_dir: impl Into<PathBuf>,
         output_dir: impl Into<PathBuf>,
     ) -> SandboxBuilder {
-        // working_dir must be a path that actually exists once the sandbox
-        // starts. "/input"/"/output" are just SBPL write-rule targets on
-        // macOS (no filesystem remapping happens there at all) and are only
-        // made real on Linux by pivot_root, which itself only runs when a
-        // rootfs is also configured -- neither of which this preset does.
-        // The real, caller-supplied directory is the one path guaranteed to
-        // exist either way.
+        let input_dir: PathBuf = input_dir.into();
         let output_dir: PathBuf = output_dir.into();
         Sandbox::builder()
-            .mount(input_dir, "/input", Permission::ReadOnly)
-            .mount(output_dir.clone(), "/output", Permission::ReadWrite)
+            .mount(input_dir.clone(), input_dir, Permission::ReadOnly)
+            .mount(
+                output_dir.clone(),
+                output_dir.clone(),
+                Permission::ReadWrite,
+            )
             .tmpfs("/tmp", 256 * 1024 * 1024) // 256MB tmp
             .working_dir(output_dir)
             .memory_limit(2 * 1024 * 1024 * 1024) // 2GB
@@ -204,12 +209,9 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn code_judge(code_dir: impl Into<PathBuf>) -> SandboxBuilder {
-        // See data_analysis() above: working_dir needs a path that's real
-        // without any rootfs/pivot_root, so use the caller's own directory
-        // instead of the "/workspace" alias.
         let code_dir: PathBuf = code_dir.into();
         Sandbox::builder()
-            .mount(code_dir.clone(), "/workspace", Permission::ReadOnly)
+            .mount(code_dir.clone(), code_dir.clone(), Permission::ReadOnly)
             .tmpfs("/tmp", 64 * 1024 * 1024) // 64MB tmp
             .working_dir(code_dir)
             .memory_limit(256 * 1024 * 1024) // 256MB
@@ -238,14 +240,10 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn agent_executor(workspace: impl Into<PathBuf>) -> SandboxBuilder {
-        // See data_analysis() above: working_dir (and HOME, since it should
-        // agree with where we actually chdir'd) needs a path that's real
-        // without any rootfs/pivot_root, so use the caller's own directory
-        // instead of the "/workspace" alias.
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace.clone(), "/workspace", Permission::ReadWrite)
+            .mount(workspace.clone(), workspace.clone(), Permission::ReadWrite)
             .tmpfs("/tmp", 512 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB
@@ -272,13 +270,10 @@ impl Sandbox {
     ///     .unwrap();
     /// ```
     pub fn interactive(workspace: impl Into<PathBuf>) -> SandboxBuilder {
-        // See data_analysis() above: working_dir (and HOME) needs a path
-        // that's real without any rootfs/pivot_root, so use the caller's
-        // own directory instead of the "/workspace" alias.
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace.clone(), "/workspace", Permission::ReadWrite)
+            .mount(workspace.clone(), workspace.clone(), Permission::ReadWrite)
             .tmpfs("/tmp", 1024 * 1024 * 1024) // 1GB tmp
             .working_dir(workspace)
             .memory_limit(8 * 1024 * 1024 * 1024) // 8GB

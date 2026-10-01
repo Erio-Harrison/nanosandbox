@@ -139,6 +139,9 @@ impl SandboxBuilder {
     // ========== Filesystem ==========
 
     /// Mount a file or directory into the sandbox
+    ///
+    /// On Linux without a [`rootfs`](Self::rootfs), `target` is a host path
+    /// that must already exist: the mount covers it inside the sandbox only.
     pub fn mount(
         mut self,
         source: impl Into<PathBuf>,
@@ -154,6 +157,9 @@ impl SandboxBuilder {
     }
 
     /// Mount a tmpfs (memory filesystem)
+    ///
+    /// On Linux without a [`rootfs`](Self::rootfs), `path` must already exist
+    /// on the host, as with [`mount`](Self::mount).
     pub fn tmpfs(mut self, path: impl Into<PathBuf>, size_bytes: u64) -> Self {
         self.config.tmpfs_mounts.push((path.into(), size_bytes));
         self

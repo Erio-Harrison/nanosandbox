@@ -96,32 +96,29 @@ impl UserNamespace {
 
 ### Mount Namespace (Filesystem Isolation)
 
-```rust
-pub fn setup_mount_namespace(rootfs: &Path, mounts: &[Mount]) -> Result<()> {
-    // 1. Make root private
-    mount(None, "/", None, MsFlags::MS_REC | MsFlags::MS_PRIVATE, None)?;
+Every sandbox gets its own mount namespace. In the child, after `clone()`:
 
-    // 2. Bind mount rootfs
-    mount(Some(rootfs), rootfs, None, MsFlags::MS_BIND | MsFlags::MS_REC, None)?;
+1. Mark every mount private, so nothing propagates back to the host.
+2. With a `rootfs`: bind it onto itself, then for each `mount()`/`tmpfs()`
+   create the target under it and mount there.
+   Without one: mount straight over the host's own path. The host never sees
+   these, but the target must already exist, since the sandbox can't create
+   directories in places like `/`. `build()` refuses a missing target, and a
+   mount target or `working_dir` that a `tmpfs()` would hide.
+3. Mount a fresh `/proc`, so the sandbox only sees its own PID namespace.
+   With a rootfs this happens before the pivot: the kernel only allows a new
+   proc mount while a fully visible one is still in the namespace.
+4. With a rootfs: `chdir` into it, `pivot_root(".", ".")`, and detach the old
+   root. No `put_old` directory is involved, so sandboxes can share a rootfs.
 
-    // 3. Pivot root
-    let old_root = rootfs.join("old_root");
-    fs::create_dir_all(&old_root)?;
-    pivot_root(rootfs, &old_root)?;
-    chdir("/")?;
+`Permission::ReadOnly` binds are remounted with `MS_RDONLY`; the kernel
+ignores that flag when a bind mount is first created. A read-write mount of a
+path onto itself without a rootfs changes nothing and is skipped.
 
-    // 4. Unmount old root
-    umount2("/old_root", MntFlags::MNT_DETACH)?;
-    fs::remove_dir("/old_root")?;
-
-    // 5. Apply user mounts
-    for m in mounts {
-        apply_mount(m)?;
-    }
-
-    Ok(())
-}
-```
+All of this runs between `clone()` and `exec()`, using paths prepared
+beforehand and raw syscalls only: `clone()` copies the whole multi-threaded
+parent, and allocating in the child can deadlock on a lock another thread
+held at that moment.
 
 ## 2. Cgroups v2 (Resource Limits)
 
@@ -287,15 +284,20 @@ privilege escalation). That profile denies `CAP_SYS_ADMIN`-requiring calls
 even though the kernel's own capability model would allow them for the
 namespace's creator. Confirmed via `dmesg | grep apparmor` and reproduced with
 a minimal `clone(CLONE_NEWUSER | CLONE_NEWUTS)` program outside of
-nanosandbox entirely. For a non-root caller this means:
+nanosandbox entirely. It even denies reading `/` itself.
 
-- `hostname(...)` silently doesn't take effect. The run continues; stderr
-  gets `Failed to set hostname`.
-- `rootfs(...)` fails every run with `Mount setup failed: mark all mounts as
-  private`, along with the `mount(...)`/`tmpfs(...)` that only apply under a
-  rootfs.
+nanosandbox detects this case: the sysctl is 1, and the process is neither
+root nor running under its own AppArmor profile. For such a caller:
 
-Running as root, or turning the restriction off, avoids both:
+- `build()` refuses `rootfs(...)`, `mount(...)` and `tmpfs(...)`, with an
+  error that says why.
+- The sandbox gets no private `/proc` and no `hostname`. Both are skipped
+  quietly, with one `tracing` warning per process, instead of writing to the
+  program's stderr on every run.
+- cgroup resource limits are unaffected: the parent sets those up from
+  outside the user namespace.
+
+Any of these lifts it:
 
 ```bash
 # Confirm this is what's happening
@@ -305,8 +307,11 @@ sudo dmesg | grep -i "unprivileged_userns"
 sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
-The rootfs tests in `tests/security/rootfs.rs` skip themselves when this
-restriction applies.
+or run as root, or give the executable that embeds nanosandbox its own
+AppArmor profile that allows `userns`.
+
+Tests that need mounts skip themselves when this restriction applies (see
+`tests/common/mod.rs`).
 
 ## References
 

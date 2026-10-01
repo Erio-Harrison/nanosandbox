@@ -49,7 +49,9 @@ fn bench_sandbox_creation(c: &mut Criterion) {
                 } else {
                     "/tmp"
                 })
-                .mount("/tmp", "/data", Permission::ReadOnly)
+                // A target that exists: without a rootfs, Linux mounts go
+                // over the host's own paths.
+                .mount("/tmp", "/tmp", Permission::ReadWrite)
                 .build()
                 .unwrap();
             black_box(sandbox)
