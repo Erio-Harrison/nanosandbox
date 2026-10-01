@@ -478,8 +478,18 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Wait for child with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
-        let (stdout, stderr, exit_code, killed_by_timeout, signal) =
+        let (stdout, stderr, exit_code, killed_by_timeout, signal, rusage) =
             wait_with_timeout(child_pid, stdout_read, stderr_read, stdin_pipe, timeout)?;
+
+        // Without a cgroup, these used to be None. wait4's rusage is the
+        // fallback: its CPU time sums the child and the descendants it waited
+        // for, and its maxrss is the largest single one of them (not a total).
+        // The cgroup's numbers, which cover the whole tree, win when there.
+        let tv = |t: libc::timeval| {
+            Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
+        };
+        let rusage_cpu = tv(rusage.ru_utime) + tv(rusage.ru_stime);
+        let rusage_peak = rusage.ru_maxrss as u64 * 1024; // Linux reports KiB
 
         // Collect resource stats BEFORE cgroup cleanup
         let (peak_memory, cpu_time, killed_by_oom) = if let Some(ref cg) = cgroup {
@@ -489,9 +499,9 @@ impl PlatformExecutor for LinuxExecutor {
                 .ok()
                 .map(|s| Duration::from_micros(s.total_usec));
             let oom = cg.was_oom_killed();
-            (peak, cpu, oom)
+            (peak.or(Some(rusage_peak)), cpu.or(Some(rusage_cpu)), oom)
         } else {
-            (None, None, false)
+            (Some(rusage_peak), Some(rusage_cpu), false)
         };
 
         // Cgroup will be cleaned up when dropped
@@ -734,9 +744,7 @@ fn wait_with_timeout(
     stderr_fd: RawFd,
     mut stdin: Option<(RawFd, &[u8])>,
     timeout: Duration,
-) -> Result<(String, String, i32, bool, Option<i32>)> {
-    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-
+) -> Result<(String, String, i32, bool, Option<i32>, libc::rusage)> {
     let start = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -794,63 +802,61 @@ fn wait_with_timeout(
             }
         }
 
-        match waitpid(pid, Some(WaitPidFlag::WNOHANG))
-            .map_err(|e| SandboxError::Internal(format!("waitpid for child {pid}: {e}")))?
-        {
-            WaitStatus::Exited(_, code) => {
-                if let Some((fd, _)) = stdin.take() {
-                    let _ = close_raw(fd);
-                }
-                drain_fd(stdout_fd, &mut stdout);
-                drain_fd(stderr_fd, &mut stderr);
-                close_raw(stdout_fd).ok();
-                close_raw(stderr_fd).ok();
-                return Ok((
-                    String::from_utf8_lossy(&stdout).to_string(),
-                    String::from_utf8_lossy(&stderr).to_string(),
-                    code,
-                    killed_by_timeout,
-                    None,
-                ));
+        // wait4, not waitpid: its rusage is where cpu_time/peak_memory come
+        // from when there's no cgroup to read them from.
+        let mut status: libc::c_int = 0;
+        let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::wait4(pid.as_raw(), &mut status, libc::WNOHANG, &mut rusage) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
             }
-            WaitStatus::Signaled(_, sig, _) => {
-                if let Some((fd, _)) = stdin.take() {
-                    let _ = close_raw(fd);
-                }
-                drain_fd(stdout_fd, &mut stdout);
-                drain_fd(stderr_fd, &mut stderr);
-                close_raw(stdout_fd).ok();
-                close_raw(stderr_fd).ok();
-                return Ok((
-                    String::from_utf8_lossy(&stdout).to_string(),
-                    String::from_utf8_lossy(&stderr).to_string(),
-                    128 + sig as i32,
-                    killed_by_timeout,
-                    Some(sig as i32),
-                ));
-            }
-            WaitStatus::StillAlive => {
-                if start.elapsed() > timeout && !killed_by_timeout {
-                    // Kill the entire process group (negative PID)
-                    // The child runs in a PID namespace where it's PID 1,
-                    // but from our namespace we see the real PID.
-                    // Use SIGKILL on the process - the PID namespace
-                    // will ensure all children are killed when init (pid 1) dies.
-                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-
-                    // Also try to kill the process group just in case
-                    unsafe {
-                        libc::kill(-(pid.as_raw()), libc::SIGKILL);
-                    }
-
-                    killed_by_timeout = true;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            _ => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            return Err(SandboxError::Internal(format!(
+                "wait4 for child {pid}: {err}"
+            )));
         }
+        let exited = ret == pid.as_raw() && libc::WIFEXITED(status);
+        let signaled = ret == pid.as_raw() && libc::WIFSIGNALED(status);
+        if exited || signaled {
+            if let Some((fd, _)) = stdin.take() {
+                let _ = close_raw(fd);
+            }
+            drain_fd(stdout_fd, &mut stdout);
+            drain_fd(stderr_fd, &mut stderr);
+            close_raw(stdout_fd).ok();
+            close_raw(stderr_fd).ok();
+            let (code, signal) = if exited {
+                (libc::WEXITSTATUS(status), None)
+            } else {
+                let sig = libc::WTERMSIG(status);
+                (128 + sig, Some(sig))
+            };
+            return Ok((
+                String::from_utf8_lossy(&stdout).to_string(),
+                String::from_utf8_lossy(&stderr).to_string(),
+                code,
+                killed_by_timeout,
+                signal,
+                rusage,
+            ));
+        }
+        if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {
+            // Kill the entire process group (negative PID)
+            // The child runs in a PID namespace where it's PID 1,
+            // but from our namespace we see the real PID.
+            // Use SIGKILL on the process - the PID namespace
+            // will ensure all children are killed when init (pid 1) dies.
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+
+            // Also try to kill the process group just in case
+            unsafe {
+                libc::kill(-(pid.as_raw()), libc::SIGKILL);
+            }
+
+            killed_by_timeout = true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
