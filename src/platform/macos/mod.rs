@@ -96,11 +96,14 @@ impl MacOSExecutor {
             "(allow file-read*)".to_string(),
         ];
 
+        // The working directory isn't writable by itself being one: it
+        // defaults to "/", and code_judge makes it a ReadOnly mount. Either
+        // way, that used to open it (all of "/", in the default case) for
+        // writing. A ReadWrite mount is how to make it writable.
         let mut roots: Vec<PathBuf> = Vec::new();
         let candidates = DEFAULT_WRITABLE
             .iter()
             .map(PathBuf::from)
-            .chain(std::iter::once(config.working_dir.clone()))
             .chain(
                 config
                     .mounts
@@ -691,12 +694,49 @@ mod tests {
         assert!(!p.policy.contains("test_mount"));
     }
 
+    /// The writable roots, canonicalized, as the profile's parameters hold them.
+    fn writable(p: &SeatbeltProfile) -> Vec<String> {
+        p.params
+            .iter()
+            .filter(|(k, _)| k.starts_with("WRITABLE_ROOT_"))
+            .map(|(_, v)| v.clone())
+            .collect()
+    }
+
     #[test]
-    fn test_paths_are_parameters_not_policy_text() {
-        let config = SandboxConfig {
-            working_dir: PathBuf::from("/tmp/x\") (allow file-write* (subpath \"/"),
+    fn test_working_dir_is_not_writable_by_itself() {
+        // The default working_dir is "/".
+        let p = profile(&SandboxConfig::default(), None);
+        assert!(
+            !writable(&p).contains(&"/".to_string()),
+            "{:?}",
+            writable(&p)
+        );
+
+        // code_judge: a ReadOnly mount as the working directory.
+        let dir = std::env::current_dir().unwrap();
+        let mut config = SandboxConfig {
+            working_dir: dir.clone(),
             ..Default::default()
         };
+        config.mounts.push(Mount {
+            source: dir.clone(),
+            target: dir.clone(),
+            permission: Permission::ReadOnly,
+        });
+        let p = profile(&config, None);
+        let dir = dir.canonicalize().unwrap().to_string_lossy().into_owned();
+        assert!(!writable(&p).contains(&dir), "{:?}", writable(&p));
+    }
+
+    #[test]
+    fn test_paths_are_parameters_not_policy_text() {
+        let mut config = SandboxConfig::default();
+        config.mounts.push(Mount {
+            source: PathBuf::from("/tmp/x\") (allow file-write* (subpath \"/"),
+            target: PathBuf::from("/tmp/x"),
+            permission: Permission::ReadWrite,
+        });
 
         let p = profile(&config, None);
         assert!(!p.policy.contains("(allow file-write* (subpath \"/\"))"));

@@ -212,3 +212,39 @@ fn test_working_directory_confinement_macos() {
     // File should exist in temp dir
     assert!(tmpdir.path().join("file.txt").exists());
 }
+
+/// Test: a ReadOnly working directory stays read-only. On macOS the working
+/// directory used to be writable just by being one, so code_judge's code
+/// could change its own directory.
+#[test]
+#[cfg(unix)]
+fn test_code_judge_cannot_write_its_code_dir() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    // Not under /tmp, which sandboxes may write to.
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+
+    let judge = Sandbox::code_judge(dir.path()).build().unwrap();
+    let result = judge.run("sh", &["-c", "echo x > ./judged"]).unwrap();
+    assert_ne!(
+        result.exit_code, 0,
+        "code_judge wrote to its own code directory"
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// Test: by default, nothing outside the temp directories is writable. The
+/// default working directory is "/", which used to make all of it writable.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_default_sandbox_cannot_write_host_files() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let path = dir.path().to_str().unwrap();
+
+    let sandbox = Sandbox::builder().build().unwrap();
+    let script = format!("echo x > '{path}/default'");
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    assert_ne!(result.exit_code, 0, "default sandbox wrote to {path}");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
