@@ -16,8 +16,6 @@ use std::time::Duration;
 #[test]
 #[cfg(unix)]
 fn test_no_zombie_after_timeout() {
-    let initial_zombies = count_zombie_processes();
-
     // Run multiple sandboxes that will timeout
     for _ in 0..5 {
         let sandbox = Sandbox::builder()
@@ -33,18 +31,8 @@ fn test_no_zombie_after_timeout() {
         assert!(result.killed_by_timeout);
     }
 
-    // Wait a bit for process table to update
-    std::thread::sleep(Duration::from_millis(100));
-
-    let final_zombies = count_zombie_processes();
-
-    // No new zombies should appear
-    assert!(
-        final_zombies <= initial_zombies,
-        "Zombie processes leaked: before={}, after={}",
-        initial_zombies,
-        final_zombies
-    );
+    let leaked = lasting_zombie_children();
+    assert!(leaked.is_empty(), "Zombie processes leaked: {leaked:?}");
 }
 
 /// Test: Child processes should be killed when parent times out
@@ -121,8 +109,6 @@ fn test_sigterm_cleanup() {
 #[test]
 #[cfg(unix)]
 fn test_rapid_sandbox_no_leaks() {
-    let initial_zombies = count_zombie_processes();
-
     for _ in 0..20 {
         let sandbox = Sandbox::builder()
             .working_dir("/tmp")
@@ -133,17 +119,8 @@ fn test_rapid_sandbox_no_leaks() {
         let _ = sandbox.run("true", &[]);
     }
 
-    std::thread::sleep(Duration::from_millis(200));
-
-    let final_zombies = count_zombie_processes();
-
-    // Should not create zombie processes
-    assert!(
-        final_zombies <= initial_zombies,
-        "Zombie processes leaked: before={}, after={}",
-        initial_zombies,
-        final_zombies
-    );
+    let leaked = lasting_zombie_children();
+    assert!(leaked.is_empty(), "Zombie processes leaked: {leaked:?}");
 }
 
 /// Test: Long-running child processes are properly terminated
@@ -185,14 +162,34 @@ fn test_deep_process_tree_killed() {
 // Helper functions
 
 #[cfg(unix)]
-fn count_zombie_processes() -> usize {
-    let output = Command::new("ps")
-        .args(["aux"])
-        .output()
-        .expect("Failed to run ps");
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| line.contains(" Z ") || line.contains(" Z+ "))
-        .count()
+/// Zombies whose parent is this test process and that are still there half a
+/// second later. Other tests run sandboxes in parallel, and each of their
+/// processes is briefly a zombie between exiting and being reaped; a leaked
+/// one stays. Counting every zombie on the system made this flaky.
+fn lasting_zombie_children() -> Vec<String> {
+    let sample = || -> Vec<String> {
+        let output = Command::new("ps")
+            .args(["-A", "-o", "pid=,ppid=,stat="])
+            .output()
+            .expect("Failed to run ps");
+        let me = std::process::id().to_string();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(
+                |line| match line.split_whitespace().collect::<Vec<_>>()[..] {
+                    [pid, ppid, stat] if ppid == me && stat.starts_with('Z') => {
+                        Some(pid.to_string())
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    };
+    let first = sample();
+    std::thread::sleep(Duration::from_millis(500));
+    let second = sample();
+    first
+        .into_iter()
+        .filter(|pid| second.contains(pid))
+        .collect()
 }
