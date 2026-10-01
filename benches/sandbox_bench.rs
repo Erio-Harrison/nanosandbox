@@ -169,24 +169,17 @@ fn bench_stdin_input(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark sandbox with different security profiles
+/// Benchmark sandbox with and without the syscall filter
 #[cfg(target_os = "linux")]
-fn bench_seccomp_profiles(c: &mut Criterion) {
-    use nanosandbox::SeccompProfile;
+fn bench_seccomp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("seccomp");
 
-    let mut group = c.benchmark_group("seccomp_profiles");
-
-    for (name, profile) in [
-        ("disabled", SeccompProfile::Disabled),
-        ("permissive", SeccompProfile::Permissive),
-        ("standard", SeccompProfile::Standard),
-        ("strict", SeccompProfile::Strict),
-    ] {
+    for (name, enabled) in [("off", false), ("on", true)] {
         group.bench_function(name, |b| {
             b.iter(|| {
                 let sandbox = Sandbox::builder()
                     .working_dir("/tmp")
-                    .seccomp_profile(profile.clone())
+                    .seccomp(enabled)
                     .wall_time_limit(Duration::from_secs(10))
                     .build()
                     .unwrap();
@@ -248,7 +241,7 @@ criterion_group!(
     bench_command_execution,
     bench_output_sizes,
     bench_stdin_input,
-    bench_seccomp_profiles,
+    bench_seccomp,
     bench_parallel_execution,
 );
 

@@ -59,7 +59,7 @@ pub struct SandboxConfig {
     pub network_mode: NetworkMode,      // None/Host/Proxied
 
     // Security
-    pub seccomp_profile: SeccompProfile,
+    pub seccomp: bool,                  // Linux syscall filter
     pub uid: Option<u32>,
     pub gid: Option<u32>,
 
@@ -354,7 +354,10 @@ let cpu_time = Duration::from_secs(rusage.ru_utime.tv_sec)
 
 ## Windows Implementation
 
-Windows uses Job Objects and Restricted Tokens (basic implementation).
+Windows uses a Job Object for memory and CPU limits, and nothing else yet:
+the process runs as the calling user, with its file system and network.
+`build()` refuses `no_network()` (the default), `allow_network()`, `mount`,
+`tmpfs` and `rootfs` there. The code below is the intended design.
 
 ### Job Objects
 
@@ -469,8 +472,8 @@ from ignoring `HTTP_PROXY` and connecting directly differs per platform:
   programs have to use the proxy. Where Ubuntu's AppArmor
   `unprivileged_userns` restriction applies, `build()` refuses
   `allow_network` instead (see [platform-linux.md](platform-linux.md)).
-- **Windows**: not enforced. `network_mode` isn't applied at all; only the
-  proxy environment variables are set.
+- **Windows**: not available. `build()` refuses anything but
+  `host_network()`.
 
 ---
 

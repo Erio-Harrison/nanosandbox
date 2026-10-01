@@ -71,7 +71,7 @@
 ## P3: Platform Completeness
 
 ### Linux
-- [ ] **Seccomp BPF rules** - Current SeccompProfile is just an enum, no actual filtering
+- [x] **Seccomp BPF rules** - One fixed filter, `seccomp(bool)`
 - [ ] **User namespace mapping** - Proper uid/gid mapping for rootless operation
 - [ ] **Nested container support** - Handle running inside Docker/Kubernetes
 

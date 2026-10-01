@@ -3,7 +3,7 @@
 //! The main Sandbox struct that provides the high-level API for running
 //! sandboxed processes across different platforms.
 
-use crate::builder::{NetworkMode, Permission, SandboxBuilder, SandboxConfig, SeccompProfile};
+use crate::builder::{NetworkMode, Permission, SandboxBuilder, SandboxConfig};
 use crate::error::Result;
 use crate::network::ProxiedNetwork;
 use crate::platform::{get_executor, PlatformExecutor};
@@ -188,7 +188,6 @@ impl Sandbox {
             .cpu_limit(2.0)
             .wall_time_limit(Duration::from_secs(300)) // 5 minutes
             .max_pids(100)
-            .seccomp_profile(SeccompProfile::Standard)
             .no_network()
     }
 
@@ -219,7 +218,6 @@ impl Sandbox {
             .wall_time_limit(Duration::from_secs(10))
             .cpu_time_limit(Duration::from_secs(5))
             .max_pids(10)
-            .seccomp_profile(SeccompProfile::Strict)
             .no_network()
     }
 
@@ -250,7 +248,6 @@ impl Sandbox {
             .cpu_limit(4.0)
             .wall_time_limit(Duration::from_secs(600)) // 10 minutes
             .max_pids(256)
-            .seccomp_profile(SeccompProfile::Standard)
             .env("HOME", home)
             .env("USER", "sandbox")
     }
@@ -279,7 +276,6 @@ impl Sandbox {
             .memory_limit(8 * 1024 * 1024 * 1024) // 8GB
             .cpu_limit(4.0)
             .max_pids(512)
-            .seccomp_profile(SeccompProfile::Permissive)
             .hostname("sandbox")
             .env("TERM", "xterm-256color")
             .env("HOME", home)

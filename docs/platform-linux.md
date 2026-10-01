@@ -199,48 +199,41 @@ impl CgroupManager {
 
 ## 3. Seccomp-BPF (Syscall Filtering)
 
-### Security Levels
+Namespaces and cgroups decide what a sandbox sees and how much it can use.
+They don't reduce the kernel code it can reach, and that is where local
+privilege escalations live. A nested user namespace is the usual way in: it
+grants `CAP_SYS_ADMIN` over netfilter, mounts and more, inside it.
 
-| Level | Description |
-|-------|-------------|
-| Disabled | No filtering (not recommended) |
-| Strict | Only allow basic syscalls |
-| Standard | Allow common safe syscalls |
-| Permissive | Allow most syscalls, block dangerous ones |
-| Custom | User-defined whitelist |
+So every sandbox gets one fixed filter, installed last before `exec`:
 
-### Implementation
+| Blocked | Result |
+|---------|--------|
+| `clone`/`unshare` with any `CLONE_NEW*` flag, `setns` | `EPERM` |
+| `mount`, `umount2`, `pivot_root`, the new mount API (`open_tree`, `fsopen`, ...) | `EPERM` |
+| `bpf`, `perf_event_open`, `userfaultfd`, `io_uring_*` | `EPERM` |
+| `keyctl`, `add_key`, `request_key` | `EPERM` |
+| `init_module`, `finit_module`, `delete_module`, `kexec_load`, `kexec_file_load` | `EPERM` |
+| `clone3` (its flags are behind a pointer the filter can't read) | `ENOSYS`, libc falls back to `clone` |
+| Any syscall numbered above the last one reviewed (`mseal`, 6.10) | `ENOSYS` |
+| A syscall from another ABI (32-bit, x32) | process killed |
 
-```rust
-pub struct SeccompFilter;
+Everything else is allowed, including `ptrace`: the sandbox's PID namespace
+only holds its own processes, so debuggers keep working. Threads, fork/exec,
+pipes, python multiprocessing, gcc and git were checked to work under it.
 
-impl SeccompFilter {
-    pub fn apply(profile: &SeccompProfile) -> Result<()> {
-        // Set PR_SET_NO_NEW_PRIVS (prevent privilege escalation)
-        unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+The `ENOSYS` rule means a syscall added to a later kernel is refused until
+someone reviews it, instead of slipping past a list that predates it.
+Programs already handle `ENOSYS` from new syscalls, since older kernels
+return it too. Reviewing one means raising `LAST_KNOWN_SYSCALL` in
+`src/platform/linux/seccomp.rs`, and adding it to `DENIED` if it belongs
+there.
 
-        match profile {
-            SeccompProfile::Disabled => Ok(()),
-            SeccompProfile::Strict => Self::apply_strict(),
-            SeccompProfile::Standard => Self::apply_standard(),
-            SeccompProfile::Permissive => Self::apply_permissive(),
-            SeccompProfile::Custom(syscalls) => Self::apply_custom(syscalls),
-        }
-    }
-}
+The filter is compiled in the parent; the child only calls `prctl(PR_SET_NO_NEW_PRIVS)`
+and `seccomp(SECCOMP_SET_MODE_FILTER)`. If that fails, the program doesn't run.
+x86_64 and aarch64 only: elsewhere `build()` refuses `seccomp(true)`.
 
-// Blocked dangerous syscalls
-const BLOCKED_SYSCALLS: &[&str] = &[
-    "ptrace",           // Debug other processes
-    "process_vm_readv", // Read other process memory
-    "kexec_load",       // Load new kernel
-    "init_module",      // Load kernel modules
-    "mount",            // Mount filesystems
-    "pivot_root",       // Change root directory
-    "setns",            // Enter other namespaces
-    "unshare",          // Create new namespaces
-];
-```
+`seccomp(false)` turns it off, for a program that needs one of these calls,
+such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
 
 ## Complete Execution Flow
 

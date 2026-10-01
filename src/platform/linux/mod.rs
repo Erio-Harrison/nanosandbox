@@ -7,7 +7,7 @@
 //! - **Seccomp-BPF**: Syscall filtering
 //! - **HTTP Proxy**: Domain whitelisting for proxied network mode
 
-use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig, SeccompProfile};
+use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
@@ -23,7 +23,7 @@ mod seccomp;
 
 pub use cgroup::CgroupManager;
 pub use namespace::UserNamespace;
-pub use seccomp::SeccompFilter;
+use seccomp::SyscallFilter;
 
 /// RawFd version of close
 fn close_raw(fd: RawFd) -> nix::Result<()> {
@@ -196,7 +196,6 @@ impl PlatformExecutor for LinuxExecutor {
         // Allocate stack for child
         let mut stack = vec![0u8; STACK_SIZE];
 
-        let seccomp_profile = config.seccomp_profile.clone();
         let mut env = config.env.clone();
 
         // Add proxy environment variables if using proxied network
@@ -313,6 +312,13 @@ impl PlatformExecutor for LinuxExecutor {
         let user_ns = UserNamespace::new(config.uid, config.gid);
 
         let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
+
+        // check_support refused seccomp(true) where there's no filter.
+        let syscall_filter = if config.seccomp {
+            SyscallFilter::new()
+        } else {
+            None
+        };
 
         // Child process entry point
         let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || {
@@ -445,11 +451,13 @@ impl PlatformExecutor for LinuxExecutor {
                 }
             }
 
-            // Apply seccomp filter
-            if !matches!(seccomp_profile, SeccompProfile::Disabled)
-                && SeccompFilter::apply(&seccomp_profile).is_err()
-            {
-                let _ = write_raw(2, b"Seccomp setup failed\n");
+            // Last, so nothing above is filtered. A sandbox that asked for the
+            // filter doesn't run without it.
+            if let Some(filter) = &syscall_filter {
+                if !filter.install() {
+                    let _ = write_raw(2, b"Failed to install the syscall filter\n");
+                    return 1;
+                }
             }
 
             // Execute. Raw libc call with the pointer arrays built ahead of
@@ -603,6 +611,13 @@ impl PlatformExecutor for LinuxExecutor {
         }
         check_mounts(config)?;
         check_network(config)?;
+        if config.seccomp && !SyscallFilter::supported() {
+            return Err(SandboxError::PlatformFeatureUnavailable {
+                feature: "syscall filter on this CPU architecture (x86_64 and aarch64 only); \
+                          use seccomp(false) to run without it"
+                    .into(),
+            });
+        }
         let needed = needed_cgroup_controllers(config);
         if !needed.is_empty() {
             CgroupManager::ensure_support(&needed)?;

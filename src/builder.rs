@@ -27,22 +27,6 @@ pub enum NetworkMode {
     Proxied { allowed_domains: Vec<String> },
 }
 
-/// Seccomp security profile (syscall filtering)
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum SeccompProfile {
-    /// Disable seccomp filtering (not recommended)
-    Disabled,
-    /// Allow only safe syscalls (most restrictive)
-    Strict,
-    /// Standard set of allowed syscalls
-    #[default]
-    Standard,
-    /// More permissive, for interactive use
-    Permissive,
-    /// Custom syscall whitelist
-    Custom(Vec<String>),
-}
-
 /// Mount configuration
 #[derive(Clone, Debug)]
 pub struct Mount {
@@ -73,7 +57,8 @@ pub struct SandboxConfig {
     pub network_mode: NetworkMode,
 
     // Security
-    pub seccomp_profile: SeccompProfile,
+    /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
+    pub seccomp: bool,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
 
@@ -100,7 +85,7 @@ impl Default for SandboxConfig {
             max_open_files: None,
 
             network_mode: NetworkMode::None,
-            seccomp_profile: SeccompProfile::Standard,
+            seccomp: true,
             uid: None,
             gid: None,
 
@@ -245,9 +230,18 @@ impl SandboxBuilder {
 
     // ========== Security ==========
 
-    /// Set seccomp profile
-    pub fn seccomp_profile(mut self, profile: SeccompProfile) -> Self {
-        self.config.seccomp_profile = profile;
+    /// Turn the Linux syscall filter on or off. On by default.
+    ///
+    /// It blocks creating namespaces, mounting, bpf, perf_event_open,
+    /// userfaultfd, io_uring, the keyring, kernel modules and kexec: the
+    /// usual way into a kernel exploit, and nothing ordinary programs need.
+    /// Blocked calls fail with `EPERM`. Turn it off for a program that needs
+    /// one of them, such as Chrome with its own sandbox enabled (or run that
+    /// with `--no-sandbox`).
+    ///
+    /// Linux only. macOS's sandbox profile and Windows don't filter syscalls.
+    pub fn seccomp(mut self, enabled: bool) -> Self {
+        self.config.seccomp = enabled;
         self
     }
 
@@ -405,11 +399,8 @@ mod tests {
     }
 
     #[test]
-    fn test_seccomp_profile() {
-        let builder = SandboxBuilder::new().seccomp_profile(SeccompProfile::Strict);
-        assert!(matches!(
-            builder.config.seccomp_profile,
-            SeccompProfile::Strict
-        ));
+    fn test_seccomp() {
+        assert!(SandboxBuilder::new().config.seccomp);
+        assert!(!SandboxBuilder::new().seccomp(false).config.seccomp);
     }
 }

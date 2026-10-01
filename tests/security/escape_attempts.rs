@@ -2,7 +2,7 @@
 //!
 //! These tests verify sandbox isolation
 
-use nanosandbox::{Permission, Sandbox, SeccompProfile};
+use nanosandbox::{Permission, Sandbox};
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -50,11 +50,7 @@ fn test_cannot_see_host_processes() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_mount_filesystems() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .seccomp_profile(SeccompProfile::Standard)
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox
         .run("mount", &["-t", "tmpfs", "none", "/mnt"])
@@ -110,11 +106,7 @@ fn test_macos_network_blocked() {
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_file_restriction() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .seccomp_profile(SeccompProfile::Strict)
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     // Try to access sensitive directory
     let result = sandbox.run("ls", &["/private/var/root"]).unwrap();

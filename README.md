@@ -26,7 +26,7 @@ use nanosandbox::{Sandbox, Permission, MB};
 use std::time::Duration;
 
 let sandbox = Sandbox::builder()
-    .mount("/data/input", "/input", Permission::ReadOnly)
+    .mount("/data/input", "/data/input", Permission::ReadOnly)
     .memory_limit(256 * MB)
     .wall_time_limit(Duration::from_secs(30))
     .no_network()
@@ -87,13 +87,17 @@ Allow specific domains only (uses a local HTTP proxy):
 |---|:---:|:---:|:---:|
 | Memory limits | ✓ | ~ | ✓ |
 | CPU limits | ✓ | - | ✓ |
-| Process limits | ✓ | - | ✓ |
+| Process limits | ✓ | - | - |
 | Wall-clock timeout | ✓ | ✓ | ✓ |
-| Filesystem isolation | ✓ | ✓ | ~ |
+| Filesystem isolation | ✓ | ✓ | - |
 | Network isolation | ✓ | ✓ | - |
 | Syscall filtering | ✓ | ~ | - |
 
 `✓` = full support, `~` = partial, `-` = not available
+
+Where a setting can't be enforced, `build()` returns an error rather than
+running without it. On Windows that means `host_network()` is required and
+`mount`/`tmpfs`/`rootfs` are refused.
 
 ## Building
 

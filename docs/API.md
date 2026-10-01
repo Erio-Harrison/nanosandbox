@@ -215,9 +215,12 @@ pub fn mount(
 **Example:**
 ```rust
 builder
-    .mount("/data/input", "/input", Permission::ReadOnly)
-    .mount("/data/output", "/output", Permission::ReadWrite)
+    .mount("/data/input", "/data/input", Permission::ReadOnly)
+    .mount("/data/output", "/data/output", Permission::ReadWrite)
 ```
+
+On Linux without a `rootfs`, the mount goes over the host path `target` in the
+sandbox's own mount namespace, so `target` must already exist.
 
 #### `tmpfs`
 
@@ -357,19 +360,18 @@ Set the hostname (Linux only).
 pub fn hostname(self, name: impl Into<String>) -> Self
 ```
 
-#### `seccomp_profile`
+#### `seccomp`
 
-Set the security profile.
+Turn the Linux syscall filter on or off. On by default.
 
 ```rust
-pub fn seccomp_profile(self, profile: SeccompProfile) -> Self
+pub fn seccomp(self, enabled: bool) -> Self
 ```
 
-**Profiles:**
-- `Strict` - Minimal syscalls allowed
-- `Standard` - Common syscalls allowed
-- `Permissive` - Most syscalls allowed
-- `Disabled` - No restrictions
+The filter blocks creating namespaces, mounting, bpf, perf_event_open,
+userfaultfd, io_uring, the keyring, kernel modules and kexec, with `EPERM`.
+Ordinary programs don't use these. Turn it off for one that does, such as
+Chrome with its own sandbox enabled. Ignored on macOS and Windows.
 
 #### `build`
 
@@ -492,19 +494,6 @@ pub enum NetworkMode {
     None,                    // No network access (default)
     Host,                    // Full network access
     Whitelist(Vec<String>),  // Only allowed domains
-}
-```
-
-### SeccompProfile
-
-Security profile level.
-
-```rust
-pub enum SeccompProfile {
-    Strict,      // Minimal syscalls (compute only)
-    Standard,    // Common syscalls (file I/O, network)
-    Permissive,  // Most syscalls allowed
-    Disabled,    // No seccomp filtering
 }
 ```
 

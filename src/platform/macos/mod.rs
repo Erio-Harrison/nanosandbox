@@ -9,7 +9,7 @@
 //! - **Network**: Sandbox profile network restrictions + HTTP proxy for whitelisting
 //! - **Resource limits**: setrlimit (RLIMIT_AS, RLIMIT_NPROC, RLIMIT_NOFILE)
 
-use crate::builder::{NetworkMode, Permission, SandboxConfig, SeccompProfile};
+use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
@@ -472,20 +472,10 @@ impl PlatformExecutor for MacOSExecutor {
         )
     }
 
-    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
+    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
         if !is_supported() {
             return Err(SandboxError::SandboxExecUnavailable);
         }
-
-        // Check for unsupported features
-        if !matches!(
-            config.seccomp_profile,
-            SeccompProfile::Disabled | SeccompProfile::Standard
-        ) {
-            // Custom seccomp profiles are not directly supported on macOS
-            // We map them to sandbox-exec profiles instead
-        }
-
         Ok(())
     }
 }

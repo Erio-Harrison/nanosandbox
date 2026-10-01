@@ -72,7 +72,7 @@ print(a + b)
         // - 1 CPU core
         // - 10s wall time, 5s CPU time
         // - 10 max processes
-        // - Strict seccomp profile
+        // - Syscall filter (on by default)
         // - No network
         let sandbox = Sandbox::code_judge(&submission_dir)
             .wall_time_limit(Duration::from_secs(2))
