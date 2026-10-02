@@ -9,6 +9,9 @@ mod escape_attempts;
 #[path = "security/resource_exhaustion.rs"]
 mod resource_exhaustion;
 
+#[path = "security/private_tmp.rs"]
+mod private_tmp;
+
 #[cfg(target_os = "linux")]
 #[path = "security/syscall_filter.rs"]
 mod syscall_filter;

@@ -334,8 +334,14 @@ nanosandbox entirely. It even denies reading `/` itself.
 nanosandbox detects this case: the sysctl is 1, and the process is neither
 root nor running under its own AppArmor profile. For such a caller:
 
-- `build()` refuses `rootfs(...)`, `mount(...)` and `tmpfs(...)`, with an
-  error that says why.
+- `build()` refuses `rootfs(...)`, a `mount(...)` that would need an actual
+  mount, and a `tmpfs(...)` anywhere but `/tmp`, with an error that says why.
+  A `ReadWrite` mount of a path onto itself is only a Landlock rule, so it
+  works.
+- `tmpfs("/tmp", size)` is a private directory per run instead of a mount,
+  with `TMPDIR` pointing to it, as on macOS (see
+  [platform-macos.md](platform-macos.md#tmpfs)). Programs that write to
+  `/tmp` by name get the host's `/tmp`.
 - `build()` refuses `allow_network(...)` too: loopback can't be brought up in
   the sandbox's network namespace (`CAP_NET_ADMIN` is denied), and falling
   back to the host network would let programs skip the proxy.

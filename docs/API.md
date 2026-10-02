@@ -224,7 +224,14 @@ sandbox's own mount namespace, so `target` must already exist.
 
 #### `tmpfs`
 
-Mount a temporary filesystem (RAM-backed).
+Mount a temporary filesystem (RAM-backed): private to each run, empty at the
+start, gone afterwards, and limited to `size_bytes`.
+
+Where mounting isn't possible (macOS, and Linux under Ubuntu's AppArmor userns
+restriction), only `/tmp` is supported, as a private directory per run that
+`TMPDIR` points to. Programs that write to `/tmp` by name still get the host's
+`/tmp` there. Going over the size kills the program, with
+`ExecutionResult::killed_by_tmp_limit` set.
 
 ```rust
 pub fn tmpfs(self, path: impl Into<PathBuf>, size_bytes: u64) -> Self

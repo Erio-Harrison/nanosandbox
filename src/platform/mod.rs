@@ -20,6 +20,9 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(unix)]
+pub(crate) mod private_tmp;
+
 use crate::builder::SandboxConfig;
 use crate::error::Result;
 use crate::network::ProxiedNetwork;

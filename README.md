@@ -98,6 +98,9 @@ Allow specific domains only (uses a local HTTP proxy):
 Where a setting can't be enforced, `build()` returns an error rather than
 running without it. On Windows that means `host_network()` is required and
 `mount`/`tmpfs`/`rootfs` are refused.
+On macOS, `tmpfs("/tmp", size)` is a private per-run directory that
+`TMPDIR` points to, rather than a real tmpfs; see
+[docs/platform-macos.md](docs/platform-macos.md#tmpfs).
 
 ## Building
 

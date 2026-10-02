@@ -36,6 +36,7 @@ fn main() {
             duration: Duration::ZERO,
             killed_by_timeout: false,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,

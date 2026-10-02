@@ -11,6 +11,7 @@
 use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
+use crate::platform::private_tmp::{self, PrivateTmp};
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::ffi::CString;
@@ -208,6 +209,20 @@ impl PlatformExecutor for LinuxExecutor {
 
         let mut env = config.env.clone();
 
+        // Where AppArmor denies mounting, tmpfs("/tmp") is a private
+        // directory for this run instead, removed when this returns. See
+        // platform/private_tmp.rs.
+        let userns_restricted = userns_restricted_by_apparmor();
+        let mut private_tmp = private_tmp::requested(config)
+            .filter(|_| userns_restricted)
+            .map(PrivateTmp::create)
+            .transpose()
+            .map_err(|e| SandboxError::Internal(format!("create private /tmp: {e}")))?;
+        if let Some(tmp) = &private_tmp {
+            env.entry("TMPDIR".to_string())
+                .or_insert_with(|| tmp.path().to_string_lossy().into_owned());
+        }
+
         // Add proxy environment variables if using proxied network
         if let Some(proxy) = proxy {
             for (key, value) in proxy.env_vars() {
@@ -270,7 +285,6 @@ impl PlatformExecutor for LinuxExecutor {
         // user namespace, skip both instead of having every run log their
         // failure to the program's stderr. check_mounts already refused any
         // mounts the caller asked for here at build() time.
-        let userns_restricted = userns_restricted_by_apparmor();
         if userns_restricted {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
@@ -325,7 +339,8 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Without a rootfs: writes only to ReadWrite mounts, tmpfs and the
         // temp directories. check_support refused a kernel without Landlock.
-        let write_rules = landlock::WriteRules::new(config)?;
+        let write_rules =
+            landlock::WriteRules::new(config, private_tmp.as_ref().map(PrivateTmp::path))?;
 
         // check_support refused seccomp(true) where there's no filter.
         let syscall_filter = if config.seccomp {
@@ -582,9 +597,24 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Wait for child with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
-        let (stdout, stderr, exit_code, killed_by_timeout, signal, rusage) =
-            wait_with_timeout(child_pid, stdout_read, stderr_read, stdin_pipe, timeout)?;
+        let Waited {
+            stdout,
+            stderr,
+            exit_code,
+            killed_by_timeout,
+            killed_by_tmp_limit,
+            signal,
+            rusage,
+        } = wait_with_timeout(
+            child_pid,
+            stdout_read,
+            stderr_read,
+            stdin_pipe,
+            timeout,
+            private_tmp.as_mut(),
+        )?;
         drop(proxy_attachment);
+        drop(private_tmp);
 
         // Without a cgroup, these used to be None. wait4's rusage is the
         // fallback: its CPU time sums the child and the descendants it waited
@@ -618,6 +648,7 @@ impl PlatformExecutor for LinuxExecutor {
             duration: start.elapsed(),
             killed_by_timeout,
             killed_by_oom,
+            killed_by_tmp_limit,
             signal,
             peak_memory,
             cpu_time,
@@ -932,12 +963,16 @@ fn check_network(config: &SandboxConfig) -> Result<()> {
 }
 
 fn check_mounts(config: &SandboxConfig) -> Result<()> {
-    let plan = MountPlan::new(
-        config.rootfs.as_deref(),
-        &config.mounts,
-        &config.tmpfs_mounts,
-    )?;
-    if plan.requested() && userns_restricted_by_apparmor() {
+    let restricted = userns_restricted_by_apparmor();
+    // There, tmpfs("/tmp") is a private directory instead of a mount.
+    let tmpfs: Vec<_> = config
+        .tmpfs_mounts
+        .iter()
+        .filter(|(path, _)| !(restricted && private_tmp::is_tmp(path)))
+        .cloned()
+        .collect();
+    let plan = MountPlan::new(config.rootfs.as_deref(), &config.mounts, &tmpfs)?;
+    if plan.requested() && restricted {
         return Err(SandboxError::Config(
             "rootfs/mount/tmpfs need to mount inside the sandbox's user namespace, which \
              AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
@@ -1181,17 +1216,36 @@ fn locked_flags(path: &CString) -> libc::c_ulong {
     flags
 }
 
+/// How the sandboxed process ended, from `wait_with_timeout`.
+struct Waited {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    killed_by_timeout: bool,
+    killed_by_tmp_limit: bool,
+    signal: Option<i32>,
+    rusage: libc::rusage,
+}
+
 fn wait_with_timeout(
     pid: nix::unistd::Pid,
     stdout_fd: RawFd,
     stderr_fd: RawFd,
     mut stdin: Option<(RawFd, &[u8])>,
     timeout: Duration,
-) -> Result<(String, String, i32, bool, Option<i32>, libc::rusage)> {
+    mut private_tmp: Option<&mut PrivateTmp>,
+) -> Result<Waited> {
     let start = Instant::now();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
     let mut killed_by_timeout = false;
+    let mut killed_by_tmp_limit = false;
+    let kill = || {
+        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+        unsafe {
+            libc::kill(-(pid.as_raw()), libc::SIGKILL);
+        }
+    };
 
     // Set non-blocking
     unsafe {
@@ -1275,28 +1329,27 @@ fn wait_with_timeout(
                 let sig = libc::WTERMSIG(status);
                 (128 + sig, Some(sig))
             };
-            return Ok((
-                String::from_utf8_lossy(&stdout).to_string(),
-                String::from_utf8_lossy(&stderr).to_string(),
-                code,
+            return Ok(Waited {
+                stdout: String::from_utf8_lossy(&stdout).to_string(),
+                stderr: String::from_utf8_lossy(&stderr).to_string(),
+                exit_code: code,
                 killed_by_timeout,
+                killed_by_tmp_limit,
                 signal,
                 rusage,
-            ));
+            });
+        }
+        if let Some(tmp) = private_tmp.as_deref_mut() {
+            if ret == 0 && !killed_by_tmp_limit && tmp.over_limit() {
+                kill();
+                killed_by_tmp_limit = true;
+            }
         }
         if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {
-            // Kill the entire process group (negative PID)
-            // The child runs in a PID namespace where it's PID 1,
-            // but from our namespace we see the real PID.
-            // Use SIGKILL on the process - the PID namespace
-            // will ensure all children are killed when init (pid 1) dies.
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-
-            // Also try to kill the process group just in case
-            unsafe {
-                libc::kill(-(pid.as_raw()), libc::SIGKILL);
-            }
-
+            // The child is init of its PID namespace: when it dies, the
+            // kernel kills everything else in there. The process group is
+            // killed too, just in case.
+            kill();
             killed_by_timeout = true;
         }
         std::thread::sleep(Duration::from_millis(10));

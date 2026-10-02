@@ -141,10 +141,16 @@ impl SandboxBuilder {
         self
     }
 
-    /// Mount a tmpfs (memory filesystem)
+    /// Mount a tmpfs (memory filesystem): private to each run, empty at the
+    /// start, gone afterwards, and limited to `size_bytes`.
     ///
     /// On Linux without a [`rootfs`](Self::rootfs), `path` must already exist
     /// on the host, as with [`mount`](Self::mount).
+    ///
+    /// Where there's no mounting (macOS, and Linux under Ubuntu's AppArmor
+    /// userns restriction), only `/tmp` is supported. It's then a private
+    /// directory per run that `TMPDIR` points to; programs that write to
+    /// `/tmp` by name still get the host's. See docs/platform-macos.md.
     pub fn tmpfs(mut self, path: impl Into<PathBuf>, size_bytes: u64) -> Self {
         self.config.tmpfs_mounts.push((path.into(), size_bytes));
         self

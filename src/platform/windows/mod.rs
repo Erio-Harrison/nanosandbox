@@ -242,6 +242,7 @@ impl WindowsExecutor {
                         duration: start.elapsed(),
                         killed_by_timeout,
                         killed_by_oom: false,
+                        killed_by_tmp_limit: false,
                         signal: None,
                         peak_memory: None,
                         cpu_time: None,

@@ -101,7 +101,11 @@ impl WriteRules {
     /// `None` with a rootfs: the sandbox then only sees the rootfs, which is
     /// the caller's own directory to write to. `check` already refused a
     /// kernel without Landlock.
-    pub(crate) fn new(config: &SandboxConfig) -> Result<Option<Self>> {
+    /// `private_tmp`: this run's stand-in for tmpfs("/tmp"), if it has one.
+    pub(crate) fn new(
+        config: &SandboxConfig,
+        private_tmp: Option<&std::path::Path>,
+    ) -> Result<Option<Self>> {
         if config.rootfs.is_some() {
             return Ok(None);
         }
@@ -139,6 +143,9 @@ impl WriteRules {
         }
         for (target, _) in &config.tmpfs_mounts {
             paths.push((path(target)?, handled));
+        }
+        if let Some(dir) = private_tmp {
+            paths.push((path(dir)?, handled));
         }
         Ok(Some(Self { handled, paths }))
     }

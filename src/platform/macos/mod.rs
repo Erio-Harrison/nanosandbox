@@ -12,6 +12,7 @@
 use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
+use crate::platform::private_tmp::{self, PrivateTmp};
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::collections::HashSet;
@@ -91,7 +92,12 @@ impl MacOSExecutor {
     /// Compose the SBPL profile: Codex-derived base policy, reads, writes, network.
     /// Paths are passed as `-D` parameters and referenced with `(param ...)`, so a
     /// path can never be parsed as policy text.
-    fn generate_profile(&self, config: &SandboxConfig, proxy_port: Option<u16>) -> SeatbeltProfile {
+    fn generate_profile(
+        &self,
+        config: &SandboxConfig,
+        proxy_port: Option<u16>,
+        private_tmp: Option<&Path>,
+    ) -> SeatbeltProfile {
         let mut sections = vec![
             BASE_POLICY.to_string(),
             EXTRA_BASE_POLICY.to_string(),
@@ -113,7 +119,9 @@ impl MacOSExecutor {
                     .filter(|m| m.permission == Permission::ReadWrite)
                     .map(|m| m.source.clone()),
             )
-            .chain(config.tmpfs_mounts.iter().map(|(path, _)| path.clone()))
+            // tmpfs("/tmp") is this run's private directory; check_support
+            // refused any other tmpfs.
+            .chain(private_tmp.map(Path::to_path_buf))
             .chain(config.rootfs.clone());
         for path in candidates {
             let root = canonical_path(&path);
@@ -365,8 +373,19 @@ impl PlatformExecutor for MacOSExecutor {
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
+        // tmpfs("/tmp"): a private directory for this run, removed when this
+        // returns. See platform/private_tmp.rs.
+        let mut private_tmp = private_tmp::requested(config)
+            .map(PrivateTmp::create)
+            .transpose()
+            .map_err(|e| SandboxError::ExecutionFailed(format!("create private /tmp: {e}")))?;
+
         // Generate sandbox profile
-        let profile = self.generate_profile(config, proxy.map(|p| p.port()));
+        let profile = self.generate_profile(
+            config,
+            proxy.map(|p| p.port()),
+            private_tmp.as_ref().map(PrivateTmp::path),
+        );
 
         let (report_rd, report_wr) = Self::report_pipe()?;
         let report_fd = report_wr.as_raw_fd();
@@ -399,6 +418,11 @@ impl PlatformExecutor for MacOSExecutor {
         // Set default PATH if not provided
         if !config.env.contains_key("PATH") {
             command.env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        }
+        if let Some(tmp) = &private_tmp {
+            if !config.env.contains_key("TMPDIR") {
+                command.env("TMPDIR", tmp.path());
+            }
         }
 
         // Set proxy environment variables if proxied network
@@ -453,8 +477,6 @@ impl PlatformExecutor for MacOSExecutor {
 
         let child_pid = child.id() as i32;
 
-        // Wait with timeout
-        let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         // The proxy is owned by the Sandbox, not this call, so it stays up
         // for the next run() instead of being shut down here.
         //
@@ -471,15 +493,30 @@ impl PlatformExecutor for MacOSExecutor {
             &mut child,
             child_pid,
             stdin,
-            timeout,
-            config.memory_limit,
+            config,
+            private_tmp.as_mut(),
             start,
         )
     }
 
-    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
+    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
         if !is_supported() {
             return Err(SandboxError::SandboxExecUnavailable);
+        }
+        // Without a mount namespace there's no putting a private directory
+        // at another path. tmpfs("/tmp") works through TMPDIR instead.
+        if let Some((path, _)) = config
+            .tmpfs_mounts
+            .iter()
+            .find(|(path, _)| !private_tmp::is_tmp(path))
+        {
+            return Err(SandboxError::PlatformFeatureUnavailable {
+                feature: format!(
+                    "tmpfs at {} on macOS; only tmpfs(\"/tmp\", ...) is supported, as a \
+                     private directory that TMPDIR points to",
+                    path.display()
+                ),
+            });
         }
         Ok(())
     }
@@ -491,12 +528,15 @@ impl MacOSExecutor {
         child: &mut std::process::Child,
         child_pid: i32,
         stdin_data: Option<&[u8]>,
-        timeout: Duration,
-        memory_limit: Option<u64>,
+        config: &SandboxConfig,
+        mut private_tmp: Option<&mut PrivateTmp>,
         start: Instant,
     ) -> Result<ExecutionResult> {
+        let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
+        let memory_limit = config.memory_limit;
         let mut killed_by_timeout = false;
         let mut killed_by_oom = false;
+        let mut killed_by_tmp_limit = false;
 
         let mut stdin_pipe = child.stdin.take();
         let mut stdout_pipe = child.stdout.take();
@@ -594,6 +634,7 @@ impl MacOSExecutor {
                     duration: start.elapsed(),
                     killed_by_timeout,
                     killed_by_oom,
+                    killed_by_tmp_limit,
                     signal,
                     peak_memory,
                     cpu_time,
@@ -614,6 +655,12 @@ impl MacOSExecutor {
                         } else if used > limit / 10 * 6 {
                             poll = Duration::from_millis(2);
                         }
+                    }
+                }
+                if let Some(tmp) = private_tmp.as_deref_mut() {
+                    if !killed_by_tmp_limit && tmp.over_limit() {
+                        Self::kill_process_tree(child_pid);
+                        killed_by_tmp_limit = true;
                     }
                 }
                 std::thread::sleep(poll);
@@ -669,7 +716,7 @@ mod tests {
     }
 
     fn profile(config: &SandboxConfig, proxy_port: Option<u16>) -> SeatbeltProfile {
-        MacOSExecutor::new().generate_profile(config, proxy_port)
+        MacOSExecutor::new().generate_profile(config, proxy_port, None)
     }
 
     #[test]

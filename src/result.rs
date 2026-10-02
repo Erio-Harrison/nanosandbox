@@ -25,6 +25,12 @@ pub struct ExecutionResult {
     /// Whether the process was killed due to out-of-memory
     pub killed_by_oom: bool,
 
+    /// Whether the process was killed for writing more than `tmpfs("/tmp",
+    /// size)` allows. Only where that is emulated with a private directory
+    /// (macOS, and Linux under AppArmor's userns restriction); a real tmpfs
+    /// fails the write with ENOSPC instead.
+    pub killed_by_tmp_limit: bool,
+
     /// Signal that killed the process, if any
     pub signal: Option<i32>,
 
@@ -45,6 +51,7 @@ impl ExecutionResult {
             duration: Duration::ZERO,
             killed_by_timeout: false,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -56,6 +63,7 @@ impl ExecutionResult {
         self.exit_code == 0
             && !self.killed_by_timeout
             && !self.killed_by_oom
+            && !self.killed_by_tmp_limit
             && self.signal.is_none()
     }
 
@@ -65,6 +73,8 @@ impl ExecutionResult {
             Some("Execution timed out".into())
         } else if self.killed_by_oom {
             Some("Out of memory".into())
+        } else if self.killed_by_tmp_limit {
+            Some("Exceeded the /tmp size limit".into())
         } else if let Some(sig) = self.signal {
             Some(format!("Killed by signal {}", sig))
         } else if self.exit_code != 0 {
@@ -94,6 +104,7 @@ mod tests {
             duration: Duration::from_millis(100),
             killed_by_timeout: false,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -111,6 +122,7 @@ mod tests {
             duration: Duration::from_millis(100),
             killed_by_timeout: false,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -128,6 +140,7 @@ mod tests {
             duration: Duration::from_secs(5),
             killed_by_timeout: true,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: Some(9),
             peak_memory: None,
             cpu_time: None,
@@ -145,6 +158,7 @@ mod tests {
             duration: Duration::from_secs(1),
             killed_by_timeout: false,
             killed_by_oom: true,
+            killed_by_tmp_limit: false,
             signal: Some(9),
             peak_memory: Some(512 * 1024 * 1024),
             cpu_time: None,
@@ -162,11 +176,25 @@ mod tests {
             duration: Duration::from_secs(1),
             killed_by_timeout: false,
             killed_by_oom: false,
+            killed_by_tmp_limit: false,
             signal: Some(9),
             peak_memory: None,
             cpu_time: None,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Killed by signal 9".into()));
+    }
+
+    #[test]
+    fn test_execution_result_tmp_limit() {
+        let result = ExecutionResult {
+            killed_by_tmp_limit: true,
+            ..ExecutionResult::new()
+        };
+        assert!(!result.success());
+        assert_eq!(
+            result.failure_reason(),
+            Some("Exceeded the /tmp size limit".into())
+        );
     }
 }

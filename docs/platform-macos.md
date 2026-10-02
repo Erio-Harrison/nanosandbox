@@ -163,6 +163,33 @@ fn generate_profile(&self, config: &SandboxConfig) -> String {
 | Filesystem isolation | ✅ mount ns | ⚠️ SBPL | SBPL is policy, not isolation |
 | Network isolation | ✅ network ns | ⚠️ SBPL | SBPL is policy, not isolation |
 
+### tmpfs
+
+macOS has no tmpfs and no mount namespace, so there's no giving one process
+its own directory at a path. Only `tmpfs("/tmp", size)` is supported; any
+other path is refused at `build()`.
+
+`tmpfs("/tmp", size)` becomes a fresh directory per run, readable only by
+the calling user, with `TMPDIR` pointing to it (unless `env` sets `TMPDIR`).
+Programs that use `TMPDIR` get what the tmpfs promises: private to the run,
+removed afterwards, and limited to `size`. The size is measured every 250ms
+while the program runs, and the program is killed if it's over
+(`ExecutionResult::killed_by_tmp_limit`), since nothing can make a write
+fail with `ENOSPC` here. A short burst can go over before the next check,
+but not fill the disk.
+
+A program that writes to `/tmp` by name gets the host's `/tmp`, as it would
+without a tmpfs. Making that read-only instead would break it.
+
+Apple's developer tools launched through `xcrun` (`/usr/bin/python3`,
+`/usr/bin/clang`, `cc`, `make`, `git` and the rest of the `/usr/bin` shims)
+reset `TMPDIR` to the user's own temp directory (`/var/folders/.../T/`) when
+they run inside `sandbox-exec`, and so don't use the private one. The same
+tools outside the sandbox, or run by their real path under
+`/Library/Developer/CommandLineTools/usr/bin`, keep it; so do Homebrew's and
+other non-`xcrun` programs. That directory is writable by default, as it
+was before.
+
 ### Resource Limit Alternatives
 
 macOS can use `setrlimit` to provide soft limits:
