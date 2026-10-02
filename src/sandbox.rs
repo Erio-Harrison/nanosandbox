@@ -185,7 +185,8 @@ impl Sandbox {
     /// Code judge preset (for OJ systems)
     ///
     /// - Strict limits
-    /// - Minimal permissions
+    /// - Minimal permissions: `code_dir` read-only, nothing else of the
+    ///   home directory readable
     /// - No network
     ///
     /// # Example
@@ -202,6 +203,7 @@ impl Sandbox {
         let code_dir: PathBuf = code_dir.into();
         Sandbox::builder()
             .read_only(code_dir.clone())
+            .hide_home()
             .private_tmp(64 * 1024 * 1024)
             .working_dir(code_dir)
             .memory_limit(256 * 1024 * 1024) // 256MB

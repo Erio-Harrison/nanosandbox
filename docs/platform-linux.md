@@ -137,8 +137,17 @@ user, and used to be able to write anything that user can: `~/.bashrc`,
 - existing files under `/dev` (`/dev/null`, a terminal), without creating
   or removing anything there.
 
-Reading is still allowed everywhere. Writing covers opening for writing,
-creating, removing, renaming and (Landlock ABI 3, Linux 6.2) truncating.
+Writing covers opening for writing, creating, removing, renaming and
+(Landlock ABI 3, Linux 6.2) truncating.
+
+Reading file contents is allowed everywhere except credentials in the home
+directory (`~/.ssh`, cloud and registry credentials, histories; see
+`deny_read` in [API.md](API.md)), `deny_read` paths, and with `hide_home`
+the whole home directory. Landlock only allows, so "everything but these"
+is spelled out: every sibling along the way from `/` down to each denied
+path gets a rule, computed afresh for each run. Rules cover whole subtrees,
+so listing directories stays allowed everywhere (`ls ~` works, and shows
+`.ssh`), or listing `/` would have to go too.
 
 Landlock is unprivileged: no mounts and no capabilities, so this works
 under the AppArmor restriction below too. `writable(path)` opens up a host

@@ -189,6 +189,15 @@ tools outside the sandbox, or run by their real path under
 other non-`xcrun` programs. That directory is writable by default, as it
 was before.
 
+### Reading
+
+The profile allows reading everything, then denies `file-read-data` (file
+contents and directory listings) for credentials in the home directory,
+`deny_read` paths, and with `hide_home` the whole home directory. Paths the
+config names inside those are allowed again with `file-read-data`: an allow
+of `file-read*` doesn't override a deny of the more specific operation,
+whatever the order.
+
 ### Resource Limit Alternatives
 
 macOS can use `setrlimit` to provide soft limits:

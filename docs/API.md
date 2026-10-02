@@ -85,7 +85,7 @@ Presets return a `SandboxBuilder`, so any setting can be changed before
 
 | Preset | Files | Private /tmp | Memory | CPU | Wall time | Processes |
 |---|---|---|---|---|---|---|
-| `code_judge(dir)` | `dir` read-only, working dir | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
+| `code_judge(dir)` | `dir` read-only, working dir; rest of home hidden | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
 | `agent_executor(ws)` | `ws` writable, working dir, `HOME` | 512 MB | 4 GB | 4 cores | 600 s | 256 |
 | `data_analysis(in, out)` | `in` read-only, `out` writable and working dir | 256 MB | 2 GB | 2 cores | 300 s | 100 |
 | `interactive(ws)` | `ws` writable, working dir, `HOME` | 1 GB | 8 GB | 4 cores | none | 512 |
@@ -109,8 +109,8 @@ can't enforce, instead of running without it.
 
 ### File System
 
-A sandbox can read the system's files. It can write nothing it hasn't been
-given, except its private temp directory. These methods work the same on
+A sandbox can read the system's files, but not the user's credentials. It
+can write nothing it hasn't been given, except its private temp directory. These methods work the same on
 Linux and macOS; Windows has no file system isolation and refuses them.
 
 #### `read_only` / `writable`
@@ -146,6 +146,24 @@ limited to `size_bytes`. **On by default**, at `DEFAULT_PRIVATE_TMP_SIZE`
   private directory: `/tmp` by name is the host's. Going over the size kills
   the program (`ExecutionResult::killed_by_tmp_limit`). See
   [platform-macos.md](platform-macos.md#tmpfs).
+
+#### What can't be read: `deny_read` / `hide_home`
+
+```rust
+pub fn deny_read(self, path: impl Into<PathBuf>) -> Self
+pub fn hide_home(self) -> Self
+```
+
+By default the sandbox can read everything except credentials in the home
+directory: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`,
+`~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`,
+`~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials*`, shell and
+REPL histories, keyrings and browser profiles. Toolchains, package caches and
+projects in the home directory stay readable, so builds work.
+
+`deny_read(path)` adds a file or directory to that. `hide_home()` hides the
+whole home directory instead, except what `read_only`, `writable` or
+`working_dir` name. On Linux file names stay visible, only contents aren't.
 
 #### `working_dir`
 

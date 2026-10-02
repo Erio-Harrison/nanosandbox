@@ -12,6 +12,9 @@ mod resource_exhaustion;
 #[path = "security/private_tmp.rs"]
 mod private_tmp;
 
+#[path = "security/read_rules.rs"]
+mod read_rules;
+
 #[cfg(target_os = "linux")]
 #[path = "security/syscall_filter.rs"]
 mod syscall_filter;

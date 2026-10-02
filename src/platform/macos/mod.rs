@@ -13,6 +13,7 @@ use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::private_tmp::PrivateTmp;
+use crate::platform::read_rules;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::collections::HashSet;
@@ -137,6 +138,33 @@ impl MacOSExecutor {
             params.push((key, root.to_string_lossy().into_owned()));
         }
         sections.push(write_rules);
+
+        // Credentials, deny_read and hide_home: not their contents. Metadata
+        // stays readable, as on Linux, where names stay visible. Paths the
+        // config names inside them come back after: for the same operation,
+        // the later rule wins. (An allow of `file-read*` doesn't override a
+        // deny of `file-read-data`, whatever the order.)
+        let denied = read_rules::denied(config);
+        if !denied.is_empty() {
+            let mut read_rules = String::from("; keep these from being read\n");
+            for (i, path) in denied.iter().enumerate() {
+                let key = format!("DENY_READ_{i}");
+                read_rules.push_str(&format!(
+                    "(deny file-read-data (subpath (param \"{key}\")))\n"
+                ));
+                params.push((key, path.to_string_lossy().into_owned()));
+            }
+            let mut granted = read_rules::granted(config, &denied);
+            granted.dedup();
+            for (i, path) in granted.iter().enumerate() {
+                let key = format!("GRANT_READ_{i}");
+                read_rules.push_str(&format!(
+                    "(allow file-read-data (subpath (param \"{key}\")))\n"
+                ));
+                params.push((key, path.to_string_lossy().into_owned()));
+            }
+            sections.push(read_rules);
+        }
 
         match &config.network_mode {
             NetworkMode::None => {}

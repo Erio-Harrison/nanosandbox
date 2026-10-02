@@ -52,6 +52,10 @@ pub(crate) struct SandboxConfig {
     pub(crate) private_tmp: Option<u64>,
     pub(crate) working_dir: PathBuf,
     pub(crate) rootfs: Option<PathBuf>,
+    /// [`SandboxBuilder::deny_read`].
+    pub(crate) deny_read: Vec<PathBuf>,
+    /// [`SandboxBuilder::hide_home`].
+    pub(crate) hide_home: bool,
 
     // Resource limits
     pub(crate) memory_limit: Option<u64>,
@@ -86,6 +90,8 @@ impl Default for SandboxConfig {
             private_tmp: (!cfg!(windows)).then_some(DEFAULT_PRIVATE_TMP_SIZE),
             working_dir: PathBuf::from("/"),
             rootfs: None,
+            deny_read: Vec::new(),
+            hide_home: false,
 
             memory_limit: None,
             cpu_limit: None,
@@ -180,6 +186,29 @@ impl SandboxBuilder {
     /// No [`private_tmp`](Self::private_tmp).
     pub fn no_private_tmp(mut self) -> Self {
         self.config.private_tmp = None;
+        self
+    }
+
+    /// Keep the sandbox from reading `path` (a file, or a directory and
+    /// everything in it), on top of the credentials it can't read by
+    /// default: SSH and GPG keys, cloud and registry credentials, tokens,
+    /// shell histories and browser profiles in the home directory.
+    /// [`read_only`](Self::read_only) and [`writable`](Self::writable)
+    /// inside it still apply.
+    ///
+    /// On Linux, file names stay visible, only their contents aren't.
+    pub fn deny_read(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.deny_read.push(path.into());
+        self
+    }
+
+    /// Keep the sandbox from reading anything in the home directory, except
+    /// what [`read_only`](Self::read_only), [`writable`](Self::writable) or
+    /// [`working_dir`](Self::working_dir) name. For untrusted code that
+    /// needs no more than the system's tools; toolchains installed in the
+    /// home directory (rustup, nvm, pyenv) then need `read_only` too.
+    pub fn hide_home(mut self) -> Self {
+        self.config.hide_home = true;
         self
     }
 

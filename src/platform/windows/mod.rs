@@ -131,9 +131,13 @@ impl PlatformExecutor for WindowsExecutor {
                     .into(),
             });
         }
-        if !config.mounts.is_empty() || config.private_tmp.is_some() {
+        if !config.mounts.is_empty()
+            || config.private_tmp.is_some()
+            || !config.deny_read.is_empty()
+            || config.hide_home
+        {
             return Err(SandboxError::Unsupported {
-                setting: "read_only/writable/private_tmp on Windows".into(),
+                setting: "read_only/writable/private_tmp/deny_read/hide_home on Windows".into(),
                 reason: "there's no file system isolation; the process sees the host's file \
                          system as the calling user"
                     .into(),

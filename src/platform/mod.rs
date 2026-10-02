@@ -22,6 +22,8 @@ pub mod windows;
 
 #[cfg(unix)]
 pub(crate) mod private_tmp;
+#[cfg(unix)]
+pub(crate) mod read_rules;
 
 use crate::builder::SandboxConfig;
 use crate::error::Result;

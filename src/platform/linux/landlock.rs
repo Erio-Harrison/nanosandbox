@@ -1,5 +1,5 @@
 //! Landlock rules that keep a sandbox without a rootfs from writing to the
-//! host's files.
+//! host's files, and from reading credentials (see platform/read_rules.rs).
 //!
 //! Without a rootfs the sandbox sees the host's file system, and used to be
 //! able to write anything the calling user can: `~/.bashrc`, `~/.ssh`, the
@@ -7,8 +7,11 @@
 //! it needs no mounts and no capabilities, so it also works where AppArmor
 //! denies those in user namespaces (Ubuntu's default).
 //!
-//! Reading stays allowed everywhere. Writing (creating, removing, renaming,
-//! truncating, opening for writing) is allowed only under:
+//! Reading file contents is allowed everywhere but the paths read_rules
+//! denies; listing directories, everywhere (Landlock rules cover a whole
+//! subtree, so there's no allowing `ls ~` without allowing all of `~`).
+//! Writing (creating, removing, renaming, truncating, opening for writing)
+//! is allowed only under:
 //!
 //! - `ReadWrite` mounts and `tmpfs` mounts,
 //! - `/tmp`, `/var/tmp` and `/dev/shm`, which programs expect to write to,
@@ -16,6 +19,7 @@
 
 use crate::builder::{Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
+use crate::platform::read_rules;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -142,6 +146,16 @@ impl WriteRules {
             handled |= ACCESS_FS_TRUNCATE;
         }
 
+        // Reading is only handled when something is denied: then everything
+        // else has to be allowed explicitly.
+        let denied = read_rules::denied(config);
+        let read = if denied.is_empty() {
+            0
+        } else {
+            ACCESS_FS_READ_FILE
+        };
+        handled |= read;
+
         let path = |p: &Path| {
             CString::new(p.as_os_str().as_bytes())
                 .map_err(|_| SandboxError::Config(format!("path contains NUL: {}", p.display())))
@@ -149,6 +163,14 @@ impl WriteRules {
         let mut paths = vec![(c"/dev".to_owned(), handled & FILE_RIGHTS)];
         for area in writable_areas(config).chain(private_tmp) {
             paths.push((path(area)?, handled));
+        }
+        if read != 0 {
+            let readable = read_rules::allowed_roots(&denied)
+                .into_iter()
+                .chain(read_rules::granted(config, &denied));
+            for p in readable {
+                paths.push((path(&p)?, read));
+            }
         }
         Ok(Some(Self { handled, paths }))
     }
