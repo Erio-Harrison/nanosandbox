@@ -94,6 +94,26 @@ impl UserNamespace {
 }
 ```
 
+### Running as Root
+
+Mapped to the caller's own ids, a sandbox has what the caller has over the
+host's files as their owner, capabilities or not. For root that's writing
+`/etc/passwd` and reading `/etc/shadow`. So when the caller is root:
+
+- The sandbox's uid and gid (`uid()`/`gid()`, 1000 by default) map to
+  `nobody`/`nogroup` (65534). Root is mapped too, as 0, for the setup before
+  `exec` (mounts, creating mount points in a tmpfs or rootfs); then the child
+  sets `NO_NEW_PRIVS`, so no setuid-root program can bring root back, and
+  switches to the sandbox's ids.
+- The supplementary groups root runs with are dropped.
+- The output pipes are handed to nobody, so `/dev/stdout` still works.
+- `uid(0)`/`gid(0)` are refused: 0 is root's, for the setup.
+
+`writable` paths then have to be writable by uid 65534, like any other
+nobody process: `chown` them, or make them group- or world-writable. An
+unprivileged caller can't do any of this (it may only map its own ids, and
+the kernel keeps its groups), and needs none of it.
+
 ### Mount Namespace (Filesystem Isolation)
 
 Every sandbox gets its own mount namespace. In the child, after `clone()`:

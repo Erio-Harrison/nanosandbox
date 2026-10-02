@@ -157,6 +157,20 @@ impl PlatformExecutor for LinuxExecutor {
             (None, None)
         };
 
+        // As root, the sandbox runs as nobody (see namespace::runs_as_root),
+        // and a pipe belongs to whoever made it, mode 0600: so it couldn't
+        // reopen its own stdout through /dev/stdout. Give them to nobody.
+        if namespace::runs_as_root() {
+            for fd in [Some(stdout_write), Some(stderr_write), stdin_read]
+                .into_iter()
+                .flatten()
+            {
+                unsafe {
+                    libc::fchown(fd, namespace::NOBODY, namespace::NOBODY);
+                }
+            }
+        }
+
         // Build clone flags
         let mut clone_flags = CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWPID
@@ -344,6 +358,9 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Create user namespace config
         let user_ns = UserNamespace::new(config.uid, config.gid);
+        // As root, the ids the child switches to before exec (mapped to
+        // nobody), having dropped root's groups. See namespace::runs_as_root.
+        let become_nobody = namespace::runs_as_root().then(|| user_ns.ids());
 
         let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
 
@@ -393,6 +410,19 @@ impl PlatformExecutor for LinuxExecutor {
                 _ => return 1,
             }
             let _ = close_raw(ready_read);
+
+            // Now that gid_map is written, which setgroups needs.
+            // Raw syscalls, not libc's setgroups/setresuid/setresgid: in a
+            // multi-threaded process glibc has every thread switch ids
+            // together, and waits for threads that clone() didn't copy.
+            // Confirmed for real: run as root, children hung in a futex.
+            if become_nobody.is_some()
+                && unsafe { libc::syscall(libc::SYS_setgroups, 0, std::ptr::null::<libc::gid_t>()) }
+                    != 0
+            {
+                let _ = write_raw(2, b"Failed to drop supplementary groups\n");
+                return 1;
+            }
 
             // Setup stdin
             if let Some(stdin_fd) = stdin_read {
@@ -483,6 +513,23 @@ impl PlatformExecutor for LinuxExecutor {
                     let _ = write_raw(2, b"File system rules failed: ");
                     let _ = write_raw(2, step.as_bytes());
                     let _ = write_raw(2, b"\n");
+                    return 1;
+                }
+            }
+
+            // After everything that needs root (mounts, the Landlock rules'
+            // paths), before anything of the program's. NO_NEW_PRIVS first:
+            // root is mapped in this namespace (see write_mappings), and a
+            // setuid-root program mustn't make the program root again.
+            if let Some((uid, gid)) = become_nobody {
+                // Raw syscalls: see setgroups above.
+                let switched = unsafe {
+                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
+                        && libc::syscall(libc::SYS_setresgid, gid, gid, gid) == 0
+                        && libc::syscall(libc::SYS_setresuid, uid, uid, uid) == 0
+                };
+                if !switched {
+                    let _ = write_raw(2, b"Failed to switch to the sandbox's ids\n");
                     return 1;
                 }
             }
@@ -671,6 +718,14 @@ impl PlatformExecutor for LinuxExecutor {
         }
         if !check_cgroup_v2_support() {
             return Err(SandboxError::CgroupV2Unavailable);
+        }
+        if namespace::runs_as_root() && (config.uid == Some(0) || config.gid == Some(0)) {
+            return Err(SandboxError::Unsupported {
+                setting: "uid(0)/gid(0) when running as root".into(),
+                reason: "a root caller's sandbox runs as nobody, under its uid/gid; 0 is \
+                         reserved for setting it up"
+                    .into(),
+            });
         }
         check_mounts(config)?;
         landlock::check(config)?;

@@ -194,8 +194,9 @@ impl WriteRules {
             for (path, rights) in &self.paths {
                 let fd = libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
                 if fd < 0 {
-                    // /var/tmp or /dev/shm may not exist on this system.
-                    if *libc::__errno_location() == libc::ENOENT {
+                    // /var/tmp or /dev/shm may not exist on this system, and
+                    // what this process can't reach it can't use anyway.
+                    if matches!(*libc::__errno_location(), libc::ENOENT | libc::EACCES) {
                         continue;
                     }
                     libc::close(ruleset);

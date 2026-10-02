@@ -283,3 +283,36 @@ fn test_writable_places_still_writable() {
         "d\n"
     );
 }
+
+/// Test: run as root, the sandbox runs as nobody, without root's groups.
+/// It used to keep root's ids, so it could read and write root's files as
+/// their owner, capabilities or not. Only runs as root.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_root_caller_runs_as_nobody() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    // A root-owned directory anyone may enter, inside the default writable
+    // area: only the file permissions decide.
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let secret = dir.path().join("root-only");
+    std::fs::write(&secret, "s").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let sandbox = Sandbox::builder().build().unwrap();
+    let script = format!(
+        "grep '^Uid' /proc/self/status; \
+         cat '{d}/root-only' >/dev/null 2>&1 && echo READ || echo read-denied; \
+         touch '{d}/new' 2>/dev/null && echo WROTE || echo write-denied; \
+         echo groups=$(id -G | wc -w)",
+        d = dir.path().display()
+    );
+    let out = sandbox.run("sh", &["-c", &script]).unwrap().stdout;
+    assert!(out.contains("read-denied"), "{out}");
+    assert!(out.contains("write-denied"), "{out}");
+    assert!(out.contains("groups=1"), "supplementary groups kept: {out}");
+}
