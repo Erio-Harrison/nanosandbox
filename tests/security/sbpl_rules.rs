@@ -127,21 +127,19 @@ fn test_sandbox_exec_profile_applied() {
     assert!(result.success());
 }
 
+/// macOS can't limit processes or CPU share per sandbox, so build() says
+/// so instead of running without them.
 #[test]
-fn test_process_limits() {
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .max_pids(10)
-        .wall_time_limit(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    // Try to create many processes - should be limited
-    let result = sandbox
-        .run("sh", &["-c", "for i in 1 2 3; do true & done; wait"])
-        .unwrap();
-    // Should complete (may or may not hit limit with just 3)
-    assert!(result.success());
+fn test_unenforceable_limits_refused() {
+    for builder in [
+        Sandbox::builder().max_pids(10),
+        Sandbox::builder().cpu_limit(1.0),
+    ] {
+        match builder.build() {
+            Err(nanosandbox::SandboxError::Unsupported { .. }) => {}
+            other => panic!("expected Unsupported, got {:?}", other.map(|_| ())),
+        }
+    }
 }
 
 #[test]

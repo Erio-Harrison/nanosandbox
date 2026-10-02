@@ -147,7 +147,8 @@ impl Sandbox {
     // ========== Preset configurations ==========
     //
     // Presets only use settings every platform with file system isolation
-    // has, so they build the same on Linux and macOS.
+    // has, so they build the same on Linux and macOS, except for the CPU
+    // share and process count macOS can't limit (see cpu_and_pids).
 
     /// Data analysis preset
     ///
@@ -171,14 +172,12 @@ impl Sandbox {
     ) -> SandboxBuilder {
         let input_dir: PathBuf = input_dir.into();
         let output_dir: PathBuf = output_dir.into();
-        Sandbox::builder()
+        cpu_and_pids(Sandbox::builder(), 2.0, 100)
             .read_only(input_dir)
             .writable(output_dir.clone())
             .working_dir(output_dir)
             .memory_limit(2 * 1024 * 1024 * 1024) // 2GB
-            .cpu_limit(2.0)
             .wall_time_limit(Duration::from_secs(300)) // 5 minutes
-            .max_pids(100)
             .no_network()
     }
 
@@ -201,16 +200,14 @@ impl Sandbox {
     /// ```
     pub fn code_judge(code_dir: impl Into<PathBuf>) -> SandboxBuilder {
         let code_dir: PathBuf = code_dir.into();
-        Sandbox::builder()
+        cpu_and_pids(Sandbox::builder(), 1.0, 10)
             .read_only(code_dir.clone())
             .hide_home()
             .private_tmp(64 * 1024 * 1024)
             .working_dir(code_dir)
             .memory_limit(256 * 1024 * 1024) // 256MB
-            .cpu_limit(1.0)
             .wall_time_limit(Duration::from_secs(10))
             .cpu_time_limit(Duration::from_secs(5))
-            .max_pids(10)
             .no_network()
     }
 
@@ -233,14 +230,12 @@ impl Sandbox {
     pub fn agent_executor(workspace: impl Into<PathBuf>) -> SandboxBuilder {
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
-        Sandbox::builder()
+        cpu_and_pids(Sandbox::builder(), 4.0, 256)
             .writable(workspace.clone())
             .private_tmp(512 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB
-            .cpu_limit(4.0)
             .wall_time_limit(Duration::from_secs(600)) // 10 minutes
-            .max_pids(256)
             .env("HOME", home)
             .env("USER", "sandbox")
     }
@@ -262,17 +257,25 @@ impl Sandbox {
     pub fn interactive(workspace: impl Into<PathBuf>) -> SandboxBuilder {
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
-        Sandbox::builder()
+        cpu_and_pids(Sandbox::builder(), 4.0, 512)
             .writable(workspace.clone())
             .private_tmp(1024 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(8 * 1024 * 1024 * 1024) // 8GB
-            .cpu_limit(4.0)
-            .max_pids(512)
             .env("TERM", "xterm-256color")
             .env("HOME", home)
             .env("USER", "sandbox")
             .env("SHELL", "/bin/bash")
+    }
+}
+
+/// The presets' CPU share and process count, where they can be enforced:
+/// macOS has neither, and refuses them rather than ignore them.
+fn cpu_and_pids(builder: SandboxBuilder, cpus: f64, pids: u32) -> SandboxBuilder {
+    if cfg!(target_os = "macos") {
+        builder
+    } else {
+        builder.cpu_limit(cpus).max_pids(pids)
     }
 }
 

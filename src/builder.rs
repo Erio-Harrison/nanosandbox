@@ -417,6 +417,33 @@ impl SandboxBuilder {
             )));
         }
 
+        let c = &self.config;
+        if let Some(cpus) = c.cpu_limit {
+            // Linux's cpu.max takes at least 1ms per 100ms period.
+            if !cpus.is_finite() || cpus < 0.01 {
+                return Err(SandboxError::Config(format!(
+                    "cpu_limit({cpus}): must be at least 0.01 (cores)"
+                )));
+            }
+        }
+        for (value, setting) in [
+            (c.memory_limit, "memory_limit"),
+            (c.max_pids.map(u64::from), "max_pids"),
+            (c.max_open_files.map(u64::from), "max_open_files"),
+        ] {
+            if value == Some(0) {
+                return Err(SandboxError::Config(format!(
+                    "{setting}(0): nothing could run"
+                )));
+            }
+        }
+        if c.hostname.is_empty() || c.hostname.len() > 64 {
+            return Err(SandboxError::Config(format!(
+                "hostname {:?}: must be 1 to 64 bytes",
+                c.hostname
+            )));
+        }
+
         // Validate rootfs if specified
         if let Some(rootfs) = &self.config.rootfs {
             if !rootfs.exists() || !rootfs.is_dir() {

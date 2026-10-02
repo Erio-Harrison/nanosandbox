@@ -131,6 +131,19 @@ impl PlatformExecutor for WindowsExecutor {
                     .into(),
             });
         }
+        for (set, setting) in [
+            (config.cpu_time_limit.is_some(), "cpu_time_limit"),
+            (config.max_pids.is_some(), "max_pids"),
+            (config.max_file_size.is_some(), "max_file_size"),
+            (config.max_open_files.is_some(), "max_open_files"),
+        ] {
+            if set {
+                return Err(SandboxError::Unsupported {
+                    setting: format!("{setting} on Windows"),
+                    reason: "not implemented on Windows yet; leave it unset there".into(),
+                });
+            }
+        }
         if !config.mounts.is_empty()
             || config.private_tmp.is_some()
             || !config.deny_read.is_empty()

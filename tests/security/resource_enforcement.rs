@@ -118,25 +118,17 @@ fn test_macos_rejected_rlimit_names_the_setting() {
 
 /// Test: Max processes limit on macOS
 ///
-/// NOTE: RLIMIT_NPROC on macOS affects the ENTIRE USER, not just the sandbox.
-/// This makes it unsuitable for sandboxing, so we intentionally do NOT use it.
-/// On Linux, we use cgroups pids controller instead.
+/// RLIMIT_NPROC on macOS counts every process the user has, not just the
+/// sandbox's, so it can't be used, and there's nothing else: build()
+/// refuses max_pids rather than accept it and not enforce it.
 #[test]
 #[cfg(target_os = "macos")]
-fn test_macos_max_pids_not_enforced_intentionally() {
-    // This test documents that max_pids is NOT enforced via RLIMIT_NPROC on macOS
-    // because RLIMIT_NPROC limits processes for the entire user, not per-sandbox
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        .max_pids(5)
-        .wall_time_limit(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
-    // On macOS, max_pids is accepted but not enforced via RLIMIT_NPROC
-    // This is by design - use Linux cgroups for proper pid limiting
-    let result = sandbox.run("sh", &["-c", "echo ok"]).unwrap();
-    assert_eq!(result.exit_code, 0);
+fn test_macos_max_pids_refused() {
+    let result = Sandbox::builder().max_pids(5).build();
+    assert!(matches!(
+        result,
+        Err(nanosandbox::SandboxError::Unsupported { .. })
+    ));
 }
 
 /// Test: Max open files limit should be enforced via setrlimit

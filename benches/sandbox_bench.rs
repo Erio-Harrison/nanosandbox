@@ -34,7 +34,7 @@ fn bench_sandbox_creation(c: &mut Criterion) {
                 })
                 .memory_limit(256 * MB)
                 .wall_time_limit(Duration::from_secs(30))
-                .max_pids(100)
+                .max_open_files(100)
                 .build()
                 .unwrap();
             black_box(sandbox)

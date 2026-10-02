@@ -138,7 +138,7 @@ fn test_multiple_limits_combined() {
         })
         .memory_limit(128 * MB)
         .wall_time_limit(Duration::from_secs(5))
-        .max_pids(50)
+        .max_open_files(50)
         .build()
         .unwrap();
 
@@ -150,6 +150,7 @@ fn test_multiple_limits_combined() {
 }
 
 #[test]
+#[cfg(not(target_os = "macos"))]
 fn test_cpu_limit() {
     // CPU limit test - verifies it doesn't crash
     let sandbox = Sandbox::builder()

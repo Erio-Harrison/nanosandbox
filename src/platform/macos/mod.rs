@@ -525,9 +525,24 @@ impl PlatformExecutor for MacOSExecutor {
         )
     }
 
-    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
+    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
         if !is_supported() {
             return Err(SandboxError::SandboxExecUnavailable);
+        }
+        // macOS has no per-sandbox process count or CPU share: RLIMIT_NPROC
+        // counts every process the user has, not the sandbox's.
+        for (set, setting) in [
+            (config.max_pids.is_some(), "max_pids"),
+            (config.cpu_limit.is_some(), "cpu_limit"),
+        ] {
+            if set {
+                return Err(SandboxError::Unsupported {
+                    setting: format!("{setting} on macOS"),
+                    reason: "macOS has no way to limit it per sandbox (no cgroups); leave it \
+                             unset there"
+                        .into(),
+                });
+            }
         }
         Ok(())
     }

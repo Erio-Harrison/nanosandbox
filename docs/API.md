@@ -83,6 +83,8 @@ A unique identifier for this sandbox.
 Presets return a `SandboxBuilder`, so any setting can be changed before
 `build()`. They only use settings that Linux and macOS both enforce.
 
+CPU share and process count are left out on macOS, which can't limit them.
+
 | Preset | Files | Private /tmp | Memory | CPU | Wall time | Processes |
 |---|---|---|---|---|---|---|
 | `code_judge(dir)` | `dir` read-only, working dir; rest of home hidden | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
@@ -202,6 +204,22 @@ pub fn max_pids(self, n: u32) -> Self
 pub fn max_file_size(self, bytes: u64) -> Self
 pub fn max_open_files(self, n: u32) -> Self
 ```
+
+Where a platform can't enforce a limit, `build()` refuses it
+(`SandboxError::Unsupported`) instead of running without it:
+
+| | Linux | macOS | Windows |
+|---|---|---|---|
+| `memory_limit` | cgroup | checked every 10 ms, killed when over | Job Object |
+| `cpu_limit` | cgroup | refused | Job Object |
+| `wall_time_limit` | ✓ | ✓ | ✓ |
+| `cpu_time_limit` | rlimit | rlimit | refused |
+| `max_pids` | cgroup | refused | refused |
+| `max_file_size`, `max_open_files` | rlimit | rlimit | refused |
+
+The presets leave out `cpu_limit` and `max_pids` on macOS. Values that can't
+work (`cpu_limit` under 0.01, NaN, a zero memory, process or file limit) are
+refused too.
 
 ### Network
 

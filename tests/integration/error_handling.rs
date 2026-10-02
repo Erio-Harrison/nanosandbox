@@ -260,3 +260,20 @@ fn test_error_display_user_friendly() {
         );
     }
 }
+
+/// Limits that can't work are refused at build(), not at every run().
+#[test]
+fn test_invalid_limits_refused() {
+    for builder in [
+        Sandbox::builder().cpu_limit(0.0),
+        Sandbox::builder().cpu_limit(f64::NAN),
+        Sandbox::builder().cpu_limit(-1.0),
+        Sandbox::builder().memory_limit(0),
+        Sandbox::builder().max_open_files(0),
+    ] {
+        assert!(
+            matches!(builder.build(), Err(SandboxError::Config(_))),
+            "an invalid limit was accepted"
+        );
+    }
+}
