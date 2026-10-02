@@ -193,3 +193,60 @@ fn lasting_zombie_children() -> Vec<String> {
         .filter(|pid| second.contains(pid))
         .collect()
 }
+
+/// Test: a background process that leaves the process group and outlives
+/// its parent is killed with the run, even though the run ended normally.
+/// It used to keep running: by then it's launchd's child, and the tree walk
+/// from the run's first process doesn't find it. Processes that aren't the
+/// run's, inside another sandbox or none, are left alone.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_escaped_background_process_killed() {
+    let alive = |pid: i32| unsafe { libc::kill(pid, 0) } == 0;
+
+    let mut unrelated = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    let other = std::sync::Arc::new(Sandbox::builder().build().unwrap());
+    let other_run = {
+        let other = other.clone();
+        std::thread::spawn(move || other.run("sh", &["-c", "sleep 3; echo still-here"]))
+    };
+
+    let sandbox = Sandbox::builder().build().unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "perl -e 'setpgrp(0,0); sleep 30' & echo $!; sleep 0.2",
+            ],
+        )
+        .unwrap();
+    let escaped: i32 = result.stdout.trim().parse().unwrap();
+
+    // Killed, and then reaped by launchd.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while alive(escaped) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let escaped_alive = alive(escaped);
+    let unrelated_alive = alive(unrelated.id() as i32);
+    if escaped_alive {
+        unsafe {
+            libc::kill(escaped, libc::SIGKILL);
+        }
+    }
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+
+    assert!(
+        !escaped_alive,
+        "background process {escaped} outlived the run"
+    );
+    assert!(unrelated_alive, "a process outside the sandbox was killed");
+    let other = other_run.join().unwrap().unwrap();
+    assert_eq!(
+        other.stdout.trim(),
+        "still-here",
+        "another sandbox's run was killed"
+    );
+}

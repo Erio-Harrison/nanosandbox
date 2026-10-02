@@ -24,6 +24,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod run_marker;
+use run_marker::RunMarker;
+
 // std's spawn error carries only errno, so the child reports which setrlimit
 // failed through a side pipe as [limit, errno].
 const LIMIT_OPEN_FILES: u8 = 1;
@@ -98,6 +101,7 @@ impl MacOSExecutor {
         config: &SandboxConfig,
         proxy_port: Option<u16>,
         private_tmp: Option<&Path>,
+        marker: Option<&RunMarker>,
     ) -> SeatbeltProfile {
         let mut sections = vec![
             BASE_POLICY.to_string(),
@@ -164,6 +168,18 @@ impl MacOSExecutor {
                 params.push((key, path.to_string_lossy().into_owned()));
             }
             sections.push(read_rules);
+        }
+
+        // Marks this run's processes for kill_run; see run_marker.rs.
+        if let Some(marker) = marker {
+            let mut rules = String::from("; this run's marker\n");
+            for (i, (rule, path)) in marker.rules().into_iter().enumerate() {
+                let key = format!("RUN_MARKER_{i}");
+                rules.push_str(&rule.replace("{}", &key));
+                rules.push('\n');
+                params.push((key, path.to_string_lossy().into_owned()));
+            }
+            sections.push(rules);
         }
 
         match &config.network_mode {
@@ -346,6 +362,26 @@ impl MacOSExecutor {
         seen.into_iter().collect()
     }
 
+    /// Kill every process of the run: the tree under `root`, then anything
+    /// the run's sandbox still has, such as a child that left the process
+    /// group and outlived its parent. Again until none are left, in case one
+    /// forks while this goes.
+    fn kill_run(root: i32, marker: &RunMarker) {
+        Self::kill_process_tree(root);
+        for _ in 0..50 {
+            let members = marker.members();
+            if members.is_empty() {
+                return;
+            }
+            for pid in members {
+                unsafe {
+                    libc::kill(pid, libc::SIGKILL);
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Kill the sandbox's whole process tree
     fn kill_process_tree(root: i32) {
         for pid in Self::sandbox_pids(root) {
@@ -406,11 +442,15 @@ impl PlatformExecutor for MacOSExecutor {
             .transpose()
             .map_err(|e| SandboxError::ExecutionFailed(format!("create private /tmp: {e}")))?;
 
+        let marker = RunMarker::create()
+            .map_err(|e| SandboxError::ExecutionFailed(format!("create run marker: {e}")))?;
+
         // Generate sandbox profile
         let profile = self.generate_profile(
             config,
             proxy.map(|p| p.port()),
             private_tmp.as_ref().map(PrivateTmp::path),
+            Some(&marker),
         );
 
         let (report_rd, report_wr) = Self::report_pipe()?;
@@ -501,8 +541,6 @@ impl PlatformExecutor for MacOSExecutor {
             }
         };
 
-        let child_pid = child.id() as i32;
-
         // The proxy is owned by the Sandbox, not this call, so it stays up
         // for the next run() instead of being shut down here.
         //
@@ -517,10 +555,10 @@ impl PlatformExecutor for MacOSExecutor {
         // and no stdin at all).
         self.wait_with_timeout(
             &mut child,
-            child_pid,
             stdin,
             config,
             private_tmp.as_mut(),
+            &marker,
             start,
         )
     }
@@ -552,12 +590,13 @@ impl MacOSExecutor {
     fn wait_with_timeout(
         &self,
         child: &mut std::process::Child,
-        child_pid: i32,
         stdin_data: Option<&[u8]>,
         config: &SandboxConfig,
         mut private_tmp: Option<&mut PrivateTmp>,
+        marker: &RunMarker,
         start: Instant,
     ) -> Result<ExecutionResult> {
+        let child_pid = child.id() as i32;
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         let memory_limit = config.memory_limit;
         let mut killed_by_timeout = false;
@@ -627,7 +666,7 @@ impl MacOSExecutor {
                 // the whole tree here too, not just on the timeout/oom paths
                 // below (confirmed for real: a backgrounded `sleep 20` was
                 // still alive well after run() returned).
-                Self::kill_process_tree(child_pid);
+                Self::kill_run(child_pid, marker);
 
                 // Extract exit code and signal
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
@@ -668,7 +707,7 @@ impl MacOSExecutor {
             } else if result == 0 {
                 // Still running, check timeout
                 if start.elapsed() > timeout && !killed_by_timeout {
-                    Self::kill_process_tree(child_pid);
+                    Self::kill_run(child_pid, marker);
                     killed_by_timeout = true;
                 }
                 let mut poll = Duration::from_millis(10);
@@ -676,7 +715,7 @@ impl MacOSExecutor {
                     if !killed_by_oom {
                         let used = Self::tree_footprint(child_pid);
                         if used > limit {
-                            Self::kill_process_tree(child_pid);
+                            Self::kill_run(child_pid, marker);
                             killed_by_oom = true;
                         } else if used > limit / 10 * 6 {
                             poll = Duration::from_millis(2);
@@ -685,7 +724,7 @@ impl MacOSExecutor {
                 }
                 if let Some(tmp) = private_tmp.as_deref_mut() {
                     if !killed_by_tmp_limit && tmp.over_limit() {
-                        Self::kill_process_tree(child_pid);
+                        Self::kill_run(child_pid, marker);
                         killed_by_tmp_limit = true;
                     }
                 }
@@ -698,7 +737,7 @@ impl MacOSExecutor {
                     // just retry rather than treating this as fatal.
                     continue;
                 }
-                Self::kill_process_tree(child_pid);
+                Self::kill_run(child_pid, marker);
                 let _ = child.wait();
                 return Err(SandboxError::ExecutionFailed(format!(
                     "wait4 failed: {err}"
@@ -742,7 +781,7 @@ mod tests {
     }
 
     fn profile(config: &SandboxConfig, proxy_port: Option<u16>) -> SeatbeltProfile {
-        MacOSExecutor::new().generate_profile(config, proxy_port, None)
+        MacOSExecutor::new().generate_profile(config, proxy_port, None, None)
     }
 
     #[test]

@@ -189,6 +189,21 @@ tools outside the sandbox, or run by their real path under
 other non-`xcrun` programs. That directory is writable by default, as it
 was before.
 
+### Process Cleanup
+
+When a run ends, by exiting, a timeout or the memory limit, every process
+it started is killed. Walking the process tree from the first process isn't
+enough: a child that leaves the process group (`setpgrp`) and outlives its
+parent belongs to launchd by then, and there are no cgroups to find it by.
+
+What every process of a run keeps is its sandbox, which it can't leave. So
+each run's profile denies `file-read-metadata` on one file made for that
+run, and allows it on a second one next to it. At the end, `sandbox_check`
+asks each of the user's sandboxed processes about both, and the ones denied
+the first and allowed the second are the run's. Asking about only one isn't
+enough: apps' own sandboxes can't read the temp directory at all. If the
+check doesn't behave as expected on this process itself, nothing is killed.
+
 ### Reading
 
 The profile allows reading everything, then denies `file-read-data` (file
