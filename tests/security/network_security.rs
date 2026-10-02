@@ -340,3 +340,63 @@ fn test_localhost_always_allowed() {
         output
     );
 }
+
+/// Test: an allowed name that resolves to loopback (or another non-public
+/// address) is refused unless allow_private_destinations() says otherwise.
+/// The proxy connects from the host's network, so this is the host's own
+/// localhost: its databases, dev servers, cloud metadata.
+#[test]
+#[cfg(unix)]
+fn test_private_destinations_refused_by_default() {
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server_hits = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\n\r\nreached");
+        }
+    });
+
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         echo http=$(curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 http://localhost:{port}/)
+         echo connect=$(curl -s -o /dev/null -w '%{{http_connect}}' --connect-timeout 3 -p http://localhost:{port}/)"
+    );
+    let run = |builder: nanosandbox::SandboxBuilder| {
+        let sandbox = builder
+            .allow_network(&["localhost"])
+            .wall_time_limit(Duration::from_secs(15))
+            .build()
+            .unwrap();
+        sandbox.run("sh", &["-c", &script]).unwrap().stdout
+    };
+
+    let refused = run(Sandbox::builder());
+    if refused.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert!(refused.contains("http=403"), "{refused}");
+    assert!(refused.contains("connect=403"), "{refused}");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "the host's localhost was reached"
+    );
+
+    let allowed = run(Sandbox::builder().allow_private_destinations());
+    assert!(allowed.contains("http=200"), "{allowed}");
+    assert!(allowed.contains("connect=200"), "{allowed}");
+    assert!(hits.load(Ordering::SeqCst) > 0);
+}

@@ -235,7 +235,7 @@ fn test_proxied_network_setup() {
     use nanosandbox::network::ProxiedNetwork;
 
     // Setup proxy with allowed domains
-    let proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()])
+    let proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()], false)
         .expect("Failed to setup proxy");
 
     // Verify proxy is running

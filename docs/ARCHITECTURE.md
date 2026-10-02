@@ -477,6 +477,16 @@ from ignoring `HTTP_PROXY` and connecting directly differs per platform:
 - **Windows**: not available. `build()` refuses anything but
   `host_network()`.
 
+### Destinations: public addresses only
+
+Since the proxy connects from the host's network, an allowed name that
+resolves to a loopback, private, link-local (cloud metadata) or other
+non-public address would reach what the sandbox's own network can't: the
+host's services and internal network. The proxy refuses those with 403
+unless `allow_private_destinations()` is set. It resolves each name once and
+connects to the very address it checked, so a name that resolves to a
+public address first and to `127.0.0.1` next (DNS rebinding) gets nowhere.
+
 ---
 
 ## Execution Result

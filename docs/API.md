@@ -227,6 +227,7 @@ refused too.
 pub fn no_network(self) -> Self                    // default
 pub fn allow_network(self, domains: &[&str]) -> Self
 pub fn host_network(self) -> Self
+pub fn allow_private_destinations(self) -> Self     // with allow_network
 ```
 
 `allow_network` routes all traffic through a local HTTP/HTTPS proxy that
@@ -238,6 +239,14 @@ allows the proxy. `HTTP_PROXY`/`HTTPS_PROXY` are set for the program.
 ```rust
 builder.allow_network(&["api.openai.com", "*.github.com"])
 ```
+
+The proxy connects from the host's network. So an allowed name that
+resolves to a loopback, private (10/8, 172.16/12, 192.168/16), link-local
+(including cloud metadata at 169.254.169.254) or other non-public address is
+refused with 403: it would reach the host's own services and internal
+network. `allow_private_destinations()` allows it, for an internal API. The
+proxy resolves each name once and connects to the address it checked, so
+the name can't resolve to something else in between (DNS rebinding).
 
 Windows only supports `host_network()`.
 

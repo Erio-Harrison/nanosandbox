@@ -4,7 +4,7 @@
 //! before forwarding requests.
 
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -24,10 +24,30 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024;
 /// How long a client gets to send its request headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What the proxy lets through.
+#[derive(Clone, Debug)]
+pub(crate) struct Policy {
+    /// Lowercased; `*.example.com` also matches subdomains.
+    domains: HashSet<String>,
+    /// Whether an allowed name may lead to a loopback, private, link-local
+    /// (cloud metadata) or other non-public address. The proxy connects
+    /// from the host's network, so by default it doesn't: that would hand
+    /// the sandbox the host's own services and internal network.
+    allow_private: bool,
+}
+
 /// HTTP Proxy server with domain whitelist
 pub struct HttpProxy {
-    allowed_domains: Arc<HashSet<String>>,
+    policy: Arc<Policy>,
     listen_addr: SocketAddr,
+}
+
+/// Why the proxy didn't connect to a destination.
+enum ConnectError {
+    /// It resolved only to addresses the policy refuses.
+    NotPublic,
+    Failed(std::io::Error),
+    TimedOut,
 }
 
 impl HttpProxy {
@@ -39,15 +59,23 @@ impl HttpProxy {
     /// * `port` - Port to listen on (use 0 for random available port)
     pub fn new(allowed_domains: Vec<String>, port: u16) -> Self {
         Self {
-            // Hosts are lowercased before matching, so patterns must be too.
-            allowed_domains: Arc::new(
-                allowed_domains
+            policy: Arc::new(Policy {
+                // Hosts are lowercased before matching, so patterns must be too.
+                domains: allowed_domains
                     .into_iter()
                     .map(|d| d.to_lowercase())
                     .collect(),
-            ),
+                allow_private: false,
+            }),
             listen_addr: SocketAddr::from(([127, 0, 0, 1], port)),
         }
+    }
+
+    /// Let allowed domains lead to loopback, private, link-local and other
+    /// non-public addresses too. Off by default.
+    pub fn allow_private_destinations(mut self, allow: bool) -> Self {
+        Arc::make_mut(&mut self.policy).allow_private = allow;
+        self
     }
 
     /// Get the listen address
@@ -90,14 +118,14 @@ impl HttpProxy {
             }
             tracing::info!("Proxy shutting down");
         };
-        Self::serve(listener, Arc::clone(&self.allowed_domains), stop).await;
+        Self::serve(listener, Arc::clone(&self.policy), stop).await;
         Ok(())
     }
 
-    /// The domains this proxy lets through.
+    /// What this proxy lets through.
     #[cfg(target_os = "linux")]
-    pub(crate) fn allowed_domains(&self) -> Arc<HashSet<String>> {
-        Arc::clone(&self.allowed_domains)
+    pub(crate) fn policy(&self) -> Arc<Policy> {
+        Arc::clone(&self.policy)
     }
 
     /// Accepts and proxies connections on `listener` until `stop` completes.
@@ -105,7 +133,7 @@ impl HttpProxy {
     /// (see `ProxiedNetwork::attach`), so it doesn't need `&self`.
     pub(crate) async fn serve(
         listener: TcpListener,
-        allowed: Arc<HashSet<String>>,
+        policy: Arc<Policy>,
         stop: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(stop);
@@ -114,9 +142,9 @@ impl HttpProxy {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
-                            let allowed = Arc::clone(&allowed);
+                            let policy = Arc::clone(&policy);
                             tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, &allowed).await {
+                                if let Err(e) = Self::handle_connection(stream, &policy).await {
                                     tracing::debug!("Connection from {} error: {}", addr, e);
                                 }
                             });
@@ -137,10 +165,7 @@ impl HttpProxy {
         self.run(rx, None).await
     }
 
-    async fn handle_connection(
-        mut client: TcpStream,
-        allowed: &HashSet<String>,
-    ) -> std::io::Result<()> {
+    async fn handle_connection(mut client: TcpStream, policy: &Policy) -> std::io::Result<()> {
         // Read ALL headers at once to avoid BufReader buffering issues
         let mut reader = BufReader::new(&mut client);
         let all_headers =
@@ -162,10 +187,10 @@ impl HttpProxy {
 
         if first_line.starts_with("CONNECT ") {
             // HTTPS tunnel request - pass the client (headers already consumed)
-            Self::handle_connect(client, first_line, &all_headers, allowed).await
+            Self::handle_connect(client, first_line, &all_headers, policy).await
         } else {
             // Regular HTTP request
-            Self::handle_http(client, first_line, &all_headers, allowed).await
+            Self::handle_http(client, first_line, &all_headers, policy).await
         }
     }
 
@@ -196,7 +221,7 @@ impl HttpProxy {
         mut client: TcpStream,
         first_line: &str,
         _all_headers: &str, // Headers already consumed
-        allowed: &HashSet<String>,
+        policy: &Policy,
     ) -> std::io::Result<()> {
         // Parse: CONNECT host:port HTTP/1.1
         let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -214,29 +239,16 @@ impl HttpProxy {
 
         tracing::debug!("CONNECT request to {}:{}", host, port);
 
-        if !Self::is_allowed(host, allowed) {
+        if !Self::is_allowed(host, &policy.domains) {
             tracing::info!("Blocked CONNECT to {} (not in whitelist)", host);
             return Self::send_error(&mut client, 403, "Domain not in whitelist").await;
         }
 
         // Headers already read in handle_connection, no need to read again
 
-        // Connect to target with timeout
-        let remote = match tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", host, port)),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                tracing::debug!("Failed to connect to {}:{}: {}", host, port, e);
-                return Self::send_error(&mut client, 502, "Bad Gateway").await;
-            }
-            Err(_) => {
-                tracing::debug!("Connection timeout to {}:{}", host, port);
-                return Self::send_error(&mut client, 504, "Gateway Timeout").await;
-            }
+        let remote = match Self::connect(host, port, policy).await {
+            Ok(r) => r,
+            Err(e) => return Self::refuse(&mut client, host, port, e).await,
         };
 
         // Send 200 Connection Established
@@ -279,7 +291,7 @@ impl HttpProxy {
         mut client: TcpStream,
         first_line: &str,
         all_headers: &str,
-        allowed: &HashSet<String>,
+        policy: &Policy,
     ) -> std::io::Result<()> {
         // Parse: GET http://host/path HTTP/1.1
         let parts: Vec<&str> = first_line.split_whitespace().collect();
@@ -306,7 +318,7 @@ impl HttpProxy {
 
         tracing::debug!("HTTP request to {}", host);
 
-        if !Self::is_allowed(host, allowed) {
+        if !Self::is_allowed(host, &policy.domains) {
             tracing::info!("Blocked HTTP to {} (not in whitelist)", host);
             return Self::send_error(&mut client, 403, "Domain not in whitelist").await;
         }
@@ -349,27 +361,9 @@ impl HttpProxy {
             );
         }
 
-        // Connect to target with timeout
-        let mut remote = match tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            TcpStream::connect(format!("{}:{}", target_host, target_port)),
-        )
-        .await
-        {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    "Failed to connect to {}:{}: {}",
-                    target_host,
-                    target_port,
-                    e
-                );
-                return Self::send_error(&mut client, 502, "Bad Gateway").await;
-            }
-            Err(_) => {
-                tracing::debug!("Connection timeout to {}:{}", target_host, target_port);
-                return Self::send_error(&mut client, 504, "Gateway Timeout").await;
-            }
+        let mut remote = match Self::connect(target_host, target_port, policy).await {
+            Ok(r) => r,
+            Err(e) => return Self::refuse(&mut client, target_host, target_port, e).await,
         };
 
         // Forward request
@@ -393,6 +387,58 @@ impl HttpProxy {
         }
 
         Ok(())
+    }
+
+    /// Resolves `host` once and connects to one of the addresses the policy
+    /// allows. Connecting by address, not by name again, means the name
+    /// can't resolve to something else in between (DNS rebinding).
+    async fn connect(host: &str, port: u16, policy: &Policy) -> Result<TcpStream, ConnectError> {
+        let attempt = async {
+            let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+                .await
+                .map_err(ConnectError::Failed)?
+                .collect();
+            let usable: Vec<&SocketAddr> = resolved
+                .iter()
+                .filter(|a| policy.allow_private || is_public(a.ip()))
+                .collect();
+            if usable.is_empty() && !resolved.is_empty() {
+                return Err(ConnectError::NotPublic);
+            }
+            let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
+            for addr in usable {
+                match TcpStream::connect(addr).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => last = e,
+                }
+            }
+            Err(ConnectError::Failed(last))
+        };
+        tokio::time::timeout(CONNECT_TIMEOUT, attempt)
+            .await
+            .unwrap_or(Err(ConnectError::TimedOut))
+    }
+
+    async fn refuse(
+        client: &mut TcpStream,
+        host: &str,
+        port: u16,
+        e: ConnectError,
+    ) -> std::io::Result<()> {
+        match e {
+            ConnectError::NotPublic => {
+                tracing::info!("Blocked {host}:{port}: resolves to a non-public address");
+                Self::send_error(client, 403, "Destination address not allowed").await
+            }
+            ConnectError::Failed(e) => {
+                tracing::debug!("Failed to connect to {host}:{port}: {e}");
+                Self::send_error(client, 502, "Bad Gateway").await
+            }
+            ConnectError::TimedOut => {
+                tracing::debug!("Connection timeout to {host}:{port}");
+                Self::send_error(client, 504, "Gateway Timeout").await
+            }
+        }
     }
 
     /// Check if domain is in whitelist
@@ -436,6 +482,51 @@ impl HttpProxy {
     }
 }
 
+/// Whether `ip` is on the public internet: not loopback, private, link-local
+/// (where cloud metadata services live), shared (CGNAT), multicast,
+/// reserved or the like. IPv6 addresses that embed an IPv4 one (mapped,
+/// NAT64, 6to4) are judged by it.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_public_v4(v4),
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            let embedded = |hi: u16, lo: u16| {
+                Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+            };
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_v4(v4);
+            }
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || s[..6] == [0; 6] {
+                // NAT64, and IPv4-compatible (which includes :: and ::1)
+                return !v6.is_loopback() && is_public_v4(embedded(s[6], s[7]));
+            }
+            if s[0] == 0x2002 {
+                return is_public_v4(embedded(s[1], s[2])); // 6to4
+            }
+            !(v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local
+                || (s[0] & 0xffc0) == 0xfe80 // link-local
+                || (s[0] & 0xffc0) == 0xfec0 // site-local
+                || (s[0] == 0x2001 && s[1] == 0xdb8)) // documentation
+        }
+    }
+}
+
+fn is_public_v4(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(o[0] == 0 // "this network", including 0.0.0.0
+        || ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10, shared
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15, benchmarking
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || o[0] >= 240) // reserved, and broadcast
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,8 +557,8 @@ mod tests {
     #[test]
     fn test_whitelist_entries_are_case_insensitive() {
         let proxy = HttpProxy::new(vec!["Mixed.Org".into(), "*.Upper.COM".into()], 0);
-        assert!(HttpProxy::is_allowed("mixed.org", &proxy.allowed_domains));
-        assert!(HttpProxy::is_allowed("a.upper.com", &proxy.allowed_domains));
+        assert!(HttpProxy::is_allowed("mixed.org", &proxy.policy.domains));
+        assert!(HttpProxy::is_allowed("a.upper.com", &proxy.policy.domains));
     }
 
     #[tokio::test]
@@ -492,5 +583,38 @@ mod tests {
 
         assert!(HttpProxy::is_allowed("EXAMPLE.COM", &allowed));
         assert!(HttpProxy::is_allowed("Example.Com", &allowed));
+    }
+
+    #[test]
+    fn test_is_public() {
+        for ip in [
+            "93.184.216.34",
+            "1.1.1.1",
+            "2606:4700::1111",
+            "::ffff:8.8.8.8",
+        ] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "::1",
+            "::",
+            "fe80::1",
+            "fd00::1",
+            "::ffff:127.0.0.1",
+            "::ffff:169.254.169.254",
+            "64:ff9b::a9fe:a9fe",
+            "2002:7f00:1::",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
     }
 }

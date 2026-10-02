@@ -69,9 +69,10 @@ impl Sandbox {
         // Start the proxy once, after platform support is confirmed, so it is
         // not spun up only to be discarded by a check_support() failure.
         let proxy = match &config.network_mode {
-            NetworkMode::Proxied { allowed_domains } => {
-                Some(ProxiedNetwork::setup(allowed_domains.clone())?)
-            }
+            NetworkMode::Proxied { allowed_domains } => Some(ProxiedNetwork::setup(
+                allowed_domains.clone(),
+                config.allow_private_destinations,
+            )?),
             _ => None,
         };
 

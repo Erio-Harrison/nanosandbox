@@ -68,6 +68,8 @@ pub(crate) struct SandboxConfig {
 
     // Network
     pub(crate) network_mode: NetworkMode,
+    /// [`SandboxBuilder::allow_private_destinations`].
+    pub(crate) allow_private_destinations: bool,
 
     // Security
     /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
@@ -102,6 +104,7 @@ impl Default for SandboxConfig {
             max_open_files: None,
 
             network_mode: NetworkMode::None,
+            allow_private_destinations: false,
             seccomp: true,
             uid: None,
             gid: None,
@@ -326,6 +329,19 @@ impl SandboxBuilder {
         self
     }
 
+    /// With [`allow_network`](Self::allow_network): let the allowed
+    /// domains lead to loopback, private (10/8, 172.16/12, 192.168/16),
+    /// link-local (including cloud metadata at 169.254.169.254) and other
+    /// non-public addresses, such as an internal API.
+    ///
+    /// Off by default: the proxy connects from the host's network, so a
+    /// name resolving there would reach the host's own services and
+    /// internal network, which the sandbox otherwise can't.
+    pub fn allow_private_destinations(mut self) -> Self {
+        self.config.allow_private_destinations = true;
+        self
+    }
+
     // ========== Security ==========
 
     /// Turn the Linux syscall filter on or off. On by default.
@@ -418,6 +434,11 @@ impl SandboxBuilder {
         }
 
         let c = &self.config;
+        if c.allow_private_destinations && !matches!(c.network_mode, NetworkMode::Proxied { .. }) {
+            return Err(SandboxError::Config(
+                "allow_private_destinations() only applies with allow_network()".into(),
+            ));
+        }
         if let Some(cpus) = c.cpu_limit {
             // Linux's cpu.max takes at least 1ms per 100ms period.
             if !cpus.is_finite() || cpus < 0.01 {

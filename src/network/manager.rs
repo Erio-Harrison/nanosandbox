@@ -19,7 +19,7 @@ pub struct ProxiedNetwork {
     #[cfg(target_os = "linux")]
     runtime: tokio::runtime::Handle,
     #[cfg(target_os = "linux")]
-    allowed: std::sync::Arc<std::collections::HashSet<String>>,
+    policy: std::sync::Arc<super::proxy::Policy>,
 }
 
 /// Keeps serving an attached listener; dropping it stops that and closes
@@ -35,11 +35,13 @@ impl ProxiedNetwork {
     /// # Arguments
     ///
     /// * `allowed_domains` - List of domains to allow access to
+    /// * `allow_private_destinations` - Whether those may resolve to
+    ///   loopback, private, link-local and other non-public addresses
     ///
     /// # Returns
     ///
     /// A `ProxiedNetwork` instance that manages the proxy lifecycle
-    pub fn setup(allowed_domains: Vec<String>) -> Result<Self> {
+    pub fn setup(allowed_domains: Vec<String>, allow_private_destinations: bool) -> Result<Self> {
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         // Carries the real bind result (address or error) from inside proxy.run(),
@@ -47,9 +49,10 @@ impl ProxiedNetwork {
         // is no separate "reserve a port, then bind it again" step, so there is no
         // window for another process to grab the port in between.
         let (bound_tx, bound_rx) = mpsc::channel::<std::io::Result<std::net::SocketAddr>>();
-        let proxy = HttpProxy::new(allowed_domains, 0);
+        let proxy = HttpProxy::new(allowed_domains, 0)
+            .allow_private_destinations(allow_private_destinations);
         #[cfg(target_os = "linux")]
-        let allowed = proxy.allowed_domains();
+        let policy = proxy.policy();
         #[cfg(target_os = "linux")]
         let (runtime_tx, runtime_rx) = mpsc::channel::<tokio::runtime::Handle>();
 
@@ -111,7 +114,7 @@ impl ProxiedNetwork {
                 .recv()
                 .map_err(|_| SandboxError::Internal("proxy runtime went away".into()))?,
             #[cfg(target_os = "linux")]
-            allowed,
+            policy,
         })
     }
 
@@ -131,7 +134,7 @@ impl ProxiedNetwork {
             let _ = stop_rx.await;
         };
         self.runtime
-            .spawn(HttpProxy::serve(listener, self.allowed.clone(), stop));
+            .spawn(HttpProxy::serve(listener, self.policy.clone(), stop));
         Ok(Attachment { _stop: stop_tx })
     }
 
@@ -181,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_env_vars() {
-        let network = ProxiedNetwork::setup(vec!["example.com".into()]).unwrap();
+        let network = ProxiedNetwork::setup(vec!["example.com".into()], false).unwrap();
         let vars = network.env_vars();
 
         assert_eq!(vars.len(), 4);
