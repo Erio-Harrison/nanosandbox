@@ -24,25 +24,12 @@ fn main() {
         .build()
         .unwrap();
 
-    let result = sandbox
-        .run(
-            "curl",
-            &["-s", "--connect-timeout", "3", "https://httpbin.org/ip"],
-        )
-        .unwrap_or_else(|_| nanosandbox::result::ExecutionResult {
-            stdout: String::new(),
-            stderr: "curl not found".into(),
-            exit_code: 1,
-            duration: Duration::ZERO,
-            killed_by_timeout: false,
-            killed_by_oom: false,
-            killed_by_tmp_limit: false,
-            signal: None,
-            peak_memory: None,
-            cpu_time: None,
-        });
+    let result = sandbox.run(
+        "curl",
+        &["-s", "--connect-timeout", "3", "https://httpbin.org/ip"],
+    );
 
-    if result.exit_code != 0 || result.stdout.is_empty() {
+    if !result.is_ok_and(|r| r.exit_code == 0 && !r.stdout.is_empty()) {
         println!("   [BLOCKED] Network access denied (expected)\n");
     } else {
         println!("   [WARNING] Network access NOT blocked!\n");

@@ -177,3 +177,24 @@ fn test_binary_output() {
         assert!(result.success());
     }
 }
+
+/// clear_env(false) passes this process's environment through, with env()
+/// on top; by default the program starts with only what env() sets.
+#[test]
+#[cfg(unix)]
+fn test_clear_env() {
+    std::env::set_var("NSB_INHERITED_PROBE", "from-host");
+    let script = "echo \"${NSB_INHERITED_PROBE:-unset} $NSB_SET\"";
+
+    let cleared = Sandbox::builder().env("NSB_SET", "set").build().unwrap();
+    let result = cleared.run("sh", &["-c", script]).unwrap();
+    assert_eq!(result.stdout.trim(), "unset set");
+
+    let inherited = Sandbox::builder()
+        .clear_env(false)
+        .env("NSB_SET", "set")
+        .build()
+        .unwrap();
+    let result = inherited.run("sh", &["-c", script]).unwrap();
+    assert_eq!(result.stdout.trim(), "from-host set");
+}

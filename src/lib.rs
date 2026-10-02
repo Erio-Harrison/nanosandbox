@@ -13,11 +13,11 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use nanosandbox::{Sandbox, Permission, MB};
+//! use nanosandbox::{Sandbox, MB};
 //! use std::time::Duration;
 //!
 //! let sandbox = Sandbox::builder()
-//!     .mount("/data/input", "/data/input", Permission::ReadOnly)
+//!     .read_only("/data/input")
 //!     .memory_limit(512 * MB)
 //!     .wall_time_limit(Duration::from_secs(30))
 //!     .build()
@@ -27,7 +27,7 @@
 //! println!("{}", result.stdout);
 //! ```
 
-pub mod builder;
+mod builder;
 pub mod error;
 pub mod network;
 pub(crate) mod platform;
@@ -35,7 +35,9 @@ pub mod result;
 pub mod sandbox;
 
 // Re-exports
-pub use builder::{NetworkMode, Permission, SandboxBuilder};
+#[cfg(target_os = "linux")]
+pub use builder::Permission;
+pub use builder::{SandboxBuilder, DEFAULT_PRIVATE_TMP_SIZE};
 pub use error::{Result, SandboxError};
 pub use result::ExecutionResult;
 pub use sandbox::Sandbox;

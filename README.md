@@ -22,11 +22,11 @@ nanosandbox = "0.1"
 ## Usage
 
 ```rust
-use nanosandbox::{Sandbox, Permission, MB};
+use nanosandbox::{Sandbox, MB};
 use std::time::Duration;
 
 let sandbox = Sandbox::builder()
-    .mount("/data/input", "/data/input", Permission::ReadOnly)
+    .read_only("/data/input")
     .memory_limit(256 * MB)
     .wall_time_limit(Duration::from_secs(30))
     .no_network()
@@ -97,10 +97,9 @@ Allow specific domains only (uses a local HTTP proxy):
 
 Where a setting can't be enforced, `build()` returns an error rather than
 running without it. On Windows that means `host_network()` is required and
-`mount`/`tmpfs`/`rootfs` are refused.
-On macOS, `tmpfs("/tmp", size)` is a private per-run directory that
-`TMPDIR` points to, rather than a real tmpfs; see
-[docs/platform-macos.md](docs/platform-macos.md#tmpfs).
+`read_only`/`writable`/`private_tmp` are refused. Settings only Linux has
+(`rootfs`, `bind`, `tmpfs`, `uid`, `gid`, `hostname`, `seccomp`) don't
+exist on other platforms. See [docs/API.md](docs/API.md).
 
 ## Building
 

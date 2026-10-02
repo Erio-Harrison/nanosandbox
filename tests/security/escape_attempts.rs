@@ -2,7 +2,9 @@
 //!
 //! These tests verify sandbox isolation
 
-use nanosandbox::{Permission, Sandbox};
+#[cfg(target_os = "linux")]
+use nanosandbox::Permission;
+use nanosandbox::Sandbox;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
@@ -152,7 +154,7 @@ fn test_working_directory_confinement() {
     let target = tempfile::tempdir().unwrap();
 
     let sandbox = Sandbox::builder()
-        .mount(source.path(), target.path(), Permission::ReadWrite)
+        .bind(source.path(), target.path(), Permission::ReadWrite)
         .working_dir(target.path())
         .build()
         .unwrap();
@@ -171,7 +173,7 @@ fn test_working_directory_confinement() {
 fn test_mount_target_must_exist_without_rootfs() {
     let source = tempfile::tempdir().unwrap();
     let result = Sandbox::builder()
-        .mount(
+        .bind(
             source.path(),
             "/nanosandbox-no-such-target",
             Permission::ReadWrite,
@@ -197,7 +199,7 @@ fn test_working_directory_confinement_macos() {
     let tmpdir_path = tmpdir.path().to_str().unwrap();
 
     let sandbox = Sandbox::builder()
-        .mount(tmpdir.path(), tmpdir.path(), Permission::ReadWrite)
+        .writable(tmpdir.path())
         .working_dir(tmpdir.path())
         .build()
         .unwrap();
@@ -261,7 +263,7 @@ fn test_writable_places_still_writable() {
     let path = dir.path().to_str().unwrap();
 
     let sandbox = Sandbox::builder()
-        .mount(dir.path(), dir.path(), Permission::ReadWrite)
+        .writable(dir.path())
         .working_dir(dir.path())
         .build()
         .unwrap();

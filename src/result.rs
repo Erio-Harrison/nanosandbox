@@ -6,6 +6,7 @@ use std::time::Duration;
 
 /// Result of executing a command in the sandbox
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ExecutionResult {
     /// Standard output captured from the process
     pub stdout: String,

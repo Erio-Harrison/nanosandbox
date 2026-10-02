@@ -12,7 +12,7 @@
 use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
-use crate::platform::private_tmp::{self, PrivateTmp};
+use crate::platform::private_tmp::PrivateTmp;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
 use std::collections::HashSet;
@@ -119,10 +119,7 @@ impl MacOSExecutor {
                     .filter(|m| m.permission == Permission::ReadWrite)
                     .map(|m| m.source.clone()),
             )
-            // tmpfs("/tmp") is this run's private directory; check_support
-            // refused any other tmpfs.
-            .chain(private_tmp.map(Path::to_path_buf))
-            .chain(config.rootfs.clone());
+            .chain(private_tmp.map(Path::to_path_buf));
         for path in candidates {
             let root = canonical_path(&path);
             if !roots.contains(&root) {
@@ -373,9 +370,10 @@ impl PlatformExecutor for MacOSExecutor {
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
-        // tmpfs("/tmp"): a private directory for this run, removed when this
-        // returns. See platform/private_tmp.rs.
-        let mut private_tmp = private_tmp::requested(config)
+        // private_tmp: a directory for this run, removed when this returns.
+        // See platform/private_tmp.rs.
+        let mut private_tmp = config
+            .private_tmp
             .map(PrivateTmp::create)
             .transpose()
             .map_err(|e| SandboxError::ExecutionFailed(format!("create private /tmp: {e}")))?;
@@ -499,24 +497,9 @@ impl PlatformExecutor for MacOSExecutor {
         )
     }
 
-    fn check_support(&self, config: &SandboxConfig) -> Result<()> {
+    fn check_support(&self, _config: &SandboxConfig) -> Result<()> {
         if !is_supported() {
             return Err(SandboxError::SandboxExecUnavailable);
-        }
-        // Without a mount namespace there's no putting a private directory
-        // at another path. tmpfs("/tmp") works through TMPDIR instead.
-        if let Some((path, _)) = config
-            .tmpfs_mounts
-            .iter()
-            .find(|(path, _)| !private_tmp::is_tmp(path))
-        {
-            return Err(SandboxError::PlatformFeatureUnavailable {
-                feature: format!(
-                    "tmpfs at {} on macOS; only tmpfs(\"/tmp\", ...) is supported, as a \
-                     private directory that TMPDIR points to",
-                    path.display()
-                ),
-            });
         }
         Ok(())
     }

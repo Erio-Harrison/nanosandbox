@@ -57,7 +57,7 @@ fn test_read_only_filesystem() {
 
     let sandbox = Sandbox::builder()
         .working_dir(temp_path)
-        .mount(temp_path, temp_path, nanosandbox::Permission::ReadOnly)
+        .read_only(temp_path)
         .build()
         .unwrap();
 
@@ -96,7 +96,7 @@ fn test_read_write_filesystem() {
 
     let sandbox = Sandbox::builder()
         .working_dir(temp_path)
-        .mount(temp_path, temp_path, nanosandbox::Permission::ReadWrite)
+        .writable(temp_path)
         .build()
         .unwrap();
 

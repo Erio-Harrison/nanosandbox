@@ -13,7 +13,7 @@ fn minimal_rootfs(root: &Path) -> nanosandbox::SandboxBuilder {
     }
     Sandbox::builder()
         .rootfs(root)
-        .mount("/usr", "/usr", Permission::ReadOnly)
+        .bind("/usr", "/usr", Permission::ReadOnly)
         .working_dir("/")
 }
 
@@ -25,7 +25,7 @@ fn test_readonly_mount_rejects_writes() {
     let root = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     let sandbox = minimal_rootfs(root.path())
-        .mount(data.path(), "/data", Permission::ReadOnly)
+        .bind(data.path(), "/data", Permission::ReadOnly)
         .build()
         .unwrap();
 
@@ -48,7 +48,7 @@ fn test_readwrite_mount_and_tmpfs() {
     let root = tempfile::tempdir().unwrap();
     let data = tempfile::tempdir().unwrap();
     let sandbox = minimal_rootfs(root.path())
-        .mount(data.path(), "/data", Permission::ReadWrite)
+        .bind(data.path(), "/data", Permission::ReadWrite)
         .tmpfs("/scratch", 16 * 1024 * 1024)
         .build()
         .unwrap();
@@ -85,7 +85,7 @@ fn test_concurrent_sandboxes_share_rootfs() {
                 for _ in 0..5 {
                     let sandbox = Sandbox::builder()
                         .rootfs(root.path())
-                        .mount("/usr", "/usr", Permission::ReadOnly)
+                        .bind("/usr", "/usr", Permission::ReadOnly)
                         .working_dir("/")
                         .env("ID", i.to_string())
                         .build()

@@ -156,7 +156,7 @@ fn test_filter_allows_file_operations() {
     }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .tmpfs("/tmp", 64 * MB)
+        .private_tmp(64 * MB)
         .build()
         .unwrap();
 

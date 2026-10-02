@@ -11,12 +11,14 @@
 use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
-use crate::platform::private_tmp::{self, PrivateTmp};
+use crate::platform::private_tmp::PrivateTmp;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 mod cgroup;
@@ -207,20 +209,32 @@ impl PlatformExecutor for LinuxExecutor {
         // Allocate stack for child
         let mut stack = vec![0u8; STACK_SIZE];
 
-        let mut env = config.env.clone();
+        // clear_env(false): start from this process's environment. It used
+        // to be ignored here, always starting empty.
+        let mut env: HashMap<String, String> = if config.clear_env {
+            HashMap::new()
+        } else {
+            std::env::vars().collect()
+        };
+        env.extend(config.env.clone());
 
-        // Where AppArmor denies mounting, tmpfs("/tmp") is a private
-        // directory for this run instead, removed when this returns. See
-        // platform/private_tmp.rs.
+        // private_tmp is a tmpfs at /tmp (see MountPlan), or where AppArmor
+        // denies mounting, a directory for this run, removed when this
+        // returns (see platform/private_tmp.rs). TMPDIR points to it either
+        // way.
         let userns_restricted = userns_restricted_by_apparmor();
-        let mut private_tmp = private_tmp::requested(config)
+        let mut private_tmp = config
+            .private_tmp
             .filter(|_| userns_restricted)
             .map(PrivateTmp::create)
             .transpose()
             .map_err(|e| SandboxError::Internal(format!("create private /tmp: {e}")))?;
-        if let Some(tmp) = &private_tmp {
+        if config.private_tmp.is_some() {
+            let dir = private_tmp
+                .as_ref()
+                .map_or(Path::new("/tmp"), PrivateTmp::path);
             env.entry("TMPDIR".to_string())
-                .or_insert_with(|| tmp.path().to_string_lossy().into_owned());
+                .or_insert_with(|| dir.to_string_lossy().into_owned());
         }
 
         // Add proxy environment variables if using proxied network
@@ -297,11 +311,7 @@ impl PlatformExecutor for LinuxExecutor {
         let mount_plan = if userns_restricted {
             None
         } else {
-            Some(MountPlan::new(
-                config.rootfs.as_deref(),
-                &config.mounts,
-                &config.tmpfs_mounts,
-            )?)
+            Some(MountPlan::new(config, false)?)
         };
 
         // Applied with raw setrlimit() in the child; built here for the same
@@ -666,9 +676,10 @@ impl PlatformExecutor for LinuxExecutor {
         landlock::check(config)?;
         check_network(config)?;
         if config.seccomp && !SyscallFilter::supported() {
-            return Err(SandboxError::PlatformFeatureUnavailable {
-                feature: "syscall filter on this CPU architecture (x86_64 and aarch64 only); \
-                          use seccomp(false) to run without it"
+            return Err(SandboxError::Unsupported {
+                setting: "seccomp(true)".into(),
+                reason: "the syscall filter is for x86_64 and aarch64 only; use seccomp(false) \
+                         to run without it"
                     .into(),
             });
         }
@@ -702,19 +713,31 @@ enum MountStep {
     /// mounts, so a target nested inside an earlier mount is created inside
     /// that mount, same as `create_dir_all` right before each mount was.
     Mkdir(CString),
+    /// Create an empty file to bind a file onto, if there's nothing there.
+    Touch(CString),
     /// `readonly` holds the source's locked flags (nosuid/nodev/noexec) to
     /// repeat on the read-only remount: in a user namespace, a remount that
     /// drops a locked flag fails with EPERM.
+    /// `tree` is the detached copy of `source` that `apply` takes before
+    /// mounting anything, so a source inside a path a tmpfs then covers
+    /// (anything under /tmp, with private_tmp) is still there to bind.
     Bind {
         source: CString,
         target: CString,
         readonly: Option<libc::c_ulong>,
+        tree: std::cell::Cell<RawFd>,
     },
     Tmpfs {
         target: CString,
         options: CString,
     },
 }
+
+/// open_tree(2): a detached copy of the mount at a path (non-recursive, like
+/// MS_BIND without MS_REC).
+const OPEN_TREE_CLONE: libc::c_uint = 1;
+/// move_mount(2): the source is the fd itself.
+const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
 /// Everything the child needs to set up its mount namespace, built before
 /// clone() so the child only issues raw syscalls -- the same
@@ -736,26 +759,34 @@ struct MountPlan {
 }
 
 impl MountPlan {
-    fn new(
-        rootfs: Option<&std::path::Path>,
-        mounts: &[Mount],
-        tmpfs_mounts: &[(std::path::PathBuf, u64)],
-    ) -> Result<Self> {
+    /// `restricted`: AppArmor denies mounting (see
+    /// `userns_restricted_by_apparmor`), so private_tmp isn't a tmpfs.
+    fn new(config: &SandboxConfig, restricted: bool) -> Result<Self> {
+        let rootfs = config.rootfs.as_deref();
+        let tmpfs = Self::tmpfs_mounts(config, restricted);
         let mut steps = Vec::new();
-        for m in mounts.iter().filter(|m| !Self::is_noop(rootfs, m)) {
-            let target = Self::target(&mut steps, rootfs, &m.target)?;
+        // Tmpfs first, so the binds below can go inside one instead of
+        // being hidden by it.
+        for (path, size) in &tmpfs {
+            let target = Self::target(&mut steps, rootfs, path, &[], true)?;
+            let options = CString::new(format!("size={size}")).expect("no NUL in a number");
+            steps.push(MountStep::Tmpfs { target, options });
+        }
+        for m in config
+            .mounts
+            .iter()
+            .filter(|m| Self::needs_bind(config, &tmpfs, m))
+        {
+            let is_dir = m.source.is_dir();
+            let target = Self::target(&mut steps, rootfs, &m.target, &tmpfs, is_dir)?;
             let source = path_cstring(&m.source)?;
             let readonly = (m.permission == Permission::ReadOnly).then(|| locked_flags(&source));
             steps.push(MountStep::Bind {
                 source,
                 target,
                 readonly,
+                tree: std::cell::Cell::new(-1),
             });
-        }
-        for (path, size) in tmpfs_mounts {
-            let target = Self::target(&mut steps, rootfs, path)?;
-            let options = CString::new(format!("size={size}")).expect("no NUL in a number");
-            steps.push(MountStep::Tmpfs { target, options });
         }
         let proc_target = match rootfs {
             Some(rootfs) => path_cstring(&rootfs.join("proc"))?,
@@ -768,34 +799,79 @@ impl MountPlan {
         })
     }
 
-    /// Without a rootfs, a read-write mount of a path onto itself changes
-    /// nothing, so it isn't worth a mount (or an AppArmor refusal).
-    fn is_noop(rootfs: Option<&std::path::Path>, m: &Mount) -> bool {
-        rootfs.is_none()
-            && m.permission == Permission::ReadWrite
-            && std::fs::canonicalize(&m.source).ok() == std::fs::canonicalize(&m.target).ok()
+    /// The caller's tmpfs mounts, plus private_tmp's at /tmp where it can be
+    /// mounted.
+    fn tmpfs_mounts(config: &SandboxConfig, restricted: bool) -> Vec<(PathBuf, u64)> {
+        let mut tmpfs = config.tmpfs_mounts.clone();
+        if let Some(size) = config.private_tmp.filter(|_| !restricted) {
+            tmpfs.insert(0, (PathBuf::from("/tmp"), size));
+        }
+        tmpfs
+    }
+
+    /// Whether a read_only/writable/bind path needs an actual bind mount.
+    /// Without a rootfs, a host path at its own path is already there, and
+    /// Landlock decides whether it's writable (see landlock.rs), with no
+    /// mount at all. It still needs one if it's elsewhere (bind()), under a
+    /// tmpfs that would hide it, or read-only inside a writable area, where
+    /// Landlock can't take writing away again.
+    fn needs_bind(config: &SandboxConfig, tmpfs: &[(PathBuf, u64)], m: &Mount) -> bool {
+        if config.rootfs.is_some() {
+            return true;
+        }
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        if canonical(&m.source) != canonical(&m.target) {
+            return true;
+        }
+        if tmpfs.iter().any(|(t, _)| m.target.starts_with(t)) {
+            return true;
+        }
+        m.permission == Permission::ReadOnly
+            && landlock::writable_areas(config)
+                .any(|area| area != m.target.as_path() && m.target.starts_with(area))
     }
 
     /// The full path to mount at. Under a rootfs, also queues a mkdir for
-    /// each component of it; without one it must already exist.
+    /// each component of it. Without one, the target must already exist,
+    /// unless it's inside one of `tmpfs`: those start empty, so the part
+    /// below the tmpfs is created in it. `is_dir`: whether the last
+    /// component is a directory, or a file to bind a file onto.
     fn target(
         steps: &mut Vec<MountStep>,
-        rootfs: Option<&std::path::Path>,
-        target: &std::path::Path,
+        rootfs: Option<&Path>,
+        target: &Path,
+        tmpfs: &[(PathBuf, u64)],
+        is_dir: bool,
     ) -> Result<CString> {
-        let Some(rootfs) = rootfs else {
-            return path_cstring(target);
+        let (mut path, below) = match rootfs {
+            Some(rootfs) => (
+                rootfs.to_path_buf(),
+                target.strip_prefix("/").unwrap_or(target),
+            ),
+            None => match tmpfs
+                .iter()
+                .filter(|(t, _)| t != target && target.starts_with(t))
+                .max_by_key(|(t, _)| t.components().count())
+            {
+                Some((t, _)) => (t.clone(), target.strip_prefix(t).expect("checked above")),
+                None => return path_cstring(target),
+            },
         };
-        let mut path = rootfs.to_path_buf();
-        for component in target.strip_prefix("/").unwrap_or(target).components() {
+        let components: Vec<_> = below.components().collect();
+        for (i, component) in components.iter().enumerate() {
             path.push(component);
-            steps.push(MountStep::Mkdir(path_cstring(&path)?));
+            let last = i + 1 == components.len();
+            steps.push(if last && !is_dir {
+                MountStep::Touch(path_cstring(&path)?)
+            } else {
+                MountStep::Mkdir(path_cstring(&path)?)
+            });
         }
         path_cstring(&path)
     }
 
-    /// Whether the caller asked for anything here (a rootfs, a mount, a
-    /// tmpfs), as opposed to just the `/proc` this plan always adds.
+    /// Whether there's anything to mount here (a rootfs, a bind, a tmpfs),
+    /// as opposed to just the `/proc` this plan always adds.
     fn requested(&self) -> bool {
         self.rootfs.is_some() || !self.steps.is_empty()
     }
@@ -828,6 +904,21 @@ impl MountPlan {
                     return Err("bind mount rootfs");
                 }
             }
+            // Take every bind's source now, before any tmpfs can cover it.
+            for step in &self.steps {
+                if let MountStep::Bind { source, tree, .. } = step {
+                    let fd = libc::syscall(
+                        libc::SYS_open_tree,
+                        libc::AT_FDCWD,
+                        source.as_ptr(),
+                        OPEN_TREE_CLONE | libc::O_CLOEXEC as libc::c_uint,
+                    );
+                    if fd < 0 {
+                        return Err("open bind source");
+                    }
+                    tree.set(fd as RawFd);
+                }
+            }
             for step in &self.steps {
                 match step {
                     MountStep::Mkdir(path) => {
@@ -837,19 +928,33 @@ impl MountPlan {
                             return Err("create mount target");
                         }
                     }
+                    MountStep::Touch(path) => {
+                        let fd = libc::open(
+                            path.as_ptr(),
+                            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
+                            0o644,
+                        );
+                        if fd < 0 {
+                            return Err("create mount target");
+                        }
+                        libc::close(fd);
+                    }
                     MountStep::Bind {
-                        source,
                         target,
                         readonly,
+                        tree,
+                        ..
                     } => {
-                        if libc::mount(
-                            source.as_ptr(),
+                        let moved = libc::syscall(
+                            libc::SYS_move_mount,
+                            tree.get(),
+                            c"".as_ptr(),
+                            libc::AT_FDCWD,
                             target.as_ptr(),
-                            null,
-                            libc::MS_BIND,
-                            null as _,
-                        ) != 0
-                        {
+                            MOVE_MOUNT_F_EMPTY_PATH,
+                        );
+                        libc::close(tree.get());
+                        if moved != 0 {
                             return Err("bind mount");
                         }
                         // MS_RDONLY is ignored when a bind mount is created;
@@ -951,73 +1056,62 @@ fn check_network(config: &SandboxConfig) -> Result<()> {
     {
         // Falling back to the host network would make the whitelist
         // advisory again: any program ignoring HTTP_PROXY gets straight out.
-        return Err(SandboxError::Config(
-            "allow_network needs to bring up loopback in the sandbox's own network namespace, \
-             which AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
-             unprivileged, unconfined process). Run as root, set that sysctl to 0, or give \
-             this executable an AppArmor profile that allows userns"
+        return Err(SandboxError::Unsupported {
+            setting: "allow_network()".into(),
+            reason: "it needs to bring up loopback in the sandbox's own network namespace, \
+                     which AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 \
+                     for an unprivileged, unconfined process). Run as root, set that sysctl to \
+                     0, or give this executable an AppArmor profile that allows userns"
                 .into(),
-        ));
+        });
     }
     Ok(())
 }
 
 fn check_mounts(config: &SandboxConfig) -> Result<()> {
     let restricted = userns_restricted_by_apparmor();
-    // There, tmpfs("/tmp") is a private directory instead of a mount.
-    let tmpfs: Vec<_> = config
-        .tmpfs_mounts
-        .iter()
-        .filter(|(path, _)| !(restricted && private_tmp::is_tmp(path)))
-        .cloned()
-        .collect();
-    let plan = MountPlan::new(config.rootfs.as_deref(), &config.mounts, &tmpfs)?;
+    let plan = MountPlan::new(config, restricted)?;
     if plan.requested() && restricted {
-        return Err(SandboxError::Config(
-            "rootfs/mount/tmpfs need to mount inside the sandbox's user namespace, which \
-             AppArmor denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
-             unprivileged, unconfined process). Run as root, set that sysctl to 0, or give \
-             this executable an AppArmor profile that allows userns"
+        return Err(SandboxError::Unsupported {
+            setting: "rootfs, tmpfs, bind, or read_only inside a writable directory".into(),
+            reason: "these need to mount inside the sandbox's user namespace, which AppArmor \
+                     denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
+                     unprivileged, unconfined process). Run as root, set that sysctl to 0, or \
+                     give this executable an AppArmor profile that allows userns"
                 .into(),
-        ));
+        });
     }
-    let binds = config
-        .mounts
-        .iter()
-        .filter(|m| !MountPlan::is_noop(config.rootfs.as_deref(), m));
-    if config.rootfs.is_none() {
-        for target in binds
-            .clone()
-            .map(|m| &m.target)
-            .chain(config.tmpfs_mounts.iter().map(|(p, _)| p))
-        {
-            if !target.exists() {
-                return Err(SandboxError::Config(format!(
-                    "mount target {} does not exist; without a rootfs, mounts go over the \
-                     host's own paths, so the target must already exist",
-                    target.display()
-                )));
-            }
-        }
+    if config.rootfs.is_some() {
+        return Ok(());
     }
-    // A tmpfs mounts after the binds, and starts empty: anything under it
-    // would be hidden.
-    for (tmpfs, _) in &config.tmpfs_mounts {
-        let hidden = |path: &std::path::Path| path != tmpfs && path.starts_with(tmpfs);
-        if let Some(m) = binds.clone().find(|m| hidden(&m.target)) {
+    let tmpfs = MountPlan::tmpfs_mounts(config, restricted);
+    let in_tmpfs = |path: &Path| tmpfs.iter().any(|(t, _)| t != path && path.starts_with(t));
+    for (path, _) in &config.tmpfs_mounts {
+        if !path.exists() {
             return Err(SandboxError::Config(format!(
-                "mount target {} is inside tmpfs {}, which would hide it",
-                m.target.display(),
-                tmpfs.display()
+                "tmpfs path {} does not exist; without a rootfs, it's mounted over the \
+                 host's own path, which must already exist",
+                path.display()
             )));
         }
-        if hidden(&config.working_dir) {
+    }
+    for m in &config.mounts {
+        if !in_tmpfs(&m.target) && !m.target.exists() {
             return Err(SandboxError::Config(format!(
-                "working_dir {} is inside tmpfs {}, which would hide it",
-                config.working_dir.display(),
-                tmpfs.display()
+                "bind target {} does not exist; without a rootfs, binds go over the host's \
+                 own paths, so it must already exist",
+                m.target.display()
             )));
         }
+    }
+    // A tmpfs starts empty: only what's bound into it is there.
+    let wd = &config.working_dir;
+    if in_tmpfs(wd) && !config.mounts.iter().any(|m| wd.starts_with(&m.target)) {
+        return Err(SandboxError::Config(format!(
+            "working_dir {} is inside a tmpfs, which starts empty; make it readable or \
+             writable to have it there",
+            wd.display()
+        )));
     }
     Ok(())
 }

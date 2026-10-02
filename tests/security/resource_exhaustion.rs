@@ -89,7 +89,7 @@ fn test_disk_bomb_contained_tmpfs() {
     }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB tmpfs
+        .private_tmp(10 * 1024 * 1024) // 10MB tmpfs
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();
@@ -171,7 +171,7 @@ fn test_directory_bomb_contained() {
     }
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .tmpfs("/tmp", 10 * 1024 * 1024) // 10MB
+        .private_tmp(10 * 1024 * 1024) // 10MB
         .wall_time_limit(Duration::from_secs(10))
         .build()
         .unwrap();

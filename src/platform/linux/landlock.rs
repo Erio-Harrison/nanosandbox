@@ -18,6 +18,7 @@ use crate::builder::{Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
 const CREATE_RULESET_VERSION: u32 = 1 << 0;
 const RULE_PATH_BENEATH: libc::c_int = 1;
@@ -47,7 +48,24 @@ const FILE_RIGHTS: u64 =
     ACCESS_FS_EXECUTE | ACCESS_FS_WRITE_FILE | ACCESS_FS_READ_FILE | ACCESS_FS_TRUNCATE;
 
 /// Writable for programs whatever the config says, as on macOS.
-const DEFAULT_WRITABLE: [&std::ffi::CStr; 3] = [c"/tmp", c"/var/tmp", c"/dev/shm"];
+const DEFAULT_WRITABLE: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
+
+/// Where the sandbox may create, change and remove files: the default
+/// places, `writable` paths and tmpfs mounts. (Plus existing files under
+/// `/dev`, and private_tmp's directory where it isn't a tmpfs.)
+pub(crate) fn writable_areas(config: &SandboxConfig) -> impl Iterator<Item = &Path> {
+    DEFAULT_WRITABLE
+        .iter()
+        .map(Path::new)
+        .chain(
+            config
+                .mounts
+                .iter()
+                .filter(|m| m.permission == Permission::ReadWrite)
+                .map(|m| m.target.as_path()),
+        )
+        .chain(config.tmpfs_mounts.iter().map(|(p, _)| p.as_path()))
+}
 
 #[repr(C)]
 struct RulesetAttr {
@@ -79,10 +97,10 @@ pub(crate) fn abi() -> i32 {
 /// Refuses a config these rules apply to on a kernel without Landlock.
 pub(crate) fn check(config: &SandboxConfig) -> Result<()> {
     if config.rootfs.is_none() && abi() < 1 {
-        return Err(SandboxError::PlatformFeatureUnavailable {
-            feature: "Landlock (Linux 5.13+, with the landlock LSM enabled), which keeps a \
-                      sandbox without a rootfs from writing to the host's files; give it a \
-                      rootfs to run without Landlock"
+        return Err(SandboxError::Unsupported {
+            setting: "a sandbox without a rootfs".into(),
+            reason: "it needs Landlock (Linux 5.13+, with the landlock LSM enabled) to keep it \
+                     from writing to the host's files; give it a rootfs to run without Landlock"
                 .into(),
         });
     }
@@ -102,10 +120,7 @@ impl WriteRules {
     /// the caller's own directory to write to. `check` already refused a
     /// kernel without Landlock.
     /// `private_tmp`: this run's stand-in for tmpfs("/tmp"), if it has one.
-    pub(crate) fn new(
-        config: &SandboxConfig,
-        private_tmp: Option<&std::path::Path>,
-    ) -> Result<Option<Self>> {
+    pub(crate) fn new(config: &SandboxConfig, private_tmp: Option<&Path>) -> Result<Option<Self>> {
         if config.rootfs.is_some() {
             return Ok(None);
         }
@@ -127,25 +142,13 @@ impl WriteRules {
             handled |= ACCESS_FS_TRUNCATE;
         }
 
-        let path = |p: &std::path::Path| {
+        let path = |p: &Path| {
             CString::new(p.as_os_str().as_bytes())
                 .map_err(|_| SandboxError::Config(format!("path contains NUL: {}", p.display())))
         };
-        let mut paths: Vec<(CString, u64)> = DEFAULT_WRITABLE
-            .iter()
-            .map(|p| ((*p).to_owned(), handled))
-            .collect();
-        paths.push((c"/dev".to_owned(), handled & FILE_RIGHTS));
-        for m in &config.mounts {
-            if m.permission == Permission::ReadWrite {
-                paths.push((path(&m.target)?, handled));
-            }
-        }
-        for (target, _) in &config.tmpfs_mounts {
-            paths.push((path(target)?, handled));
-        }
-        if let Some(dir) = private_tmp {
-            paths.push((path(dir)?, handled));
+        let mut paths = vec![(c"/dev".to_owned(), handled & FILE_RIGHTS)];
+        for area in writable_areas(config).chain(private_tmp) {
+            paths.push((path(area)?, handled));
         }
         Ok(Some(Self { handled, paths }))
     }

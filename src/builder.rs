@@ -5,11 +5,11 @@
 use crate::error::{Result, SandboxError};
 use crate::sandbox::Sandbox;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// File/directory mount permission
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Read-only or read-write, for [`SandboxBuilder::bind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Permission {
     ReadOnly,
     ReadWrite,
@@ -17,7 +17,7 @@ pub enum Permission {
 
 /// Network access mode
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum NetworkMode {
+pub(crate) enum NetworkMode {
     /// No network access (default, most secure)
     #[default]
     None,
@@ -27,45 +27,54 @@ pub enum NetworkMode {
     Proxied { allowed_domains: Vec<String> },
 }
 
-/// Mount configuration
+/// A host path made visible in the sandbox. [`SandboxBuilder::read_only`]
+/// and [`SandboxBuilder::writable`] use the same path for both.
 #[derive(Clone, Debug)]
-pub struct Mount {
-    pub source: PathBuf,
-    pub target: PathBuf,
-    pub permission: Permission,
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // target: Linux's bind()
+pub(crate) struct Mount {
+    pub(crate) source: PathBuf,
+    pub(crate) target: PathBuf,
+    pub(crate) permission: Permission,
 }
+
+/// The default [`SandboxBuilder::private_tmp`] size.
+pub const DEFAULT_PRIVATE_TMP_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Sandbox configuration built by the builder
 #[derive(Clone, Debug)]
-pub struct SandboxConfig {
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))] // the Linux-only settings
+pub(crate) struct SandboxConfig {
     // Filesystem
-    pub mounts: Vec<Mount>,
-    pub tmpfs_mounts: Vec<(PathBuf, u64)>,
-    pub working_dir: PathBuf,
-    pub rootfs: Option<PathBuf>,
+    pub(crate) mounts: Vec<Mount>,
+    /// Linux only: [`SandboxBuilder::tmpfs`].
+    pub(crate) tmpfs_mounts: Vec<(PathBuf, u64)>,
+    /// [`SandboxBuilder::private_tmp`]'s size.
+    pub(crate) private_tmp: Option<u64>,
+    pub(crate) working_dir: PathBuf,
+    pub(crate) rootfs: Option<PathBuf>,
 
     // Resource limits
-    pub memory_limit: Option<u64>,
-    pub cpu_limit: Option<f64>,
-    pub wall_time_limit: Option<Duration>,
-    pub cpu_time_limit: Option<Duration>,
-    pub max_pids: Option<u32>,
-    pub max_file_size: Option<u64>,
-    pub max_open_files: Option<u32>,
+    pub(crate) memory_limit: Option<u64>,
+    pub(crate) cpu_limit: Option<f64>,
+    pub(crate) wall_time_limit: Option<Duration>,
+    pub(crate) cpu_time_limit: Option<Duration>,
+    pub(crate) max_pids: Option<u32>,
+    pub(crate) max_file_size: Option<u64>,
+    pub(crate) max_open_files: Option<u32>,
 
     // Network
-    pub network_mode: NetworkMode,
+    pub(crate) network_mode: NetworkMode,
 
     // Security
     /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
-    pub seccomp: bool,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
+    pub(crate) seccomp: bool,
+    pub(crate) uid: Option<u32>,
+    pub(crate) gid: Option<u32>,
 
     // Environment
-    pub env: HashMap<String, String>,
-    pub clear_env: bool,
-    pub hostname: String,
+    pub(crate) env: HashMap<String, String>,
+    pub(crate) clear_env: bool,
+    pub(crate) hostname: String,
 }
 
 impl Default for SandboxConfig {
@@ -73,6 +82,8 @@ impl Default for SandboxConfig {
         Self {
             mounts: Vec::new(),
             tmpfs_mounts: Vec::new(),
+            // Windows has no file system isolation to make it private with.
+            private_tmp: (!cfg!(windows)).then_some(DEFAULT_PRIVATE_TMP_SIZE),
             working_dir: PathBuf::from("/"),
             rootfs: None,
 
@@ -122,12 +133,70 @@ impl SandboxBuilder {
     }
 
     // ========== Filesystem ==========
+    //
+    // A sandbox can read the system's files, but nothing it hasn't been
+    // given can be written. These are the same on every platform that
+    // isolates the file system (Linux and macOS); Windows refuses them.
 
-    /// Mount a file or directory into the sandbox
+    /// Let the sandbox read `path`, a host file or directory, at the same
+    /// path.
+    pub fn read_only(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        self.config.mounts.push(Mount {
+            source: path.clone(),
+            target: path,
+            permission: Permission::ReadOnly,
+        });
+        self
+    }
+
+    /// Let the sandbox read and write `path`, a host file or directory, at
+    /// the same path. Writes land on the host.
+    pub fn writable(mut self, path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        self.config.mounts.push(Mount {
+            source: path.clone(),
+            target: path,
+            permission: Permission::ReadWrite,
+        });
+        self
+    }
+
+    /// Give each run its own temp directory, empty at the start, removed
+    /// afterwards, and limited to `size_bytes`. On by default, at
+    /// [`DEFAULT_PRIVATE_TMP_SIZE`]; not available on Windows.
     ///
-    /// On Linux without a [`rootfs`](Self::rootfs), `target` is a host path
-    /// that must already exist: the mount covers it inside the sandbox only.
-    pub fn mount(
+    /// Programs find it through `$TMPDIR`. On Linux it's a tmpfs mounted at
+    /// `/tmp`, so programs that use `/tmp` by name get it too. Where that
+    /// can't be mounted (macOS, and Linux under Ubuntu's AppArmor userns
+    /// restriction) it's a private directory instead, and `/tmp` by name is
+    /// the host's. Going over the size fails writes on a tmpfs, and kills
+    /// the program elsewhere (see `ExecutionResult::killed_by_tmp_limit`).
+    pub fn private_tmp(mut self, size_bytes: u64) -> Self {
+        self.config.private_tmp = Some(size_bytes);
+        self
+    }
+
+    /// No [`private_tmp`](Self::private_tmp).
+    pub fn no_private_tmp(mut self) -> Self {
+        self.config.private_tmp = None;
+        self
+    }
+
+    /// The directory the program starts in. It grants no access by itself:
+    /// use [`read_only`](Self::read_only) or [`writable`](Self::writable)
+    /// for that.
+    pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.config.working_dir = path.into();
+        self
+    }
+
+    /// Linux only: make `source` on the host visible at `target` in the
+    /// sandbox. Without a [`rootfs`](Self::rootfs), `target` is a host path
+    /// that must already exist, unless it's inside a tmpfs; the bind covers
+    /// it inside the sandbox only.
+    #[cfg(target_os = "linux")]
+    pub fn bind(
         mut self,
         source: impl Into<PathBuf>,
         target: impl Into<PathBuf>,
@@ -141,28 +210,22 @@ impl SandboxBuilder {
         self
     }
 
-    /// Mount a tmpfs (memory filesystem): private to each run, empty at the
-    /// start, gone afterwards, and limited to `size_bytes`.
+    /// Linux only: mount an empty tmpfs (memory filesystem) of `size_bytes`
+    /// at `path`, private to each run. For `/tmp`, use
+    /// [`private_tmp`](Self::private_tmp).
     ///
-    /// On Linux without a [`rootfs`](Self::rootfs), `path` must already exist
-    /// on the host, as with [`mount`](Self::mount).
-    ///
-    /// Where there's no mounting (macOS, and Linux under Ubuntu's AppArmor
-    /// userns restriction), only `/tmp` is supported. It's then a private
-    /// directory per run that `TMPDIR` points to; programs that write to
-    /// `/tmp` by name still get the host's. See docs/platform-macos.md.
+    /// Without a [`rootfs`](Self::rootfs), `path` must already exist on the
+    /// host. Needs mounting, which Ubuntu's AppArmor userns restriction
+    /// denies.
+    #[cfg(target_os = "linux")]
     pub fn tmpfs(mut self, path: impl Into<PathBuf>, size_bytes: u64) -> Self {
         self.config.tmpfs_mounts.push((path.into(), size_bytes));
         self
     }
 
-    /// Set the working directory inside the sandbox
-    pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.config.working_dir = path.into();
-        self
-    }
-
-    /// Use a custom rootfs
+    /// Linux only: run in `path` as the root file system instead of the
+    /// host's.
+    #[cfg(target_os = "linux")]
     pub fn rootfs(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.rootfs = Some(path.into());
         self
@@ -245,19 +308,22 @@ impl SandboxBuilder {
     /// one of them, such as Chrome with its own sandbox enabled (or run that
     /// with `--no-sandbox`).
     ///
-    /// Linux only. macOS's sandbox profile and Windows don't filter syscalls.
+    /// Linux only.
+    #[cfg(target_os = "linux")]
     pub fn seccomp(mut self, enabled: bool) -> Self {
         self.config.seccomp = enabled;
         self
     }
 
-    /// Set UID inside the sandbox
+    /// Linux only: the UID the program runs as inside the sandbox.
+    #[cfg(target_os = "linux")]
     pub fn uid(mut self, uid: u32) -> Self {
         self.config.uid = Some(uid);
         self
     }
 
-    /// Set GID inside the sandbox
+    /// Linux only: the GID the program runs as inside the sandbox.
+    #[cfg(target_os = "linux")]
     pub fn gid(mut self, gid: u32) -> Self {
         self.config.gid = Some(gid);
         self
@@ -277,13 +343,15 @@ impl SandboxBuilder {
         self
     }
 
-    /// Whether to clear inherited environment variables (default: true)
+    /// Whether the program starts with an empty environment (the default)
+    /// or this process's own, before [`env`](Self::env) is applied.
     pub fn clear_env(mut self, clear: bool) -> Self {
         self.config.clear_env = clear;
         self
     }
 
-    /// Set hostname inside the sandbox
+    /// Linux only: the hostname inside the sandbox.
+    #[cfg(target_os = "linux")]
     pub fn hostname(mut self, name: impl Into<String>) -> Self {
         self.config.hostname = name.into();
         self
@@ -306,6 +374,18 @@ impl SandboxBuilder {
             if !mount.source.exists() {
                 return Err(SandboxError::PathNotFound(mount.source.clone()));
             }
+        }
+
+        if let Some((path, _)) = self
+            .config
+            .tmpfs_mounts
+            .iter()
+            .find(|(path, _)| path == Path::new("/tmp") || path == Path::new("/private/tmp"))
+        {
+            return Err(SandboxError::Config(format!(
+                "tmpfs({}, ...): use private_tmp(size) for /tmp",
+                path.display()
+            )));
         }
 
         // Validate rootfs if specified
@@ -383,10 +463,28 @@ mod tests {
     }
 
     #[test]
-    fn test_builder_tmpfs() {
-        let builder = SandboxBuilder::new().tmpfs("/tmp", 64 * 1024 * 1024);
-        assert_eq!(builder.config.tmpfs_mounts.len(), 1);
-        assert_eq!(builder.config.tmpfs_mounts[0].1, 64 * 1024 * 1024);
+    fn test_builder_private_tmp() {
+        let default = SandboxBuilder::new().config.private_tmp;
+        if cfg!(windows) {
+            assert_eq!(default, None);
+        } else {
+            assert_eq!(default, Some(DEFAULT_PRIVATE_TMP_SIZE));
+        }
+        let builder = SandboxBuilder::new().private_tmp(64 * 1024 * 1024);
+        assert_eq!(builder.config.private_tmp, Some(64 * 1024 * 1024));
+        assert_eq!(
+            SandboxBuilder::new().no_private_tmp().config.private_tmp,
+            None
+        );
+    }
+
+    #[test]
+    fn test_read_only_and_writable_are_in_place() {
+        let config = SandboxBuilder::new().read_only("/a").writable("/b").config;
+        assert_eq!(config.mounts[0].source, config.mounts[0].target);
+        assert_eq!(config.mounts[0].permission, Permission::ReadOnly);
+        assert_eq!(config.mounts[1].source, config.mounts[1].target);
+        assert_eq!(config.mounts[1].permission, Permission::ReadWrite);
     }
 
     #[test]
@@ -405,6 +503,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_seccomp() {
         assert!(SandboxBuilder::new().config.seccomp);
         assert!(!SandboxBuilder::new().seccomp(false).config.seccomp);

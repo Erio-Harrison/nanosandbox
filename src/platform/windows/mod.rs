@@ -124,17 +124,18 @@ impl PlatformExecutor for WindowsExecutor {
         if !matches!(config.network_mode, NetworkMode::Host) {
             // no_network() is the default, so this covers sandboxes that
             // never mention the network too.
-            return Err(SandboxError::PlatformFeatureUnavailable {
-                feature: "network isolation on Windows (no_network() is the default, and \
-                          allow_network() can't be enforced either); call host_network() to run \
-                          with the host's network"
+            return Err(SandboxError::Unsupported {
+                setting: "no_network()/allow_network() on Windows".into(),
+                reason: "there's no network isolation; call host_network() to run with the \
+                         host's network (no_network() is the default)"
                     .into(),
             });
         }
-        if config.rootfs.is_some() || !config.mounts.is_empty() || !config.tmpfs_mounts.is_empty() {
-            return Err(SandboxError::PlatformFeatureUnavailable {
-                feature: "rootfs, mount and tmpfs on Windows; the process sees the host's \
-                          file system as the calling user"
+        if !config.mounts.is_empty() || config.private_tmp.is_some() {
+            return Err(SandboxError::Unsupported {
+                setting: "read_only/writable/private_tmp on Windows".into(),
+                reason: "there's no file system isolation; the process sees the host's file \
+                         system as the calling user"
                     .into(),
             });
         }

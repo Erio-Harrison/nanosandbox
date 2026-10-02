@@ -166,10 +166,9 @@ fn generate_profile(&self, config: &SandboxConfig) -> String {
 ### tmpfs
 
 macOS has no tmpfs and no mount namespace, so there's no giving one process
-its own directory at a path. Only `tmpfs("/tmp", size)` is supported; any
-other path is refused at `build()`.
+its own directory at a path, and no `tmpfs()`, `bind()` or `rootfs()`.
 
-`tmpfs("/tmp", size)` becomes a fresh directory per run, readable only by
+`private_tmp(size)`, on by default, is a fresh directory per run, readable only by
 the calling user, with `TMPDIR` pointing to it (unless `env` sets `TMPDIR`).
 Programs that use `TMPDIR` get what the tmpfs promises: private to the run,
 removed afterwards, and limited to `size`. The size is measured every 250ms
@@ -178,8 +177,8 @@ while the program runs, and the program is killed if it's over
 fail with `ENOSPC` here. A short burst can go over before the next check,
 but not fill the disk.
 
-A program that writes to `/tmp` by name gets the host's `/tmp`, as it would
-without a tmpfs. Making that read-only instead would break it.
+A program that writes to `/tmp` by name gets the host's `/tmp`. Making that
+read-only instead would break it.
 
 Apple's developer tools launched through `xcrun` (`/usr/bin/python3`,
 `/usr/bin/clang`, `cc`, `make`, `git` and the rest of the `/usr/bin` shims)

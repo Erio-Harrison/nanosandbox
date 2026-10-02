@@ -1,5 +1,5 @@
-//! `tmpfs("/tmp", size)` where no private mount is possible: on macOS, and on
-//! Linux where AppArmor denies mounting in the sandbox's user namespace.
+//! `private_tmp(size)` where no tmpfs can be mounted at /tmp: on macOS, and
+//! on Linux where AppArmor denies mounting in the sandbox's user namespace.
 //!
 //! A fresh directory per run stands in for the tmpfs. `TMPDIR` points at it,
 //! so programs that find their temp directory that way (python's tempfile,
@@ -19,21 +19,6 @@ use std::time::{Duration, Instant};
 /// the wait loop's other checks, and a tmpfs limit is about not filling the
 /// disk, not about precision.
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
-
-/// The size of a `tmpfs("/tmp", size)` in the config, if it has one.
-pub(crate) fn requested(config: &crate::builder::SandboxConfig) -> Option<u64> {
-    config
-        .tmpfs_mounts
-        .iter()
-        .rev()
-        .find(|(path, _)| is_tmp(path))
-        .map(|(_, size)| *size)
-}
-
-/// `/tmp`, or `/private/tmp` that it links to on macOS.
-pub(crate) fn is_tmp(path: &Path) -> bool {
-    path == Path::new("/tmp") || path == Path::new("/private/tmp")
-}
 
 pub(crate) struct PrivateTmp {
     dir: PathBuf,

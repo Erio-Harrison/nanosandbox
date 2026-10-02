@@ -3,7 +3,7 @@
 //! The main Sandbox struct that provides the high-level API for running
 //! sandboxed processes across different platforms.
 
-use crate::builder::{NetworkMode, Permission, SandboxBuilder, SandboxConfig};
+use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 use crate::error::Result;
 use crate::network::ProxiedNetwork;
 use crate::platform::{get_executor, PlatformExecutor};
@@ -47,7 +47,7 @@ impl Sandbox {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use nanosandbox::{Sandbox, Permission, MB};
+    /// use nanosandbox::{Sandbox, MB};
     ///
     /// let sandbox = Sandbox::builder()
     ///     .memory_limit(256 * MB)
@@ -146,12 +146,8 @@ impl Sandbox {
 
     // ========== Preset configurations ==========
     //
-    // Presets mount the caller's directories at their own paths, not at
-    // aliases like "/workspace": without a rootfs, Linux mounts go over the
-    // host's own paths and need the target to exist (and macOS never remaps
-    // paths at all), so an alias would fail at build(). Each preset also puts
-    // a private tmpfs on /tmp, so the directories passed in must not be under
-    // /tmp -- on Linux, build() refuses that rather than hiding them.
+    // Presets only use settings every platform with file system isolation
+    // has, so they build the same on Linux and macOS.
 
     /// Data analysis preset
     ///
@@ -176,13 +172,8 @@ impl Sandbox {
         let input_dir: PathBuf = input_dir.into();
         let output_dir: PathBuf = output_dir.into();
         Sandbox::builder()
-            .mount(input_dir.clone(), input_dir, Permission::ReadOnly)
-            .mount(
-                output_dir.clone(),
-                output_dir.clone(),
-                Permission::ReadWrite,
-            )
-            .tmpfs("/tmp", 256 * 1024 * 1024) // 256MB tmp
+            .read_only(input_dir)
+            .writable(output_dir.clone())
             .working_dir(output_dir)
             .memory_limit(2 * 1024 * 1024 * 1024) // 2GB
             .cpu_limit(2.0)
@@ -210,8 +201,8 @@ impl Sandbox {
     pub fn code_judge(code_dir: impl Into<PathBuf>) -> SandboxBuilder {
         let code_dir: PathBuf = code_dir.into();
         Sandbox::builder()
-            .mount(code_dir.clone(), code_dir.clone(), Permission::ReadOnly)
-            .tmpfs("/tmp", 64 * 1024 * 1024) // 64MB tmp
+            .read_only(code_dir.clone())
+            .private_tmp(64 * 1024 * 1024)
             .working_dir(code_dir)
             .memory_limit(256 * 1024 * 1024) // 256MB
             .cpu_limit(1.0)
@@ -241,8 +232,8 @@ impl Sandbox {
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace.clone(), workspace.clone(), Permission::ReadWrite)
-            .tmpfs("/tmp", 512 * 1024 * 1024)
+            .writable(workspace.clone())
+            .private_tmp(512 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB
             .cpu_limit(4.0)
@@ -270,13 +261,12 @@ impl Sandbox {
         let workspace: PathBuf = workspace.into();
         let home = workspace.to_string_lossy().into_owned();
         Sandbox::builder()
-            .mount(workspace.clone(), workspace.clone(), Permission::ReadWrite)
-            .tmpfs("/tmp", 1024 * 1024 * 1024) // 1GB tmp
+            .writable(workspace.clone())
+            .private_tmp(1024 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(8 * 1024 * 1024 * 1024) // 8GB
             .cpu_limit(4.0)
             .max_pids(512)
-            .hostname("sandbox")
             .env("TERM", "xterm-256color")
             .env("HOME", home)
             .env("USER", "sandbox")
@@ -297,13 +287,10 @@ mod tests {
 
     #[test]
     fn test_sandbox_builder() {
-        let builder = Sandbox::builder()
-            .memory_limit(512 * 1024 * 1024)
-            .hostname("test");
+        let builder = Sandbox::builder().memory_limit(512 * 1024 * 1024);
 
         let config = builder.into_config();
         assert_eq!(config.memory_limit, Some(512 * 1024 * 1024));
-        assert_eq!(config.hostname, "test");
     }
 
     #[test]

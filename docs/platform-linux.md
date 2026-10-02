@@ -99,21 +99,27 @@ impl UserNamespace {
 Every sandbox gets its own mount namespace. In the child, after `clone()`:
 
 1. Mark every mount private, so nothing propagates back to the host.
-2. With a `rootfs`: bind it onto itself, then for each `mount()`/`tmpfs()`
-   create the target under it and mount there.
-   Without one: mount straight over the host's own path. The host never sees
-   these, but the target must already exist, since the sandbox can't create
-   directories in places like `/`. `build()` refuses a missing target, and a
-   mount target or `working_dir` that a `tmpfs()` would hide.
-3. Mount a fresh `/proc`, so the sandbox only sees its own PID namespace.
+2. With a `rootfs`, bind it onto itself.
+3. Take a detached copy (`open_tree`) of every path to bind, before anything
+   can cover it.
+4. Mount the tmpfs ones: `private_tmp` at `/tmp`, and any `tmpfs()`.
+5. Put each bind in place (`move_mount`). With a rootfs, every
+   `read_only`/`writable`/`bind` path is created under it and bound there.
+   Without one, a path at its own place is already there, and Landlock
+   (below) decides whether it's writable, with no mount at all. Only these
+   are bound: a `bind()` to another path, a path inside a tmpfs (created in
+   it first, since the tmpfs starts empty), and a `read_only` path inside a
+   writable area, where Landlock can't take writing away again.
+   `build()` refuses a bind target that doesn't exist outside a tmpfs, and a
+   `working_dir` inside a tmpfs that nothing is bound to.
+6. Mount a fresh `/proc`, so the sandbox only sees its own PID namespace.
    With a rootfs this happens before the pivot: the kernel only allows a new
    proc mount while a fully visible one is still in the namespace.
-4. With a rootfs: `chdir` into it, `pivot_root(".", ".")`, and detach the old
+7. With a rootfs: `chdir` into it, `pivot_root(".", ".")`, and detach the old
    root. No `put_old` directory is involved, so sandboxes can share a rootfs.
 
-`Permission::ReadOnly` binds are remounted with `MS_RDONLY`; the kernel
-ignores that flag when a bind mount is first created. A read-write mount of a
-path onto itself without a rootfs changes nothing and is skipped.
+Read-only binds are remounted with `MS_RDONLY`; the kernel ignores that flag
+when a bind mount is first created.
 
 All of this runs between `clone()` and `exec()`, using paths prepared
 beforehand and raw syscalls only: `clone()` copies the whole multi-threaded
@@ -126,7 +132,7 @@ Without a `rootfs` the sandbox sees the host's file system, as the calling
 user, and used to be able to write anything that user can: `~/.bashrc`,
 `~/.ssh`, the code next to it. Landlock now limits writes to:
 
-- `Permission::ReadWrite` mounts and `tmpfs()` mounts,
+- `writable` paths, the private temp directory and `tmpfs()` mounts,
 - `/tmp`, `/var/tmp` and `/dev/shm`, which programs expect to write to,
 - existing files under `/dev` (`/dev/null`, a terminal), without creating
   or removing anything there.
@@ -135,9 +141,9 @@ Reading is still allowed everywhere. Writing covers opening for writing,
 creating, removing, renaming and (Landlock ABI 3, Linux 6.2) truncating.
 
 Landlock is unprivileged: no mounts and no capabilities, so this works
-under the AppArmor restriction below too. A `ReadWrite` mount of a path onto
-itself is the way to open up a host directory there: it needs no actual
-mount, only a Landlock rule. Like seccomp, the rules are prepared in the
+under the AppArmor restriction below too. `writable(path)` opens up a host
+directory with only a Landlock rule, and `read_only(path)` outside the
+writable areas needs nothing at all. Like seccomp, the rules are prepared in the
 parent and applied in the child just before `exec`.
 
 `build()` refuses a sandbox without a rootfs on a kernel without Landlock
@@ -334,12 +340,12 @@ nanosandbox entirely. It even denies reading `/` itself.
 nanosandbox detects this case: the sysctl is 1, and the process is neither
 root nor running under its own AppArmor profile. For such a caller:
 
-- `build()` refuses `rootfs(...)`, a `mount(...)` that would need an actual
-  mount, and a `tmpfs(...)` anywhere but `/tmp`, with an error that says why.
-  A `ReadWrite` mount of a path onto itself is only a Landlock rule, so it
-  works.
-- `tmpfs("/tmp", size)` is a private directory per run instead of a mount,
-  with `TMPDIR` pointing to it, as on macOS (see
+- `build()` refuses what needs an actual mount, with an error that says why:
+  `rootfs`, `tmpfs`, `bind` to another path, and `read_only` inside a
+  writable area (such as a directory under `/tmp`). `read_only` and
+  `writable` elsewhere are only Landlock rules, so they work.
+- `private_tmp` is a private directory per run instead of a tmpfs, with
+  `TMPDIR` pointing to it, as on macOS (see
   [platform-macos.md](platform-macos.md#tmpfs)). Programs that write to
   `/tmp` by name get the host's `/tmp`.
 - `build()` refuses `allow_network(...)` too: loopback can't be brought up in

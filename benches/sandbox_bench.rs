@@ -3,7 +3,7 @@
 //! Run with: cargo bench
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nanosandbox::{Permission, Sandbox, MB};
+use nanosandbox::{Sandbox, MB};
 use std::time::Duration;
 
 /// Benchmark sandbox creation overhead
@@ -49,9 +49,7 @@ fn bench_sandbox_creation(c: &mut Criterion) {
                 } else {
                     "/tmp"
                 })
-                // A target that exists: without a rootfs, Linux mounts go
-                // over the host's own paths.
-                .mount("/tmp", "/tmp", Permission::ReadWrite)
+                .writable(std::env::temp_dir())
                 .build()
                 .unwrap();
             black_box(sandbox)

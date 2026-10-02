@@ -80,11 +80,7 @@ fn test_error_permission_denied() {
 #[test]
 fn test_error_path_not_found() {
     let result = Sandbox::builder()
-        .mount(
-            "/nonexistent/path/xyz",
-            "/sandbox/mount",
-            nanosandbox::Permission::ReadOnly,
-        )
+        .read_only("/nonexistent/path/xyz")
         .build();
 
     match result {
@@ -102,6 +98,7 @@ fn test_error_path_not_found() {
 
 /// Test: Invalid rootfs should return appropriate error
 #[test]
+#[cfg(target_os = "linux")]
 fn test_error_invalid_rootfs() {
     let result = Sandbox::builder().rootfs("/nonexistent/rootfs").build();
 
@@ -186,11 +183,7 @@ fn test_error_timeout_distinguishable() {
 #[test]
 fn test_error_contains_context() {
     let result = Sandbox::builder()
-        .mount(
-            "/nonexistent/specific/path/for/test",
-            "/mnt",
-            nanosandbox::Permission::ReadOnly,
-        )
+        .read_only("/nonexistent/specific/path/for/test")
         .build();
 
     match result {
@@ -213,9 +206,7 @@ fn test_error_contains_context() {
 #[test]
 fn test_validation_reports_issues() {
     // This tests that validation catches problems early
-    let result = Sandbox::builder()
-        .mount("/nonexistent1", "/mnt1", nanosandbox::Permission::ReadOnly)
-        .build();
+    let result = Sandbox::builder().read_only("/nonexistent1").build();
 
     // Should fail at validation
     assert!(result.is_err());
@@ -253,9 +244,7 @@ fn test_valid_config_succeeds() {
 /// Test: Error display should be user-friendly
 #[test]
 fn test_error_display_user_friendly() {
-    let result = Sandbox::builder()
-        .mount("/does/not/exist", "/mnt", nanosandbox::Permission::ReadOnly)
-        .build();
+    let result = Sandbox::builder().read_only("/does/not/exist").build();
 
     if let Err(e) = result {
         let display = format!("{}", e);

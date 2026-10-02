@@ -10,23 +10,26 @@ Complete API documentation for the nanosandbox sandbox library.
 - [Configuration Types](#configuration-types)
 - [Error Types](#error-types)
 - [Constants](#constants)
+- [Migrating from 0.1](#migrating-from-01)
 - [Platform Functions](#platform-functions)
 
 ---
 
 ## Sandbox
 
-The main sandbox execution unit.
+The main sandbox execution unit. A `Sandbox` is configured once and can run
+any number of commands, each in a fresh sandboxed process.
 
 ### Creating a Sandbox
 
 ```rust
-use nanosandbox::{Sandbox, Permission, MB};
+use nanosandbox::{Sandbox, MB};
 use std::time::Duration;
 
 // Using builder
 let sandbox = Sandbox::builder()
-    .working_dir("/tmp")
+    .writable("/home/me/project")
+    .working_dir("/home/me/project")
     .memory_limit(512 * MB)
     .wall_time_limit(Duration::from_secs(30))
     .build()?;
@@ -42,16 +45,11 @@ let sandbox = Sandbox::code_judge("/submissions/123").build()?;
 Execute a command in the sandbox.
 
 ```rust
-pub fn run(&self, command: &str, args: &[&str]) -> Result<ExecutionResult>
+pub fn run(&self, cmd: &str, args: &[&str]) -> Result<ExecutionResult>
 ```
 
-**Parameters:**
-- `command` - Path to executable or command name
-- `args` - Command arguments
+`cmd` is a path, or a name looked up in the sandbox's `PATH`.
 
-**Returns:** `Result<ExecutionResult>`
-
-**Example:**
 ```rust
 let result = sandbox.run("python3", &["-c", "print('hello')"])?;
 println!("stdout: {}", result.stdout);
@@ -63,414 +61,212 @@ println!("exit code: {}", result.exit_code);
 Execute a command with stdin input.
 
 ```rust
-pub fn run_with_input(
-    &self,
-    command: &str,
-    args: &[&str],
-    stdin: Option<&[u8]>,
-) -> Result<ExecutionResult>
+pub fn run_with_input(&self, cmd: &str, args: &[&str], stdin: Option<&[u8]>)
+    -> Result<ExecutionResult>
 ```
 
-**Example:**
 ```rust
-let input = b"hello world";
-let result = sandbox.run_with_input("cat", &[], Some(input))?;
+let result = sandbox.run_with_input("cat", &[], Some(b"hello world"))?;
 assert_eq!(result.stdout, "hello world");
 ```
 
 #### `id`
 
-Get the unique sandbox identifier.
-
 ```rust
-pub fn id(&self) -> u64
+pub fn id(&self) -> &str
 ```
 
-**Example:**
-```rust
-println!("Sandbox ID: {}", sandbox.id());
-```
+A unique identifier for this sandbox.
 
-### Static Factory Methods (Presets)
+### Presets
 
-#### `Sandbox::code_judge`
+Presets return a `SandboxBuilder`, so any setting can be changed before
+`build()`. They only use settings that Linux and macOS both enforce.
 
-Preset for code judging systems. Strict limits, no network.
+| Preset | Files | Private /tmp | Memory | CPU | Wall time | Processes |
+|---|---|---|---|---|---|---|
+| `code_judge(dir)` | `dir` read-only, working dir | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
+| `agent_executor(ws)` | `ws` writable, working dir, `HOME` | 512 MB | 4 GB | 4 cores | 600 s | 256 |
+| `data_analysis(in, out)` | `in` read-only, `out` writable and working dir | 256 MB | 2 GB | 2 cores | 300 s | 100 |
+| `interactive(ws)` | `ws` writable, working dir, `HOME` | 1 GB | 8 GB | 4 cores | none | 512 |
 
-```rust
-pub fn code_judge(code_dir: impl Into<PathBuf>) -> SandboxBuilder
-```
+All have no network; add it with `allow_network`.
 
-**Configuration:**
-- Memory: 256 MB
-- Wall time: 10 seconds
-- Max PIDs: 10
-- Max open files: 20
-- Network: None
-- Security: Strict
-
-**Example:**
 ```rust
 let sandbox = Sandbox::code_judge("/submissions/123")
-    .wall_time_limit(Duration::from_secs(5))  // Override default
+    .wall_time_limit(Duration::from_secs(5)) // override the preset
     .build()?;
 ```
-
-#### `Sandbox::agent_executor`
-
-Preset for AI agent code execution. Moderate limits, optional network.
-
-```rust
-pub fn agent_executor(workspace: impl Into<PathBuf>) -> SandboxBuilder
-```
-
-**Configuration:**
-- Memory: 1 GB
-- Wall time: 60 seconds
-- Max PIDs: 50
-- Network: None (add with `.allow_network()`)
-- Security: Standard
-
-#### `Sandbox::data_analysis`
-
-Preset for data analysis workloads.
-
-```rust
-pub fn data_analysis(
-    input_dir: impl Into<PathBuf>,
-    output_dir: impl Into<PathBuf>,
-) -> SandboxBuilder
-```
-
-**Configuration:**
-- Memory: 2 GB
-- Wall time: 300 seconds
-- Input: Read-only mount
-- Output: Read-write mount
-- Network: None
-
-#### `Sandbox::interactive`
-
-Preset for interactive/REPL sessions.
-
-```rust
-pub fn interactive(workspace: impl Into<PathBuf>) -> SandboxBuilder
-```
-
-**Configuration:**
-- Memory: 512 MB
-- Wall time: 3600 seconds (1 hour)
-- Workspace: Read-write
-- Security: Permissive
 
 ---
 
 ## SandboxBuilder
 
-Builder for configuring sandbox parameters.
+Builder for configuring sandbox parameters. `Sandbox::builder()` or
+`SandboxBuilder::new()`. All methods return `Self` for chaining; `build()`
+checks the configuration and returns an error for anything the platform
+can't enforce, instead of running without it.
 
-### Creation
+### File System
+
+A sandbox can read the system's files. It can write nothing it hasn't been
+given, except its private temp directory. These methods work the same on
+Linux and macOS; Windows has no file system isolation and refuses them.
+
+#### `read_only` / `writable`
 
 ```rust
-let builder = Sandbox::builder();
-// or
-let builder = SandboxBuilder::new();
+pub fn read_only(self, path: impl Into<PathBuf>) -> Self
+pub fn writable(self, path: impl Into<PathBuf>) -> Self
 ```
 
-### Configuration Methods
+Let the sandbox read, or read and write, a host file or directory, at the
+same path. Writes land on the host. The path must exist.
 
-All methods return `Self` for chaining.
+```rust
+builder
+    .read_only("/data/input")
+    .writable("/data/output")
+```
+
+#### `private_tmp` / `no_private_tmp`
+
+```rust
+pub fn private_tmp(self, size_bytes: u64) -> Self
+pub fn no_private_tmp(self) -> Self
+```
+
+A temp directory for each run: empty at the start, removed afterwards,
+limited to `size_bytes`. **On by default**, at `DEFAULT_PRIVATE_TMP_SIZE`
+(256 MB). Programs find it through `$TMPDIR`.
+
+- On Linux it's a tmpfs at `/tmp`, so programs that use `/tmp` by name get
+  it too. Going over the size fails the write (`ENOSPC`).
+- On macOS, and on Linux under Ubuntu's AppArmor userns restriction, it's a
+  private directory: `/tmp` by name is the host's. Going over the size kills
+  the program (`ExecutionResult::killed_by_tmp_limit`). See
+  [platform-macos.md](platform-macos.md#tmpfs).
 
 #### `working_dir`
-
-Set the working directory for command execution.
 
 ```rust
 pub fn working_dir(self, path: impl Into<PathBuf>) -> Self
 ```
 
-**Example:**
-```rust
-builder.working_dir("/tmp/sandbox")
-```
+The directory the program starts in. It grants no access by itself.
 
-#### `mount`
-
-Mount a host path into the sandbox.
+#### Linux only: `bind`, `tmpfs`, `rootfs`
 
 ```rust
-pub fn mount(
-    self,
-    source: impl Into<PathBuf>,
-    target: impl Into<PathBuf>,
-    permission: Permission,
-) -> Self
-```
-
-**Parameters:**
-- `source` - Host path
-- `target` - Path inside sandbox
-- `permission` - `ReadOnly` or `ReadWrite`
-
-**Example:**
-```rust
-builder
-    .mount("/data/input", "/data/input", Permission::ReadOnly)
-    .mount("/data/output", "/data/output", Permission::ReadWrite)
-```
-
-On Linux without a `rootfs`, the mount goes over the host path `target` in the
-sandbox's own mount namespace, so `target` must already exist.
-
-#### `tmpfs`
-
-Mount a temporary filesystem (RAM-backed): private to each run, empty at the
-start, gone afterwards, and limited to `size_bytes`.
-
-Where mounting isn't possible (macOS, and Linux under Ubuntu's AppArmor userns
-restriction), only `/tmp` is supported, as a private directory per run that
-`TMPDIR` points to. Programs that write to `/tmp` by name still get the host's
-`/tmp` there. Going over the size kills the program, with
-`ExecutionResult::killed_by_tmp_limit` set.
-
-```rust
+pub fn bind(self, source: impl Into<PathBuf>, target: impl Into<PathBuf>, permission: Permission) -> Self
 pub fn tmpfs(self, path: impl Into<PathBuf>, size_bytes: u64) -> Self
+pub fn rootfs(self, path: impl Into<PathBuf>) -> Self
 ```
 
-**Example:**
-```rust
-builder.tmpfs("/tmp", 64 * MB)
-```
+These need a mount namespace, so they only exist on Linux (other platforms
+don't compile calls to them), and Ubuntu's AppArmor userns restriction makes
+`build()` refuse them.
 
-#### `memory_limit`
+- `bind` shows `source` at a different path, `target`. Without a rootfs,
+  `target` must exist on the host, unless it's inside a tmpfs.
+- `tmpfs` mounts an empty tmpfs at any path but `/tmp` (use `private_tmp`).
+- `rootfs` runs in `path` as the root file system. `read_only`/`writable`
+  paths are bound into it at the same path.
 
-Set maximum memory usage in bytes.
+### Resource Limits
 
 ```rust
 pub fn memory_limit(self, bytes: u64) -> Self
-```
-
-**Platform behavior:**
-- Linux: Hard limit via cgroups (process killed on exceed)
-- macOS: Soft limit via setrlimit (may be exceeded)
-- Windows: Hard limit via Job Object
-
-**Example:**
-```rust
-builder.memory_limit(512 * MB)
-```
-
-#### `cpu_limit`
-
-Set CPU core limit.
-
-```rust
-pub fn cpu_limit(self, cpus: f64) -> Self
-```
-
-**Platform behavior:**
-- Linux: Hard limit via cgroups cpu.max
-- macOS: Not supported
-- Windows: Hard limit via Job Object
-
-**Example:**
-```rust
-builder.cpu_limit(1.5)  // 1.5 CPU cores
-```
-
-#### `wall_time_limit`
-
-Set maximum wall clock time.
-
-```rust
-pub fn wall_time_limit(self, duration: Duration) -> Self
-```
-
-**Example:**
-```rust
-builder.wall_time_limit(Duration::from_secs(30))
-```
-
-#### `max_pids`
-
-Set maximum number of processes/threads.
-
-```rust
+pub fn cpu_limit(self, cpus: f64) -> Self          // CPU share, e.g. 0.5 or 2.0 cores
+pub fn wall_time_limit(self, d: Duration) -> Self  // killed after this long
+pub fn cpu_time_limit(self, d: Duration) -> Self   // per process, whole seconds
 pub fn max_pids(self, n: u32) -> Self
-```
-
-**Platform behavior:**
-- Linux: Hard limit via cgroups pids.max
-- macOS: Not enforced (RLIMIT_NPROC affects entire user)
-- Windows: Hard limit via Job Object
-
-#### `max_open_files`
-
-Set maximum number of open file descriptors.
-
-```rust
+pub fn max_file_size(self, bytes: u64) -> Self
 pub fn max_open_files(self, n: u32) -> Self
 ```
 
-#### `no_network`
-
-Disable all network access.
+### Network
 
 ```rust
-pub fn no_network(self) -> Self
-```
-
-**Platform behavior:**
-- Linux: Network namespace isolation
-- macOS: SBPL network deny rules
-- Windows: Not fully supported
-
-#### `allow_network`
-
-Allow network access only to specified domains.
-
-```rust
+pub fn no_network(self) -> Self                    // default
 pub fn allow_network(self, domains: &[&str]) -> Self
+pub fn host_network(self) -> Self
 ```
 
-**Supports wildcards:**
-- `"api.example.com"` - Exact match
-- `"*.example.com"` - Wildcard subdomain
+`allow_network` routes all traffic through a local HTTP/HTTPS proxy that
+only lets the listed domains through (`*.example.com` matches
+`example.com` and its subdomains). The sandbox has no other way out: on
+Linux it gets its own network namespace, on macOS the sandbox profile only
+allows the proxy. `HTTP_PROXY`/`HTTPS_PROXY` are set for the program.
 
-**Implementation:** HTTP proxy with domain whitelist.
-
-**Example:**
 ```rust
 builder.allow_network(&["api.openai.com", "*.github.com"])
 ```
 
-#### `env`
+Windows only supports `host_network()`.
 
-Set an environment variable.
+### Environment
 
 ```rust
 pub fn env(self, key: impl Into<String>, value: impl Into<String>) -> Self
+pub fn envs(self, envs: impl IntoIterator<Item = (String, String)>) -> Self
+pub fn clear_env(self, clear: bool) -> Self
 ```
 
-**Example:**
-```rust
-builder
-    .env("PATH", "/usr/bin:/bin")
-    .env("HOME", "/tmp")
-```
+By default the program starts with only what `env` sets (plus a default
+`PATH`, `TMPDIR` and the proxy variables). `clear_env(false)` starts from
+this process's environment instead.
 
-#### `hostname`
-
-Set the hostname (Linux only).
+### Linux only: Identity and Syscall Filter
 
 ```rust
+pub fn uid(self, uid: u32) -> Self
+pub fn gid(self, gid: u32) -> Self
 pub fn hostname(self, name: impl Into<String>) -> Self
-```
-
-#### `seccomp`
-
-Turn the Linux syscall filter on or off. On by default.
-
-```rust
 pub fn seccomp(self, enabled: bool) -> Self
 ```
 
-The filter blocks creating namespaces, mounting, bpf, perf_event_open,
-userfaultfd, io_uring, the keyring, kernel modules and kexec, with `EPERM`.
-Ordinary programs don't use these. Turn it off for one that does, such as
-Chrome with its own sandbox enabled. Ignored on macOS and Windows.
+`seccomp` turns the syscall filter on or off; it's on by default. It blocks
+creating namespaces, mounting, bpf, perf_event_open, userfaultfd, io_uring,
+the keyring, kernel modules and kexec, with `EPERM`. Ordinary programs don't
+use these. Turn it off for one that does, such as Chrome with its own
+sandbox enabled.
 
-#### `build`
-
-Create the sandbox instance.
+### `build`
 
 ```rust
 pub fn build(self) -> Result<Sandbox>
 ```
 
-**Validates configuration and returns error if invalid.**
-
 ---
 
 ## ExecutionResult
 
-Result of command execution.
-
-### Fields
+Result of command execution. Marked `#[non_exhaustive]`: read its fields,
+and construct one (in tests) with `ExecutionResult::new()` or `default()`.
 
 ```rust
 pub struct ExecutionResult {
-    /// Standard output (lossy UTF-8)
-    pub stdout: String,
-
-    /// Standard error (lossy UTF-8)
-    pub stderr: String,
-
-    /// Process exit code (0 = success)
+    pub stdout: String,                // lossy UTF-8
+    pub stderr: String,                // lossy UTF-8
     pub exit_code: i32,
-
-    /// Wall clock duration
-    pub duration: Duration,
-
-    /// CPU time (user + system), if available
-    pub cpu_time: Option<Duration>,
-
-    /// Peak memory usage in bytes, if available
-    pub peak_memory: Option<u64>,
-
-    /// True if killed due to timeout
+    pub duration: Duration,            // wall clock
     pub killed_by_timeout: bool,
-
-    /// True if killed due to out-of-memory
     pub killed_by_oom: bool,
-
-    /// Signal number if killed by signal
+    pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows
     pub signal: Option<i32>,
+    pub peak_memory: Option<u64>,      // bytes
+    pub cpu_time: Option<Duration>,    // user + system
 }
 ```
 
-### Methods
-
-#### `success`
-
-Check if execution was successful.
-
-```rust
-pub fn success(&self) -> bool
-```
-
-Returns `true` if:
-- `exit_code == 0`
-- `!killed_by_timeout`
-- `!killed_by_oom`
-- `signal.is_none()`
-
-#### `failure_reason`
-
-Get human-readable failure reason.
-
-```rust
-pub fn failure_reason(&self) -> Option<String>
-```
-
-Returns:
-- `"Execution timed out"` if timeout
-- `"Out of memory"` if OOM
-- `"Killed by signal {n}"` if signaled
-- `"Exit code {n}"` if non-zero exit
-- `None` if success
-
-### Example
+`success()` is true when the exit code is 0 and nothing killed the
+program. `failure_reason()` says why not, as text.
 
 ```rust
 let result = sandbox.run("python3", &["script.py"])?;
-
 if result.success() {
     println!("Output: {}", result.stdout);
-    println!("Duration: {:?}", result.duration);
-    if let Some(mem) = result.peak_memory {
-        println!("Peak memory: {} MB", mem / MB);
-    }
 } else {
     eprintln!("Failed: {}", result.failure_reason().unwrap());
     eprintln!("stderr: {}", result.stderr);
@@ -481,26 +277,14 @@ if result.success() {
 
 ## Configuration Types
 
-### Permission
+### Permission (Linux only)
 
-Mount permission level.
+For `bind`.
 
 ```rust
 pub enum Permission {
-    ReadOnly,   // Read-only access
-    ReadWrite,  // Read and write access
-}
-```
-
-### NetworkMode
-
-Network access mode.
-
-```rust
-pub enum NetworkMode {
-    None,                    // No network access (default)
-    Host,                    // Full network access
-    Whitelist(Vec<String>),  // Only allowed domains
+    ReadOnly,
+    ReadWrite,
 }
 ```
 
@@ -510,49 +294,20 @@ pub enum NetworkMode {
 
 ### SandboxError
 
-```rust
-pub enum SandboxError {
-    /// Configuration validation failed
-    ConfigValidation(String),
+Marked `#[non_exhaustive]`. The ones to expect from `build()`:
 
-    /// Platform not supported
-    UnsupportedPlatform(String),
+- `Unsupported { setting, reason }`: this platform, or this system's
+  configuration, can't enforce a setting. The reason says what to do.
+- `Config(String)`: the settings contradict each other, such as a bind
+  target that doesn't exist.
+- `PathNotFound(PathBuf)`: a `read_only`/`writable`/`rootfs` path doesn't
+  exist.
+- `UserNamespaceDisabled`, `CgroupV2Unavailable`, `CgroupCreation`,
+  `CgroupSetting`, `SandboxExecUnavailable`: the platform's sandboxing isn't
+  available or set up.
 
-    /// Linux namespace creation failed
-    NamespaceCreation(String),
-
-    /// Linux cgroup creation failed
-    CgroupCreation(String),
-
-    /// Linux cgroup setting failed
-    CgroupSetting {
-        controller: String,
-        setting: String,
-        value: String,
-        reason: String,
-    },
-
-    /// macOS sandbox profile error
-    SandboxProfile(String),
-
-    /// Command not found
-    CommandNotFound(String),
-
-    /// Permission denied
-    PermissionDenied(String),
-
-    /// Execution timed out
-    Timeout,
-
-    /// Internal error
-    Internal(String),
-
-    /// I/O error
-    Io(std::io::Error),
-}
-```
-
-### Result Type
+From `run()`: `CommandNotFound`, `ExecutionFailed`, `NulError` (a NUL byte
+in a command, argument or path), `Io`, `Internal`.
 
 ```rust
 pub type Result<T> = std::result::Result<T, SandboxError>;
@@ -562,22 +317,33 @@ pub type Result<T> = std::result::Result<T, SandboxError>;
 
 ## Constants
 
-Size constants for convenience:
-
 ```rust
 pub const KB: u64 = 1024;
 pub const MB: u64 = 1024 * 1024;
 pub const GB: u64 = 1024 * 1024 * 1024;
+pub const DEFAULT_PRIVATE_TMP_SIZE: u64 = 256 * MB;
 ```
 
-**Example:**
-```rust
-use nanosandbox::{MB, GB};
+---
 
-builder
-    .memory_limit(512 * MB)
-    .tmpfs("/tmp", 1 * GB)
-```
+## Migrating from 0.1
+
+| 0.1 | 0.2 |
+|---|---|
+| `.mount(p, p, Permission::ReadOnly)` | `.read_only(p)` |
+| `.mount(p, p, Permission::ReadWrite)` | `.writable(p)` |
+| `.mount(src, dst, perm)` | `.bind(src, dst, perm)` (Linux only) |
+| `.tmpfs("/tmp", n)` | `.private_tmp(n)` (and it's on by default) |
+| `.tmpfs(other, n)` | `.tmpfs(other, n)` (Linux only) |
+| `.seccomp_profile(..)` | `.seccomp(bool)` (Linux only) |
+| `.uid` / `.gid` / `.hostname` / `.rootfs` | unchanged, Linux only |
+| `SandboxConfig`, `NetworkMode` | no longer public |
+| `ExecutionResult { .. }` | `#[non_exhaustive]`; new field `killed_by_tmp_limit` |
+| `SandboxError::PlatformFeatureUnavailable` | `SandboxError::Unsupported` |
+
+The working directory no longer makes itself writable on macOS, and nothing
+outside `writable` paths and temp directories is writable on Linux either:
+add `.writable(dir)` where the program needs to write.
 
 ---
 
@@ -600,21 +366,6 @@ pub fn platform_name() -> &'static str
 ```
 
 Returns: `"linux"`, `"macos"`, or `"windows"`
-
-### `get_platform_capabilities`
-
-Get platform capability information.
-
-```rust
-pub fn get_platform_capabilities() -> PlatformCapabilities
-```
-
-**Example:**
-```rust
-let caps = get_platform_capabilities();
-println!("Memory limit: {}", caps.memory_limit);  // "hard" or "soft"
-println!("Network isolation: {}", caps.network_isolation);
-```
 
 ---
 
