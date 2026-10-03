@@ -853,29 +853,57 @@ impl MountPlan {
     fn new(config: &SandboxConfig, restricted: bool) -> Result<Self> {
         let rootfs = config.rootfs.as_deref();
         let tmpfs = Self::tmpfs_mounts(config, restricted);
-        let mut steps = Vec::new();
-        // Tmpfs first, so the binds below can go inside one instead of
-        // being hidden by it.
-        for (path, size) in &tmpfs {
-            let target = Self::target(&mut steps, rootfs, path, &[], true)?;
-            let options = CString::new(format!("size={size}")).expect("no NUL in a number");
-            steps.push(MountStep::Tmpfs { target, options });
-        }
-        for m in config
+        let binds: Vec<&Mount> = config
             .mounts
             .iter()
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
-        {
-            let is_dir = m.source.is_dir();
-            let target = Self::target(&mut steps, rootfs, &m.target, &tmpfs, is_dir)?;
-            let source = path_cstring(&m.source)?;
-            let readonly = (m.permission == Permission::ReadOnly).then(|| locked_flags(&source));
-            steps.push(MountStep::Bind {
-                source,
-                target,
-                readonly,
-                tree: std::cell::Cell::new(-1),
-            });
+            .collect();
+
+        // One combined order, shallowest target first: a mount has to be in
+        // place before anything mounts under it, whichever kind either one
+        // is. Grouping "all tmpfs, then all binds" instead used to shadow a
+        // tmpfs nested inside a bind's target, while fixing the opposite,
+        // bind-inside-a-tmpfs case -- confirmed for real.
+        enum Item<'a> {
+            Tmpfs(&'a Path, u64),
+            Bind(&'a Mount),
+        }
+        let mut items: Vec<Item> = tmpfs
+            .iter()
+            .map(|(p, s)| Item::Tmpfs(p, *s))
+            .chain(binds.iter().map(|&m| Item::Bind(m)))
+            .collect();
+        items.sort_by_key(|item| {
+            match item {
+                Item::Tmpfs(p, _) => *p,
+                Item::Bind(m) => m.target.as_path(),
+            }
+            .components()
+            .count()
+        });
+
+        let mut steps = Vec::new();
+        for item in items {
+            match item {
+                Item::Tmpfs(path, size) => {
+                    let target = Self::target(&mut steps, rootfs, path, &tmpfs, true)?;
+                    let options = CString::new(format!("size={size}")).expect("no NUL in a number");
+                    steps.push(MountStep::Tmpfs { target, options });
+                }
+                Item::Bind(m) => {
+                    let is_dir = m.source.is_dir();
+                    let target = Self::target(&mut steps, rootfs, &m.target, &tmpfs, is_dir)?;
+                    let source = path_cstring(&m.source)?;
+                    let readonly =
+                        (m.permission == Permission::ReadOnly).then(|| locked_flags(&source));
+                    steps.push(MountStep::Bind {
+                        source,
+                        target,
+                        readonly,
+                        tree: std::cell::Cell::new(-1),
+                    });
+                }
+            }
         }
         let proc_target = match rootfs {
             Some(rootfs) => path_cstring(&rootfs.join("proc"))?,

@@ -67,6 +67,60 @@ fn test_readwrite_mount_and_tmpfs() {
     );
 }
 
+/// A tmpfs nested inside a bind's target (no rootfs): the bind, being the
+/// shallower mount, has to land first, or the tmpfs mounted at the literal
+/// host path gets shadowed once the bind covers it. Mounting tmpfs before
+/// all binds unconditionally (instead of by depth) broke exactly this.
+#[test]
+fn test_tmpfs_nested_inside_a_bind_target() {
+    if skip_without_userns_privileges() {
+        return;
+    }
+    // Not under /tmp, which private_tmp (on by default) covers with its
+    // own tmpfs.
+    let source = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    std::fs::create_dir(source.path().join("scratch")).unwrap();
+    std::fs::write(source.path().join("scratch/sentinel"), "from source").unwrap();
+    std::fs::write(source.path().join("other"), "from source").unwrap();
+
+    let target = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    // Must exist on the host already: check_mounts requires every tmpfs
+    // target to, the same as a bind target.
+    std::fs::create_dir(target.path().join("scratch")).unwrap();
+
+    let sandbox = Sandbox::builder()
+        .bind(source.path(), target.path(), Permission::ReadOnly)
+        .tmpfs(target.path().join("scratch"), 16 * 1024 * 1024)
+        .working_dir(target.path())
+        .build()
+        .unwrap();
+
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "cat other; \
+                 echo -n ' scratch:'; cat scratch/sentinel 2>&1; \
+                 echo -n ' write:'; (echo hi > scratch/f && echo ok) 2>&1",
+            ],
+        )
+        .unwrap();
+    assert!(result.success(), "stderr: {}", result.stderr);
+    assert!(
+        result.stdout.starts_with("from source"),
+        "{}",
+        result.stdout
+    );
+    // The tmpfs, not the bind's own scratch/sentinel, is what's there.
+    assert!(
+        result.stdout.contains("scratch:cat:") || result.stdout.contains("No such file"),
+        "the bind's scratch content was still visible: {}",
+        result.stdout
+    );
+    assert!(result.stdout.contains("write:ok"), "{}", result.stdout);
+}
+
 /// Every sandbox used to pivot_root through one shared `<rootfs>/old_root`
 /// directory, so concurrent runs on the same rootfs failed setup.
 #[test]
