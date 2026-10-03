@@ -40,14 +40,18 @@ impl Watchdog {
         // `read` returns on EOF too, so either way the script moves on to
         // the kill -- a no-op if the group's already gone.
         let script = format!("read -r _; kill -KILL -- -{pgid} 2>/dev/null; exit 0");
-        let shell = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&script)
-            .stdin(Stdio::from(read_end))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| SandboxError::ExecutionFailed(format!("spawn watchdog: {e}")))?;
+        let shell = {
+            // Held for the fork; see super::FORK_LOCK.
+            let _fork = super::FORK_LOCK.read().unwrap_or_else(|e| e.into_inner());
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(Stdio::from(read_end))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|e| SandboxError::ExecutionFailed(format!("spawn watchdog: {e}")))?
+        };
         Ok(Self {
             write_end: Some(write_end),
             shell,
@@ -68,8 +72,11 @@ impl Drop for Watchdog {
 /// A pipe whose fds are `O_CLOEXEC`, so neither leaks into a child spawned
 /// after this call -- including the watchdog shell, which only keeps its
 /// `dup2`'d stdin copy (dup2 never carries the flag) across its own exec.
-/// No `pipe2` on macOS, so the flag is set right after `pipe()` instead.
+/// No `pipe2` on macOS, so the flag is set right after `pipe()` instead,
+/// with `FORK_LOCK` held for writing so no other fork in this crate can
+/// land in that gap (see its doc comment).
 fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd)> {
+    let _fork = super::FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
         return Err(SandboxError::Internal(format!(
@@ -173,5 +180,63 @@ mod tests {
         let _ = group.wait();
         let _ = watchdog.shell.wait();
         assert!(dead, "the group outlived the watchdog's pipe closing");
+    }
+
+    /// cloexec_pipe()'s pipe()+fcntl() gap, raced tightly against another
+    /// fork from a different thread that takes FORK_LOCK for reading the
+    /// same way the two production spawn sites do: without that read lock
+    /// in the way, a fork landing in the gap gets a non-cloexec copy of the
+    /// pipe, leaking it into the other process and silently defeating that
+    /// run's watchdog (confirmed separately: about 1 in 5 tries, tight
+    /// loop). Each "other" child reports, via its own stdout, any pipe fd
+    /// in its own `/dev/fd` outside the standard three -- never acting on
+    /// what it finds beyond that.
+    ///
+    /// The racer needs a `pre_exec`: without one, `Command::spawn()` can
+    /// take a `posix_spawn` fast path on macOS that this race doesn't reach.
+    /// `execute()`'s own sandboxed-command spawn always has one (`setpgid`),
+    /// so this matches the real risk, not a weaker one. And the pipe side
+    /// has to keep going for as long as the racer does, not run its own
+    /// fixed count: it's so much cheaper per iteration (no fork at all)
+    /// that a fixed count finished before the racer was even a few forks in,
+    /// leaving almost nothing to actually overlap with.
+    #[test]
+    fn test_fork_lock_closes_the_pipe_leak() {
+        let iterations = 300;
+        let leaks = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Ok((r, w)) = cloexec_pipe() {
+                        drop(r);
+                        drop(w);
+                    }
+                }
+            });
+            for _ in 0..iterations {
+                let out = {
+                    let _fork = super::super::FORK_LOCK
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner());
+                    let mut command = Command::new("/bin/sh");
+                    command.arg("-c").arg(
+                        "for f in /dev/fd/*; do \
+                           case \"$f\" in */0|*/1|*/2) continue;; esac; \
+                           [ -p \"$f\" ] && echo LEAK; \
+                         done",
+                    );
+                    unsafe {
+                        command.pre_exec(|| Ok(()));
+                    }
+                    command.output().unwrap()
+                };
+                if !out.stdout.is_empty() {
+                    leaks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(leaks.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

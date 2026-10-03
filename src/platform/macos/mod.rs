@@ -30,6 +30,19 @@ use run_marker::RunMarker;
 mod watchdog;
 use watchdog::Watchdog;
 
+/// Guards this crate's own forks (the sandboxed program, the watchdog
+/// shell) against watchdog.rs's `cloexec_pipe()`: macOS has no atomic
+/// `pipe2(O_CLOEXEC)`, so a fork landing between `pipe()` and the `fcntl`
+/// that sets close-on-exec would inherit a plain copy of the watchdog's
+/// write end, leaking it into an unrelated process and keeping the pipe
+/// open long after the real write end closes -- silently defeating the
+/// watchdog for that run. Confirmed for real under concurrent spawns
+/// without this lock: leaked in about 1 in 5 tries. `cloexec_pipe` holds
+/// this for writing around `pipe()`+`fcntl()`; every fork here holds it
+/// for reading, so none can land inside that window. It can't do anything
+/// about some unrelated fork elsewhere in a process embedding this crate.
+static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 // std's spawn error carries only errno, so the child reports which setrlimit
 // failed through a side pipe as [limit, errno].
 const LIMIT_OPEN_FILES: u8 = 1;
@@ -549,8 +562,11 @@ impl PlatformExecutor for MacOSExecutor {
             });
         }
 
-        // Spawn the process
-        let spawned = command.spawn();
+        // Held for the fork; see FORK_LOCK on why.
+        let spawned = {
+            let _fork = FORK_LOCK.read().unwrap_or_else(|e| e.into_inner());
+            command.spawn()
+        };
         drop(report_wr);
         let mut child = match spawned {
             Ok(child) => {
