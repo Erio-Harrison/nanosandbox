@@ -100,10 +100,21 @@ impl CgroupManager {
             reason: e.to_string(),
         })?;
 
-        // Also set high limit for soft limit
-        let high = (bytes as f64 * 0.9) as u64;
-        let high_path = self.path.join("memory.high");
-        let _ = fs::write(&high_path, high.to_string());
+        // No memory.high: it used to be set to 90% of the limit, where the
+        // kernel throttles the cgroup instead of killing it, so a program
+        // using too much mostly ended as a timeout, not an OOM. And no swap:
+        // with it, the limit could be exceeded by swapping and the OOM kill
+        // never came. Not every kernel has swap accounting; without it,
+        // there's no swap to limit here either.
+        let swap = self.path.join("memory.swap.max");
+        if swap.exists() {
+            fs::write(&swap, "0").map_err(|e| SandboxError::CgroupSetting {
+                controller: "memory".into(),
+                setting: "swap.max".into(),
+                value: "0".into(),
+                reason: e.to_string(),
+            })?;
+        }
 
         Ok(())
     }

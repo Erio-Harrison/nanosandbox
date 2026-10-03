@@ -203,52 +203,43 @@ fn test_linux_cgroup_cleanup() {
     );
 }
 
-/// Test: OOM kills should be detected via cgroup memory.events (Linux)
-///
-/// Current bug: killed_by_oom is always false
-/// Expected: killed_by_oom is true when process exceeds memory limit
+/// Test: going over memory_limit ends in an OOM kill, reported as one,
+/// soon. It used to end as a timeout more often than not: memory.high, at
+/// 90% of the limit, throttled the program instead, and swap let it go past
+/// the limit.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_oom_detection() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
-        .memory_limit(32 * 1024 * 1024) // 32MB - very tight
-        .wall_time_limit(Duration::from_secs(10))
+        .memory_limit(64 * 1024 * 1024)
+        .wall_time_limit(Duration::from_secs(20))
         .build()
         .unwrap();
 
-    // Force an OOM condition
+    // 256 MB, written: allocated and touched, not just reserved.
+    let start = std::time::Instant::now();
     let result = sandbox
         .run(
             "sh",
             &[
                 "-c",
-                r#"
-        # Allocate memory until we OOM
-        data=""
-        while true; do
-            data="${data}$(head -c 1048576 /dev/zero | tr '\0' 'x')"
-        done
-    "#,
+                "command -v python3 >/dev/null || { echo NO_PYTHON; exit 0; }
+                 python3 -c 'x = b\"x\" * (256 * 1024 * 1024); print(len(x))'",
             ],
         )
         .unwrap();
-
-    // Should be killed (by OOM or timeout)
-    assert!(
-        result.exit_code != 0 || result.killed_by_timeout,
-        "Process should have been killed"
-    );
-
-    // Ideally, killed_by_oom should be true
-    // This test documents expected behavior once OOM detection is implemented
-    if !result.killed_by_timeout {
-        assert!(
-            result.killed_by_oom,
-            "OOM kill not detected. Exit code: {}, signal: {:?}",
-            result.exit_code, result.signal
-        );
+    if result.stdout.trim() == "NO_PYTHON" {
+        eprintln!("skipping: no python3");
+        return;
     }
+    assert!(result.killed_by_oom, "not an OOM kill: {result:?}");
+    assert!(!result.killed_by_timeout);
+    assert!(
+        start.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 /// Test: Peak memory should be collected (Linux via cgroup, macOS via rusage)
