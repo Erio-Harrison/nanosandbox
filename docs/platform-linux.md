@@ -208,7 +208,7 @@ that chose to honor the proxy variables.
 
 | Controller | Resource | Config File |
 |------------|----------|-------------|
-| memory | Memory usage | `memory.max`, `memory.high` |
+| memory | Memory usage | `memory.max`, `memory.swap.max` (0) |
 | cpu | CPU time | `cpu.max` |
 | pids | Process count | `pids.max` |
 
@@ -228,8 +228,9 @@ impl CgroupManager {
 
     pub fn set_memory_limit(&self, bytes: u64) -> Result<()> {
         fs::write(self.path.join("memory.max"), bytes.to_string())?;
-        // Soft limit (triggers memory reclaim)
-        fs::write(self.path.join("memory.high"), ((bytes as f64) * 0.9) as u64)?;
+        // No swap, and no memory.high: going over the limit is an OOM kill,
+        // reported as killed_by_oom, not a slow crawl into the time limit.
+        fs::write(self.path.join("memory.swap.max"), "0")?;
         Ok(())
     }
 
@@ -296,6 +297,20 @@ x86_64 and aarch64 only: elsewhere `build()` refuses `seccomp(true)`.
 
 `seccomp(false)` turns it off, for a program that needs one of these calls,
 such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
+
+## Process Lifetime
+
+- The child sets `PR_SET_PDEATHSIG(SIGKILL)` first thing, so it dies with
+  the thread that started it, and as init of its PID namespace, takes the
+  rest of the sandbox with it. Before, a sandbox outlived a crashed or killed
+  host process, with nothing left to enforce its time limit. (macOS has no
+  such mechanism; a sandbox there still outlives its host process.)
+- Signals the host process ignores (Rust ignores `SIGPIPE`) and its signal
+  mask are reset to the defaults before `exec`.
+- The command is looked up in `$PATH` by the child, after entering its
+  rootfs, trying each directory in turn as `execvp` does. Not found is exit
+  127 with `command not found` on stderr; not executable, 126.
+- Output is read as it arrives (`poll`), up to `max_output` per stream.
 
 ## Complete Execution Flow
 

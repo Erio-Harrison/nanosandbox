@@ -105,3 +105,30 @@ fn test_concurrent_sandboxes_share_rootfs() {
         handle.join().unwrap();
     }
 }
+
+/// Commands are looked up in the rootfs, not on the host. They used to be
+/// resolved against the host's PATH first: a command only the rootfs had
+/// wasn't found, and one only the host had was run from the rootfs's path.
+#[test]
+fn test_path_lookup_happens_in_the_rootfs() {
+    if skip_without_userns_privileges() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("opt/tools")).unwrap();
+    let tool = root.path().join("opt/tools/only-in-rootfs");
+    std::fs::write(&tool, "#!/bin/sh\necho from-rootfs\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let sandbox = minimal_rootfs(root.path())
+        .env("PATH", "/opt/tools:/usr/bin:/bin")
+        .build()
+        .unwrap();
+    let result = sandbox.run("only-in-rootfs", &[]).unwrap();
+    assert_eq!(result.stdout, "from-rootfs\n", "{}", result.stderr);
+
+    // On the host's PATH, not in the rootfs.
+    let result = sandbox.run("cargo", &["--version"]).unwrap();
+    assert_eq!(result.exit_code, 127, "{}", result.stdout);
+}

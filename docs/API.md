@@ -267,6 +267,17 @@ How requests are relayed:
 
 Windows only supports `host_network()`.
 
+### Output
+
+```rust
+pub fn max_output(self, bytes: u64) -> Self
+```
+
+Keep at most `bytes` of stdout, and as much of stderr: by default
+`DEFAULT_MAX_OUTPUT`, 16 MB each. The output is held in this process's memory.
+Past the limit it's still read, so the program runs on, but dropped, and
+`ExecutionResult::output_truncated` is set.
+
 ### Environment
 
 ```rust
@@ -320,6 +331,7 @@ pub struct ExecutionResult {
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
     pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
+    pub output_truncated: bool,        // stdout or stderr went past max_output
 }
 ```
 
@@ -385,6 +397,7 @@ pub const KB: u64 = 1024;
 pub const MB: u64 = 1024 * 1024;
 pub const GB: u64 = 1024 * 1024 * 1024;
 pub const DEFAULT_PRIVATE_TMP_SIZE: u64 = 256 * MB;
+pub const DEFAULT_MAX_OUTPUT: u64 = 16 * MB;
 ```
 
 ---

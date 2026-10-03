@@ -155,7 +155,7 @@ Resource limiting via unified cgroup hierarchy:
         ├── cgroup.procs      # Add process PID here
         ├── cgroup.freeze     # Freeze for cleanup
         ├── memory.max        # Memory limit (bytes)
-        ├── memory.high       # Soft limit (90% of max)
+        ├── memory.swap.max   # 0: the limit is real memory
         ├── memory.current    # Current usage
         ├── memory.peak       # Peak usage
         ├── memory.events     # OOM events (oom_kill counter)

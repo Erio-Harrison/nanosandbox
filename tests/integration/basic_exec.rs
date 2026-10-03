@@ -198,3 +198,72 @@ fn test_clear_env() {
     let result = inherited.run("sh", &["-c", script]).unwrap();
     assert_eq!(result.stdout.trim(), "from-host set");
 }
+
+/// A lot of output comes back quickly, and past max_output it's cut off,
+/// flagged, while the program still runs to the end. It used to be read at
+/// about 400 KB/s on Linux, with no limit.
+#[test]
+#[cfg(unix)]
+fn test_large_output_fast_and_capped() {
+    let sandbox = Sandbox::builder()
+        .wall_time_limit(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+    // 24 MB on stdout, past the 16 MB default.
+    let start = std::time::Instant::now();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "head -c 25165824 /dev/zero | tr '\\0' x; echo done >&2",
+            ],
+        )
+        .unwrap();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(result.exit_code, 0);
+    assert!(result.output_truncated);
+    assert_eq!(result.stdout.len() as u64, nanosandbox::DEFAULT_MAX_OUTPUT);
+    assert_eq!(result.stderr, "done\n");
+
+    let small = Sandbox::builder().max_output(4).build().unwrap();
+    let result = small
+        .run("sh", &["-c", "echo hello; echo world >&2"])
+        .unwrap();
+    assert_eq!(
+        (result.stdout.as_str(), result.stderr.as_str()),
+        ("hell", "worl")
+    );
+    assert!(result.output_truncated);
+    let result = small.run("echo", &["hi"]).unwrap();
+    assert!(!result.output_truncated);
+}
+
+/// A program gets SIGPIPE's default action: `yes` stops quietly when `head`
+/// is done. It used to inherit this process's "ignore", and complain.
+#[test]
+#[cfg(unix)]
+fn test_sigpipe_default() {
+    let sandbox = Sandbox::builder().build().unwrap();
+    let result = sandbox.run("sh", &["-c", "yes | head -1"]).unwrap();
+    assert_eq!(result.stdout, "y\n");
+    assert_eq!(result.stderr, "", "SIGPIPE ignored in the sandbox");
+}
+
+/// A missing command says so, with the shell's exit code for it.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_command_not_found_message() {
+    let sandbox = Sandbox::builder().build().unwrap();
+    let result = sandbox.run("nanosandbox-no-such-command", &[]).unwrap();
+    assert_eq!(result.exit_code, 127);
+    assert!(
+        result.stderr.contains("command not found"),
+        "{}",
+        result.stderr
+    );
+}

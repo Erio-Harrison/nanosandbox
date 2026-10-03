@@ -37,7 +37,7 @@ pub mod sandbox;
 // Re-exports
 #[cfg(target_os = "linux")]
 pub use builder::Permission;
-pub use builder::{SandboxBuilder, DEFAULT_PRIVATE_TMP_SIZE};
+pub use builder::{SandboxBuilder, DEFAULT_MAX_OUTPUT, DEFAULT_PRIVATE_TMP_SIZE};
 pub use error::{Result, SandboxError};
 pub use result::ExecutionResult;
 pub use sandbox::Sandbox;

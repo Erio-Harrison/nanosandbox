@@ -12,6 +12,7 @@
 use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
+use crate::platform::output::Captured;
 use crate::platform::private_tmp::PrivateTmp;
 use crate::platform::read_rules;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
@@ -434,6 +435,17 @@ impl PlatformExecutor for MacOSExecutor {
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
+        // A NUL byte can't be passed to the program: say so the way Linux
+        // does, instead of as a generic spawn failure.
+        for s in std::iter::once(cmd).chain(args.iter().copied()).chain(
+            config
+                .env
+                .iter()
+                .flat_map(|(k, v)| [k.as_str(), v.as_str()]),
+        ) {
+            std::ffi::CString::new(s)?;
+        }
+
         // private_tmp: a directory for this run, removed when this returns.
         // See platform/private_tmp.rs.
         let mut private_tmp = config
@@ -631,8 +643,8 @@ impl MacOSExecutor {
         }
 
         let mut stdin_remaining = stdin_data.unwrap_or(&[]);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        let mut stdout = Captured::new(config.max_output);
+        let mut stderr = Captured::new(config.max_output);
 
         // Use wait4 with WNOHANG for non-blocking wait with rusage collection
         loop {
@@ -703,8 +715,9 @@ impl MacOSExecutor {
                 let cpu_time = Some(user_time + sys_time);
 
                 return Ok(ExecutionResult {
-                    stdout: String::from_utf8_lossy(&stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&stderr).to_string(),
+                    output_truncated: stdout.truncated() || stderr.truncated(),
+                    stdout: stdout.into_string(),
+                    stderr: stderr.into_string(),
                     exit_code,
                     duration: start.elapsed(),
                     killed_by_timeout,
@@ -760,16 +773,16 @@ impl MacOSExecutor {
 
 /// Read whatever is available on a non-blocking pipe without blocking.
 /// EOF (Ok(0)) or a hard error drops the handle so later iterations skip it.
-fn drain_available<R: Read>(pipe: &mut Option<R>, buf: &mut Vec<u8>) {
+fn drain_available<R: Read>(pipe: &mut Option<R>, out: &mut Captured) {
     let Some(p) = pipe else { return };
-    let mut tmp = [0u8; 4096];
+    let mut tmp = [0u8; 64 * 1024];
     loop {
         match p.read(&mut tmp) {
             Ok(0) => {
                 *pipe = None;
                 break;
             }
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            Ok(n) => out.push(&tmp[..n]),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(_) => {
                 *pipe = None;

@@ -37,6 +37,9 @@ pub(crate) struct Mount {
     pub(crate) permission: Permission,
 }
 
+/// The default [`SandboxBuilder::max_output`]: for stdout and stderr each.
+pub const DEFAULT_MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+
 /// The default [`SandboxBuilder::private_tmp`] size.
 pub const DEFAULT_PRIVATE_TMP_SIZE: u64 = 256 * 1024 * 1024;
 
@@ -65,6 +68,8 @@ pub(crate) struct SandboxConfig {
     pub(crate) max_pids: Option<u32>,
     pub(crate) max_file_size: Option<u64>,
     pub(crate) max_open_files: Option<u32>,
+    /// [`SandboxBuilder::max_output`], per stream.
+    pub(crate) max_output: u64,
 
     // Network
     pub(crate) network_mode: NetworkMode,
@@ -102,6 +107,7 @@ impl Default for SandboxConfig {
             max_pids: None,
             max_file_size: None,
             max_open_files: None,
+            max_output: DEFAULT_MAX_OUTPUT,
 
             network_mode: NetworkMode::None,
             allow_private_destinations: false,
@@ -304,6 +310,16 @@ impl SandboxBuilder {
     /// Set maximum number of open files
     pub fn max_open_files(mut self, n: u32) -> Self {
         self.config.max_open_files = Some(n);
+        self
+    }
+
+    /// Keep at most `bytes` of stdout, and as much of stderr. Default
+    /// [`DEFAULT_MAX_OUTPUT`] (16 MB) each. The output is held in this
+    /// process's memory; past the limit it's still read, so the program
+    /// keeps running, but dropped, and
+    /// `ExecutionResult::output_truncated` is set.
+    pub fn max_output(mut self, bytes: u64) -> Self {
+        self.config.max_output = bytes;
         self
     }
 

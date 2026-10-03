@@ -250,3 +250,53 @@ fn test_escaped_background_process_killed() {
         "another sandbox's run was killed"
     );
 }
+
+/// Test: if the process running the sandbox dies, the sandbox does too. It
+/// used to keep running, with nothing left to enforce its time limit.
+///
+/// Runs this test binary again as the host process, which the test then
+/// kills (it only kills that one child of its own, by its handle).
+#[test]
+#[cfg(target_os = "linux")]
+fn test_sandbox_dies_with_its_host_process() {
+    const MARKER: &str = "31.4159";
+    if std::env::var_os("NSB_PDEATH_HOST").is_some() {
+        let sandbox = Sandbox::builder()
+            .wall_time_limit(Duration::from_secs(60))
+            .build()
+            .unwrap();
+        let _ = sandbox.run("sleep", &[MARKER]);
+        return;
+    }
+    let running = || {
+        Command::new("pgrep")
+            .args(["-f", &format!("^sleep {MARKER}$")])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    };
+    let mut host = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "process_management::test_sandbox_dies_with_its_host_process",
+        ])
+        .env("NSB_PDEATH_HOST", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(running(), "the sandbox never started");
+
+    host.kill().unwrap();
+    host.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while running() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!running(), "the sandbox outlived its host process");
+}

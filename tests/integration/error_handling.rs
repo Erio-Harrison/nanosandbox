@@ -277,3 +277,36 @@ fn test_invalid_limits_refused() {
         );
     }
 }
+
+/// A NUL byte in an argument is an error, not a panic, and leaks nothing.
+/// It used to panic, and before that leak the run's pipes.
+#[test]
+fn test_nul_in_argument_is_an_error() {
+    let sandbox = Sandbox::builder().build().unwrap();
+    let fds = || std::fs::read_dir("/proc/self/fd").map(|d| d.count()).ok();
+    let before = fds();
+    for _ in 0..50 {
+        let result = sandbox.run("echo", &["a\0b"]);
+        assert!(
+            matches!(result, Err(SandboxError::NulError(_))),
+            "{result:?}"
+        );
+    }
+    // Linux: no fds left behind. Other tests in this process open and close
+    // fds meanwhile, so allow some noise: a leak was 4 or more per run, over
+    // 200 here.
+    if let (Some(before), Some(after)) = (before, fds()) {
+        assert!(after < before + 50, "fds leaked: {before} -> {after}");
+    }
+}
+
+/// A working directory that doesn't exist is refused at build(). On Linux it
+/// used to be ignored, and the program ran wherever this process was.
+#[test]
+#[cfg(unix)]
+fn test_missing_working_dir_refused() {
+    let result = Sandbox::builder()
+        .working_dir("/nanosandbox-no-such-dir")
+        .build();
+    assert!(matches!(result, Err(SandboxError::PathNotFound(_))));
+}

@@ -41,6 +41,10 @@ pub struct ExecutionResult {
     /// CPU time consumed (if available)
     pub cpu_time: Option<Duration>,
 
+    /// Whether stdout or stderr went past `max_output`, and the rest of it
+    /// was dropped.
+    pub output_truncated: bool,
+
     /// Hosts the `allow_network` proxy refused during the run, sorted: not
     /// on the allowlist, or resolving only to non-public addresses. Lets the
     /// caller see what a program tried to reach, and decide what to allow.
@@ -62,6 +66,7 @@ impl ExecutionResult {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         }
     }
 
@@ -116,6 +121,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         };
         assert!(result.success());
         assert!(result.failure_reason().is_none());
@@ -135,6 +141,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Exit code 1".into()));
@@ -154,6 +161,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Execution timed out".into()));
@@ -173,6 +181,7 @@ mod tests {
             peak_memory: Some(512 * 1024 * 1024),
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Out of memory".into()));
@@ -192,6 +201,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            output_truncated: false,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Killed by signal 9".into()));

@@ -259,6 +259,7 @@ impl WindowsExecutor {
                         peak_memory: None,
                         cpu_time: None,
                         blocked_hosts: Vec::new(),
+                        output_truncated: false,
                     });
                 }
                 Ok(None) => {
