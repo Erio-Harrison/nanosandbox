@@ -185,15 +185,18 @@ the sandbox only sees that directory, which is the caller's to write to.
 gives it one too, with the domain-whitelisting proxy as its only way out:
 
 1. Before `exec`, the child brings up loopback in its namespace, listens on
-   `127.0.0.1:<proxy port>` there, and sends that listener to the parent over
+   `127.0.0.1:3128` there (any port is free in a namespace of its own), and
+   sends that listener to the parent over
    a socketpair made before `clone()` (`SCM_RIGHTS`). The parent can't do
    this itself: entering the child's namespace takes `CAP_SYS_ADMIN` in the
    parent's own user namespace.
 2. The parent's proxy accepts on that listener for the length of the run,
    and opens the outbound connections from the host's network. Closing the
-   listener when the run ends lets the namespace go away.
+   listener, and the run's connections still open, when the run ends lets
+   the namespace go away. Nothing listens on the host, so no other local
+   process can use the proxy.
 
-`HTTP_PROXY`/`HTTPS_PROXY` point at `127.0.0.1:<proxy port>`, so this is
+`HTTP_PROXY`/`HTTPS_PROXY` point at `127.0.0.1:3128`, so this is
 transparent to programs that use them. A program that doesn't gets nowhere:
 there are no other interfaces and no DNS, and connections fail immediately
 rather than timing out. Without this, the whitelist only held for programs

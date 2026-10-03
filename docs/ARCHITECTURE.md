@@ -464,13 +464,13 @@ fn is_domain_allowed(host: &str, whitelist: &[String]) -> bool {
 The proxy only checks traffic that goes through it. What stops a program
 from ignoring `HTTP_PROXY` and connecting directly differs per platform:
 
-- **macOS**: the SBPL profile allows outbound network only to
-  `localhost:<proxy port>`.
+- **macOS**: each run gets a proxy listener on a fresh loopback port, and
+  the SBPL profile allows outbound network only to `localhost:<that port>`.
 - **Linux**: the sandbox gets its own network namespace containing nothing
   but loopback. Before `exec`, the child brings loopback up, listens on
-  `127.0.0.1:<proxy port>` inside that namespace, and hands the listener to
-  the parent over a socketpair (`SCM_RIGHTS`). The parent's proxy accepts on
-  it and connects out from the host's network. There is no DNS inside, so
+  `127.0.0.1:3128` inside that namespace, and hands the listener to the
+  parent over a socketpair (`SCM_RIGHTS`). The parent's proxy accepts on it
+  and connects out from the host's network. Nothing listens on the host. There is no DNS inside, so
   programs have to use the proxy. Where Ubuntu's AppArmor
   `unprivileged_userns` restriction applies, `build()` refuses
   `allow_network` instead (see [platform-linux.md](platform-linux.md)).

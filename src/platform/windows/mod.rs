@@ -43,7 +43,8 @@ impl PlatformExecutor for WindowsExecutor {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
-        proxy: Option<&ProxiedNetwork>,
+        // check_support refuses allow_network on Windows.
+        _proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
         // Windows implementation using Job Objects and Restricted Tokens
 
@@ -64,13 +65,6 @@ impl PlatformExecutor for WindowsExecutor {
         }
         for (key, value) in &config.env {
             command.env(key, value);
-        }
-
-        // Add proxy environment variables if using proxied network
-        if let Some(proxy) = proxy {
-            for (key, value) in proxy.env_vars() {
-                command.env(key, value);
-            }
         }
 
         if !config.env.contains_key("PATH") {
@@ -264,6 +258,7 @@ impl WindowsExecutor {
                         signal: None,
                         peak_memory: None,
                         cpu_time: None,
+                        blocked_hosts: Vec::new(),
                     });
                 }
                 Ok(None) => {

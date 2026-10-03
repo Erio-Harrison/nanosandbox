@@ -234,25 +234,18 @@ fn test_macos_sandbox_restrictions() {
 fn test_proxied_network_setup() {
     use nanosandbox::network::ProxiedNetwork;
 
-    // Setup proxy with allowed domains
-    let proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()], false)
+    let mut proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()], false)
         .expect("Failed to setup proxy");
 
-    // Verify proxy is running
-    assert!(proxy.port() > 0);
-    assert!(proxy.url().starts_with("http://127.0.0.1:"));
-
-    // Verify env vars are correctly set
-    let env_vars = proxy.env_vars();
+    // Each run's programs are pointed at that run's listener.
+    let env_vars = ProxiedNetwork::env_vars(4321);
     assert_eq!(env_vars.len(), 4);
-    assert!(env_vars
-        .iter()
-        .any(|(k, v)| k == "HTTP_PROXY" && v.contains(&proxy.port().to_string())));
-    assert!(env_vars
-        .iter()
-        .any(|(k, v)| k == "HTTPS_PROXY" && v.contains(&proxy.port().to_string())));
+    for key in ["HTTP_PROXY", "HTTPS_PROXY"] {
+        assert!(env_vars
+            .iter()
+            .any(|(k, v)| k == key && v == "http://127.0.0.1:4321"));
+    }
 
-    // Cleanup
     proxy.shutdown();
 }
 

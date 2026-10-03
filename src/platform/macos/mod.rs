@@ -445,10 +445,23 @@ impl PlatformExecutor for MacOSExecutor {
         let marker = RunMarker::create()
             .map_err(|e| SandboxError::ExecutionFailed(format!("create run marker: {e}")))?;
 
+        // allow_network: a proxy listener for this run alone, on a fresh
+        // loopback port the profile lets only this run reach. It closes when
+        // the run ends; nothing listens between runs.
+        let proxy_run = match proxy {
+            Some(proxy) => {
+                let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+                let port = listener.local_addr()?.port();
+                Some((port, proxy.attach(listener)?))
+            }
+            None => None,
+        };
+        let proxy_port = proxy_run.as_ref().map(|(port, _)| *port);
+
         // Generate sandbox profile
         let profile = self.generate_profile(
             config,
-            proxy.map(|p| p.port()),
+            proxy_port,
             private_tmp.as_ref().map(PrivateTmp::path),
             Some(&marker),
         );
@@ -492,10 +505,8 @@ impl PlatformExecutor for MacOSExecutor {
         }
 
         // Set proxy environment variables if proxied network
-        if let Some(proxy) = proxy {
-            for (key, value) in proxy.env_vars() {
-                command.env(key, value);
-            }
+        if let Some(port) = proxy_port {
+            command.envs(ProxiedNetwork::env_vars(port));
         }
 
         // Setup stdin/stdout/stderr
@@ -541,9 +552,6 @@ impl PlatformExecutor for MacOSExecutor {
             }
         };
 
-        // The proxy is owned by the Sandbox, not this call, so it stays up
-        // for the next run() instead of being shut down here.
-        //
         // stdin is written inside wait_with_timeout's own loop, interleaved
         // with draining stdout/stderr -- not all upfront here. A program
         // that echoes input to output as it goes (e.g. `cat`) can block on
@@ -553,14 +561,16 @@ impl PlatformExecutor for MacOSExecutor {
         // that once either side exceeds one pipe buffer (confirmed for real
         // with 200KB of stdin, and independently with >64KB of output alone
         // and no stdin at all).
-        self.wait_with_timeout(
+        let mut result = self.wait_with_timeout(
             &mut child,
             stdin,
             config,
             private_tmp.as_mut(),
             &marker,
             start,
-        )
+        )?;
+        result.blocked_hosts = proxy_run.map(|(_, a)| a.finish()).unwrap_or_default();
+        Ok(result)
     }
 
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {
@@ -703,6 +713,7 @@ impl MacOSExecutor {
                     signal,
                     peak_memory,
                     cpu_time,
+                    blocked_hosts: Vec::new(), // filled in by execute()
                 });
             } else if result == 0 {
                 // Still running, check timeout

@@ -250,49 +250,42 @@ fn test_proxy_malformed_response() {
     assert!(result.exit_code == 0 || result.stdout.contains("NO_CURL"));
 }
 
-/// Test: Multiple proxied sandboxes should get unique ports
+/// Test: concurrent runs each have a proxy listener of their own, so each
+/// sees only the hosts refused to it. (On Linux each listens on the same
+/// port, inside its own network namespace; on macOS each on a fresh one.)
 #[test]
-fn test_proxy_unique_ports() {
+#[cfg(unix)]
+fn test_runs_have_separate_proxy_listeners() {
     if crate::common::skip_without_userns_privileges() {
         return;
     }
-    let mut ports = vec![];
-
-    for _ in 0..5 {
-        let sandbox = Sandbox::builder()
+    let sandbox = std::sync::Arc::new(
+        Sandbox::builder()
             .working_dir("/tmp")
             .allow_network(&["example.com"])
-            .wall_time_limit(Duration::from_secs(5))
+            .wall_time_limit(Duration::from_secs(15))
             .build()
-            .unwrap();
-
-        let result = sandbox
-            .run(
-                "sh",
-                &[
-                    "-c",
-                    r#"
-            # Extract port from proxy URL
-            echo "$http_proxy" | sed 's/.*://' | tr -d '/'
-        "#,
-                ],
-            )
-            .unwrap();
-
-        let port = result.stdout.trim().to_string();
-        if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) {
-            ports.push(port);
-        }
-    }
-
-    // All ports should be unique
-    let unique: std::collections::HashSet<_> = ports.iter().collect();
-    assert_eq!(
-        unique.len(),
-        ports.len(),
-        "Proxy ports should be unique: {:?}",
-        ports
+            .unwrap(),
     );
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let sandbox = sandbox.clone();
+            std::thread::spawn(move || {
+                let script = format!(
+                    "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+                     curl -s -o /dev/null http://run{i}.invalid/"
+                );
+                (i, sandbox.run("sh", &["-c", &script]).unwrap())
+            })
+        })
+        .collect();
+    for handle in handles {
+        let (i, result) = handle.join().unwrap();
+        if result.stdout.trim() == "NO_CURL" {
+            return;
+        }
+        assert_eq!(result.blocked_hosts, vec![format!("run{i}.invalid")]);
+    }
 }
 
 /// Test: Proxy should handle HTTPS properly (CONNECT method)

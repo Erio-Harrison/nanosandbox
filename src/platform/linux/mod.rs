@@ -10,7 +10,7 @@
 
 use crate::builder::{Mount, NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
-use crate::network::ProxiedNetwork;
+use crate::network::{ProxiedNetwork, SANDBOX_PROXY_PORT};
 use crate::platform::private_tmp::PrivateTmp;
 use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
 use crate::result::ExecutionResult;
@@ -187,7 +187,7 @@ impl PlatformExecutor for LinuxExecutor {
             clone_flags |= CloneFlags::CLONE_NEWNET;
         }
         let mut proxy_link = match (&config.network_mode, proxy) {
-            (NetworkMode::Proxied { .. }, Some(proxy)) => Some(ProxyLink::new(proxy.port())?),
+            (NetworkMode::Proxied { .. }, Some(_)) => Some(ProxyLink::new(SANDBOX_PROXY_PORT)?),
             _ => None,
         };
 
@@ -252,10 +252,8 @@ impl PlatformExecutor for LinuxExecutor {
         }
 
         // Add proxy environment variables if using proxied network
-        if let Some(proxy) = proxy {
-            for (key, value) in proxy.env_vars() {
-                env.insert(key, value);
-            }
+        if proxy_link.is_some() {
+            env.extend(ProxiedNetwork::env_vars(SANDBOX_PROXY_PORT));
         }
         if !env.contains_key("PATH") {
             env.insert(
@@ -670,7 +668,7 @@ impl PlatformExecutor for LinuxExecutor {
             timeout,
             private_tmp.as_mut(),
         )?;
-        drop(proxy_attachment);
+        let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);
 
         // Without a cgroup, these used to be None. wait4's rusage is the
@@ -709,6 +707,7 @@ impl PlatformExecutor for LinuxExecutor {
             signal,
             peak_memory,
             cpu_time,
+            blocked_hosts,
         })
     }
 

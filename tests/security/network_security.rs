@@ -400,3 +400,97 @@ fn test_private_destinations_refused_by_default() {
     assert!(allowed.contains("connect=200"), "{allowed}");
     assert!(hits.load(Ordering::SeqCst) > 0);
 }
+
+/// Test: a POST through the proxy reaches the server with its body. The
+/// proxy used to forward only the headers, so every plain-HTTP upload hung
+/// until the server gave up waiting for the body.
+#[test]
+#[cfg(unix)]
+fn test_post_body_reaches_server_through_proxy() {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (seen_tx, seen_rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = v.trim().parse().unwrap_or(0);
+                }
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            let _ = seen_tx.send(String::from_utf8_lossy(&body).into_owned());
+            let _ = reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+        }
+    });
+
+    let sandbox = Sandbox::builder()
+        .allow_network(&["localhost"])
+        .allow_private_destinations()
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         curl -s --max-time 10 -d 'payload=12345' http://localhost:{port}/post"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    if result.stdout.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert_eq!(result.stdout, "ok", "{}", result.stderr);
+    let body = seen_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(body, "payload=12345");
+}
+
+/// Test: the run's result lists the hosts the proxy refused it.
+#[test]
+#[cfg(unix)]
+fn test_blocked_hosts_reported() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .allow_network(&["example.com"])
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "command -v curl >/dev/null || { echo NO_CURL; exit 0; }
+                 curl -s -o /dev/null http://blocked.invalid/
+                 curl -s -o /dev/null https://also-blocked.invalid/
+                 curl -s -o /dev/null http://blocked.invalid/again",
+            ],
+        )
+        .unwrap();
+    if result.stdout.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert_eq!(
+        result.blocked_hosts,
+        vec!["also-blocked.invalid", "blocked.invalid"]
+    );
+
+    // And only that run's: the next one starts empty.
+    let result = sandbox.run("true", &[]).unwrap();
+    assert!(result.blocked_hosts.is_empty());
+}

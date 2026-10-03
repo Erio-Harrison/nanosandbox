@@ -1,21 +1,26 @@
-//! HTTP Proxy implementation for domain whitelisting
+//! HTTP/HTTPS proxy that only lets a domain allowlist through.
 //!
-//! Implements a simple HTTP/HTTPS proxy that checks domain against a whitelist
-//! before forwarding requests.
+//! It handles plain HTTP requests in absolute form (`GET http://host/path`)
+//! and HTTPS tunnels (`CONNECT host:port`). Each target host is checked
+//! against the allowlist, resolved once, checked against non-public
+//! addresses (see [`is_public`]), and connected to by address. Then bytes
+//! are relayed both ways until both sides are done, or neither has sent
+//! anything for the idle timeout.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 /// Connection timeout for proxy connections
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Data transfer timeout (idle timeout)
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+/// How long a relayed connection may go with nothing sent either way. Not a
+/// limit on how long it lasts: a download that keeps going keeps going.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Request line plus headers. The proxy runs in the host process, so a client
 /// that never ends its headers mustn't be able to grow this without bound.
@@ -23,6 +28,19 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024;
 
 /// How long a client gets to send its request headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Request headers that only concern the hop between the client and the
+/// proxy, or that the proxy sets itself. Also dropped: any header the
+/// `Connection` header names.
+const HOP_BY_HOP: [&str; 7] = [
+    "connection",
+    "proxy-connection",
+    "keep-alive",
+    "proxy-authorization",
+    "te",
+    "upgrade",
+    "host",
+];
 
 /// What the proxy lets through.
 #[derive(Clone, Debug)]
@@ -34,6 +52,28 @@ pub(crate) struct Policy {
     /// from the host's network, so by default it doesn't: that would hand
     /// the sandbox the host's own services and internal network.
     allow_private: bool,
+    idle_timeout: Duration,
+}
+
+/// The hosts the proxy refused, for one run: not on the allowlist, or
+/// resolving only to addresses the policy refuses.
+#[derive(Debug, Default)]
+pub(crate) struct Blocked(Mutex<BTreeSet<String>>);
+
+impl Blocked {
+    fn record(&self, host: &str) {
+        if let Ok(mut hosts) = self.0.lock() {
+            hosts.insert(host.to_string());
+        }
+    }
+
+    /// Sorted, each once.
+    pub(crate) fn hosts(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .map(|hosts| hosts.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 /// HTTP Proxy server with domain whitelist
@@ -50,6 +90,22 @@ enum ConnectError {
     TimedOut,
 }
 
+/// What a request asks the proxy to do, once its target is parsed.
+enum Request<'a> {
+    /// `CONNECT host:port`: a tunnel.
+    Connect { host: String, port: u16 },
+    /// A plain HTTP request, to forward with `path` in place of the URL and
+    /// `authority` as its `Host`.
+    Http {
+        host: String,
+        port: u16,
+        method: &'a str,
+        authority: &'a str,
+        path: String,
+        version: &'a str,
+    },
+}
+
 impl HttpProxy {
     /// Create a new HTTP proxy
     ///
@@ -60,12 +116,18 @@ impl HttpProxy {
     pub fn new(allowed_domains: Vec<String>, port: u16) -> Self {
         Self {
             policy: Arc::new(Policy {
-                // Hosts are lowercased before matching, so patterns must be too.
+                // Hosts are lowercased and unbracketed before matching, so
+                // patterns must be too.
                 domains: allowed_domains
                     .into_iter()
-                    .map(|d| d.to_lowercase())
+                    .map(|d| {
+                        d.trim_start_matches('[')
+                            .trim_end_matches(']')
+                            .to_lowercase()
+                    })
                     .collect(),
                 allow_private: false,
+                idle_timeout: IDLE_TIMEOUT,
             }),
             listen_addr: SocketAddr::from(([127, 0, 0, 1], port)),
         }
@@ -118,33 +180,42 @@ impl HttpProxy {
             }
             tracing::info!("Proxy shutting down");
         };
-        Self::serve(listener, Arc::clone(&self.policy), stop).await;
+        let blocked = Arc::new(Blocked::default());
+        Self::serve(listener, Arc::clone(&self.policy), blocked, stop).await;
         Ok(())
     }
 
+    /// Run the proxy server without shutdown signal (for simpler use cases)
+    pub async fn run_forever(&self) -> std::io::Result<()> {
+        let (_tx, rx) = watch::channel(false);
+        self.run(rx, None).await
+    }
+
     /// What this proxy lets through.
-    #[cfg(target_os = "linux")]
     pub(crate) fn policy(&self) -> Arc<Policy> {
         Arc::clone(&self.policy)
     }
 
-    /// Accepts and proxies connections on `listener` until `stop` completes.
-    /// Also used for listeners bound inside a sandbox's own network namespace
-    /// (see `ProxiedNetwork::attach`), so it doesn't need `&self`.
+    /// Accepts and proxies connections on `listener` until `stop` completes,
+    /// recording refused hosts in `blocked`. Connections still open then are
+    /// cut: a run's listener stops when the run is over.
     pub(crate) async fn serve(
         listener: TcpListener,
         policy: Arc<Policy>,
+        blocked: Arc<Blocked>,
         stop: impl std::future::Future<Output = ()>,
     ) {
         tokio::pin!(stop);
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, addr)) => {
                             let policy = Arc::clone(&policy);
-                            tokio::spawn(async move {
-                                if let Err(e) = Self::handle_connection(stream, &policy).await {
+                            let blocked = Arc::clone(&blocked);
+                            connections.spawn(async move {
+                                if let Err(e) = Self::handle_connection(stream, &policy, &blocked).await {
                                     tracing::debug!("Connection from {} error: {}", addr, e);
                                 }
                             });
@@ -154,44 +225,81 @@ impl HttpProxy {
                         }
                     }
                 }
+                // Reap finished ones, so the set doesn't grow with them.
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 _ = &mut stop => break,
             }
         }
+        // Dropping `connections` aborts the ones still open.
     }
 
-    /// Run the proxy server without shutdown signal (for simpler use cases)
-    pub async fn run_forever(&self) -> std::io::Result<()> {
-        let (_tx, rx) = watch::channel(false);
-        self.run(rx, None).await
-    }
-
-    async fn handle_connection(mut client: TcpStream, policy: &Policy) -> std::io::Result<()> {
-        // Read ALL headers at once to avoid BufReader buffering issues
+    async fn handle_connection(
+        mut client: TcpStream,
+        policy: &Policy,
+        blocked: &Blocked,
+    ) -> std::io::Result<()> {
         let mut reader = BufReader::new(&mut client);
-        let all_headers =
-            match tokio::time::timeout(HEADER_TIMEOUT, Self::read_headers(&mut reader)).await {
-                Ok(Ok(Some(headers))) => headers,
-                Ok(Ok(None)) => {
-                    drop(reader);
-                    return Self::send_error(&mut client, 431, "Request Header Fields Too Large")
-                        .await;
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(_) => {
-                    tracing::debug!("Timed out waiting for request headers");
-                    return Ok(());
-                }
-            };
+        let head = match tokio::time::timeout(HEADER_TIMEOUT, Self::read_headers(&mut reader)).await
+        {
+            Ok(Ok(Some(head))) => head,
+            Ok(Ok(None)) => {
+                drop(reader);
+                return Self::send_error(&mut client, 431, "Request Header Fields Too Large").await;
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                tracing::debug!("Timed out waiting for request headers");
+                return Ok(());
+            }
+        };
+        // What the client sent right after its headers, read along with
+        // them: a request body, or the start of a TLS handshake. It goes to
+        // the destination first. It used to be dropped with the reader.
+        let early = reader.buffer().to_vec();
+        drop(reader);
 
-        let first_line = all_headers.lines().next().unwrap_or("");
+        let request = match Self::parse_request(&head) {
+            Ok(request) => request,
+            Err(reason) => return Self::send_error(&mut client, 400, reason).await,
+        };
+        let (host, port) = match &request {
+            Request::Connect { host, port } | Request::Http { host, port, .. } => (host, *port),
+        };
+        tracing::debug!("Request for {host}:{port}");
 
-        if first_line.starts_with("CONNECT ") {
-            // HTTPS tunnel request - pass the client (headers already consumed)
-            Self::handle_connect(client, first_line, &all_headers, policy).await
-        } else {
-            // Regular HTTP request
-            Self::handle_http(client, first_line, &all_headers, policy).await
+        if !Self::is_allowed(host, &policy.domains) {
+            tracing::info!("Blocked {} (not in whitelist)", host);
+            blocked.record(host);
+            return Self::send_error(&mut client, 403, "Domain not in whitelist").await;
         }
+        let mut remote = match Self::connect(host, port, policy).await {
+            Ok(remote) => remote,
+            Err(e) => {
+                if matches!(e, ConnectError::NotPublic) {
+                    blocked.record(host);
+                }
+                return Self::refuse(&mut client, host, port, e).await;
+            }
+        };
+
+        match &request {
+            Request::Connect { .. } => {
+                client
+                    .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                    .await?;
+            }
+            Request::Http {
+                method,
+                authority,
+                path,
+                version,
+                ..
+            } => {
+                let head = Self::forwarded_head(&head, method, path, version, authority);
+                remote.write_all(head.as_bytes()).await?;
+            }
+        }
+        Self::relay(client, remote, &early, policy.idle_timeout).await
     }
 
     /// Reads up to and including the blank line ending the headers, or to EOF.
@@ -216,177 +324,141 @@ impl HttpProxy {
         }
     }
 
-    /// Handle CONNECT requests (HTTPS tunneling)
-    async fn handle_connect(
-        mut client: TcpStream,
-        first_line: &str,
-        _all_headers: &str, // Headers already consumed
-        policy: &Policy,
-    ) -> std::io::Result<()> {
-        // Parse: CONNECT host:port HTTP/1.1
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Self::send_error(&mut client, 400, "Bad Request").await;
-        }
-
-        let host_port = parts[1];
-        let host = host_port.split(':').next().unwrap_or("");
-        let port = host_port
-            .split(':')
-            .nth(1)
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(443);
-
-        tracing::debug!("CONNECT request to {}:{}", host, port);
-
-        if !Self::is_allowed(host, &policy.domains) {
-            tracing::info!("Blocked CONNECT to {} (not in whitelist)", host);
-            return Self::send_error(&mut client, 403, "Domain not in whitelist").await;
-        }
-
-        // Headers already read in handle_connection, no need to read again
-
-        let remote = match Self::connect(host, port, policy).await {
-            Ok(r) => r,
-            Err(e) => return Self::refuse(&mut client, host, port, e).await,
+    /// The request line's target, or why it can't be served.
+    fn parse_request(head: &str) -> Result<Request<'_>, &'static str> {
+        let mut parts = head.lines().next().unwrap_or("").split_whitespace();
+        let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+            return Err("Bad Request");
         };
+        let version = parts.next().unwrap_or("HTTP/1.1");
 
-        // Send 200 Connection Established
-        client
-            .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            .await?;
-
-        // Bidirectional copy with timeout
-        let (mut cr, mut cw) = client.into_split();
-        let (mut rr, mut rw) = remote.into_split();
-
-        let client_to_remote = tokio::io::copy(&mut cr, &mut rw);
-        let remote_to_client = tokio::io::copy(&mut rr, &mut cw);
-
-        let transfer_result = tokio::time::timeout(TRANSFER_TIMEOUT, async {
-            tokio::select! {
-                r1 = client_to_remote => {
-                    if let Err(e) = r1 {
-                        tracing::debug!("Client to remote error: {}", e);
-                    }
-                }
-                r2 = remote_to_client => {
-                    if let Err(e) = r2 {
-                        tracing::debug!("Remote to client error: {}", e);
-                    }
-                }
-            }
-        })
-        .await;
-
-        if transfer_result.is_err() {
-            tracing::debug!("Transfer timeout for CONNECT tunnel");
+        if method.eq_ignore_ascii_case("CONNECT") {
+            let (host, port) = parse_authority(target, 443).ok_or("Bad Request")?;
+            return Ok(Request::Connect { host, port });
         }
-
-        Ok(())
+        // Absolute form only: a request with just a path would have to be
+        // routed by its Host header, which the client controls.
+        let rest = target
+            .get(..7)
+            .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
+            .map(|_| &target[7..])
+            .ok_or("Absolute URL required")?;
+        let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        let authority = &rest[..end];
+        let (host, port) = parse_authority(authority, 80).ok_or("Bad Request")?;
+        let path = match &rest[end..] {
+            "" => "/".to_string(),
+            p if p.starts_with('/') => p.to_string(),
+            p => format!("/{p}"),
+        };
+        Ok(Request::Http {
+            host,
+            port,
+            method,
+            authority,
+            path,
+            version,
+        })
     }
 
-    /// Handle regular HTTP requests
-    async fn handle_http(
-        mut client: TcpStream,
-        first_line: &str,
-        all_headers: &str,
-        policy: &Policy,
+    /// The request head to send on: the path instead of the URL, `Host` set
+    /// to the URL's (the destination that was checked, whatever the client
+    /// put there), hop-by-hop headers dropped, and `Connection: close`. One
+    /// request per connection: the server closes after answering it, so
+    /// anything else the client sends on the same connection isn't served,
+    /// and nothing needs the proxy to understand request bodies.
+    fn forwarded_head(
+        head: &str,
+        method: &str,
+        path: &str,
+        version: &str,
+        authority: &str,
+    ) -> String {
+        let headers: Vec<&str> = head
+            .lines()
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let name = |line: &str| line.split(':').next().unwrap_or("").trim().to_lowercase();
+        let named_by_connection: HashSet<String> = headers
+            .iter()
+            .filter(|line| name(line) == "connection")
+            .flat_map(|line| {
+                line.split_once(':')
+                    .map(|(_, v)| v)
+                    .unwrap_or("")
+                    .split(',')
+            })
+            .map(|token| token.trim().to_lowercase())
+            .collect();
+
+        let mut out = format!("{method} {path} {version}\r\nHost: {authority}\r\n");
+        let mut keep = true;
+        for line in headers {
+            // A line starting with whitespace continues the previous header.
+            if !line.starts_with([' ', '\t']) {
+                let name = name(line);
+                keep = !HOP_BY_HOP.contains(&name.as_str()) && !named_by_connection.contains(&name);
+            }
+            if keep {
+                out.push_str(line);
+                out.push_str("\r\n");
+            }
+        }
+        out.push_str("Connection: close\r\n\r\n");
+        out
+    }
+
+    /// Sends `early` to `remote`, then copies both ways. When one side is
+    /// done sending, the other is told (its write half is shut down) and the
+    /// other direction carries on: a client may finish its request and still
+    /// be waiting for the answer. Ends when both are done, either fails, or
+    /// nothing has gone either way for `idle`.
+    async fn relay(
+        client: TcpStream,
+        remote: TcpStream,
+        early: &[u8],
+        idle: Duration,
     ) -> std::io::Result<()> {
-        // Parse: GET http://host/path HTTP/1.1
-        let parts: Vec<&str> = first_line.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Self::send_error(&mut client, 400, "Bad Request").await;
-        }
+        let (client_read, client_write) = client.into_split();
+        let (remote_read, mut remote_write) = remote.into_split();
+        remote_write.write_all(early).await?;
 
-        let url = parts[1];
-
-        // Extract host from URL or Host header
-        let host = if url.starts_with("http://") {
-            url.trim_start_matches("http://")
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .split(':')
-                .next()
-                .unwrap_or("")
-        } else {
-            // Relative URL - need to read Host header
-            // For simplicity, reject requests without absolute URL
-            return Self::send_error(&mut client, 400, "Absolute URL required").await;
+        let activity = Notify::new();
+        let pipe = |mut from: tokio::net::tcp::OwnedReadHalf,
+                    mut to: tokio::net::tcp::OwnedWriteHalf| {
+            let activity = &activity;
+            async move {
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    let n = from.read(&mut buf).await?;
+                    if n == 0 {
+                        return to.shutdown().await;
+                    }
+                    to.write_all(&buf[..n]).await?;
+                    activity.notify_one();
+                }
+            }
         };
-
-        tracing::debug!("HTTP request to {}", host);
-
-        if !Self::is_allowed(host, &policy.domains) {
-            tracing::info!("Blocked HTTP to {} (not in whitelist)", host);
-            return Self::send_error(&mut client, 403, "Domain not in whitelist").await;
-        }
-
-        // Parse target host and port from URL
-        let host_port = url
-            .trim_start_matches("http://")
-            .split('/')
-            .next()
-            .unwrap_or("");
-        let target_host = host_port.split(':').next().unwrap_or(host_port);
-        let target_port = host_port
-            .split(':')
-            .nth(1)
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(80);
-
-        // Convert absolute URL to relative path for the origin server
-        // "GET http://example.com/path HTTP/1.1" -> "GET /path HTTP/1.1"
-        let path = url
-            .trim_start_matches("http://")
-            .find('/')
-            .map(|i| &url.trim_start_matches("http://")[i..])
-            .unwrap_or("/");
-        let method = parts[0];
-        let version = parts.get(2).unwrap_or(&"HTTP/1.1");
-        let rewritten_first_line = format!("{} {} {}\r\n", method, path, version);
-
-        // Build headers with rewritten first line
-        let mut headers = rewritten_first_line;
-        // Skip the first line from all_headers, append the rest
-        if let Some(rest) = all_headers.find("\r\n").or(all_headers.find("\n")) {
-            headers.push_str(
-                &all_headers[rest
-                    + if all_headers[rest..].starts_with("\r\n") {
-                        2
-                    } else {
-                        1
-                    }..],
-            );
-        }
-
-        let mut remote = match Self::connect(target_host, target_port, policy).await {
-            Ok(r) => r,
-            Err(e) => return Self::refuse(&mut client, target_host, target_port, e).await,
+        let both = async {
+            tokio::try_join!(
+                pipe(client_read, remote_write),
+                pipe(remote_read, client_write)
+            )
         };
-
-        // Forward request
-        remote.write_all(headers.as_bytes()).await?;
-
-        // For HTTP: wait for response to complete (server closes connection)
-        // Unlike CONNECT tunnels, HTTP is request-response, not bidirectional
-        let transfer_result =
-            tokio::time::timeout(TRANSFER_TIMEOUT, tokio::io::copy(&mut remote, &mut client)).await;
-
-        match transfer_result {
-            Ok(Ok(bytes)) => {
-                tracing::debug!("HTTP response transferred {} bytes", bytes);
-            }
-            Ok(Err(e)) => {
-                tracing::debug!("HTTP transfer error: {}", e);
-            }
-            Err(_) => {
-                tracing::debug!("HTTP transfer timeout");
+        let watchdog = async {
+            while tokio::time::timeout(idle, activity.notified())
+                .await
+                .is_ok()
+            {}
+        };
+        tokio::select! {
+            result = both => result.map(|_| ()),
+            _ = watchdog => {
+                tracing::debug!("Closing a connection idle for {idle:?}");
+                Ok(())
             }
         }
-
-        Ok(())
     }
 
     /// Resolves `host` once and connects to one of the addresses the policy
@@ -441,31 +513,19 @@ impl HttpProxy {
         }
     }
 
-    /// Check if domain is in whitelist
+    /// Whether `host` (lowercased, no port or brackets) is on the allowlist.
     fn is_allowed(host: &str, allowed: &HashSet<String>) -> bool {
-        // Remove port if present
-        let domain = host.split(':').next().unwrap_or(host).to_lowercase();
-
-        // Exact match
-        if allowed.contains(&domain) {
+        if allowed.contains(host) {
             return true;
         }
-
-        // Wildcard match (*.example.com)
-        for pattern in allowed.iter() {
-            // "*.example.com": example.com itself, or anything ending in
-            // ".example.com". Keeping the dot is what stops it matching
-            // "evilexample.com".
-            if let Some(dot_base) = pattern.strip_prefix('*') {
-                if dot_base.starts_with('.')
-                    && (domain.ends_with(dot_base) || domain == dot_base[1..])
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
+        // "*.example.com": example.com itself, or anything ending in
+        // ".example.com". Keeping the dot is what stops it matching
+        // "evilexample.com".
+        allowed.iter().any(|pattern| {
+            pattern.strip_prefix('*').is_some_and(|dot_base| {
+                dot_base.starts_with('.') && (host.ends_with(dot_base) || host == &dot_base[1..])
+            })
+        })
     }
 
     async fn send_error(client: &mut TcpStream, code: u16, msg: &str) -> std::io::Result<()> {
@@ -480,6 +540,41 @@ impl HttpProxy {
         client.write_all(response.as_bytes()).await?;
         Ok(())
     }
+}
+
+/// `host`, `host:port`, `[v6]` or `[v6]:port`, as the lowercased host
+/// without brackets and the port (`default` if none). `None` for anything
+/// else, including `user@host`: userinfo has no business in a proxy request,
+/// and is an old way to make a URL look like it goes somewhere it doesn't.
+fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
+    if authority.contains('@') {
+        return None;
+    }
+    let (host, port) = match authority.strip_prefix('[') {
+        Some(rest) => {
+            let (host, after) = rest.split_once(']')?;
+            let port = match after {
+                "" => None,
+                p => Some(p.strip_prefix(':')?),
+            };
+            (host, port)
+        }
+        None => match authority.rsplit_once(':') {
+            // More than one colon without brackets: a bare IPv6 address,
+            // whose last group can't be told from a port.
+            Some((host, _)) if host.contains(':') => return None,
+            Some((host, port)) => (host, Some(port)),
+            None => (authority, None),
+        },
+    };
+    if host.is_empty() {
+        return None;
+    }
+    let port = match port {
+        None => default,
+        Some(p) => p.parse().ok().filter(|&p| p != 0)?,
+    };
+    Some((host.to_ascii_lowercase(), port))
 }
 
 /// Whether `ip` is on the public internet: not loopback, private, link-local
@@ -530,35 +625,96 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::oneshot;
+
+    fn allowed(domains: &[&str]) -> HashSet<String> {
+        domains.iter().map(|d| d.to_string()).collect()
+    }
 
     #[test]
     fn test_is_allowed_exact() {
-        let allowed: HashSet<String> = vec!["example.com".to_string()].into_iter().collect();
-
+        let allowed = allowed(&["example.com"]);
         assert!(HttpProxy::is_allowed("example.com", &allowed));
-        assert!(HttpProxy::is_allowed("example.com:443", &allowed));
         assert!(!HttpProxy::is_allowed("other.com", &allowed));
     }
 
     #[test]
     fn test_is_allowed_wildcard() {
-        let allowed: HashSet<String> = vec!["*.example.com".to_string()].into_iter().collect();
-
+        let allowed = allowed(&["*.example.com"]);
         assert!(HttpProxy::is_allowed("sub.example.com", &allowed));
         assert!(HttpProxy::is_allowed("deep.sub.example.com", &allowed));
         assert!(HttpProxy::is_allowed("example.com", &allowed)); // Base domain also matches
         assert!(!HttpProxy::is_allowed("other.com", &allowed));
         // Only on a label boundary.
         assert!(!HttpProxy::is_allowed("evilexample.com", &allowed));
-        assert!(!HttpProxy::is_allowed("evilexample.com:443", &allowed));
         assert!(!HttpProxy::is_allowed("example.com.evil.com", &allowed));
     }
 
     #[test]
-    fn test_whitelist_entries_are_case_insensitive() {
-        let proxy = HttpProxy::new(vec!["Mixed.Org".into(), "*.Upper.COM".into()], 0);
+    fn test_whitelist_entries_are_normalized() {
+        let proxy = HttpProxy::new(
+            vec!["Mixed.Org".into(), "*.Upper.COM".into(), "[::1]".into()],
+            0,
+        );
         assert!(HttpProxy::is_allowed("mixed.org", &proxy.policy.domains));
         assert!(HttpProxy::is_allowed("a.upper.com", &proxy.policy.domains));
+        assert!(HttpProxy::is_allowed("::1", &proxy.policy.domains));
+    }
+
+    #[test]
+    fn test_parse_authority() {
+        let parsed = |a| parse_authority(a, 80);
+        assert_eq!(parsed("Example.com"), Some(("example.com".into(), 80)));
+        assert_eq!(
+            parsed("example.com:8080"),
+            Some(("example.com".into(), 8080))
+        );
+        assert_eq!(parsed("[::1]"), Some(("::1".into(), 80)));
+        assert_eq!(parsed("[::1]:443"), Some(("::1".into(), 443)));
+        for bad in [
+            "",
+            ":80",
+            "::1",
+            "[::1",
+            "[::1]x",
+            "a:b",
+            "a:0",
+            "a:99999",
+            "user@a.com",
+            "a.com:1@b.com",
+        ] {
+            assert_eq!(parsed(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_forwarded_head() {
+        let head = "POST http://a.com:81/x?q=1 HTTP/1.1\r\n\
+                    Host: evil.example\r\n\
+                    Connection: keep-alive, X-Secret\r\n\
+                    Proxy-Authorization: Basic abc\r\n\
+                    X-Secret: 1\r\n\
+                    Keep-Alive: timeout=5\r\n\
+                    Content-Length: 5\r\n\
+                    X-Folded: a\r\n \
+                    b\r\n\
+                    \r\n";
+        let Ok(Request::Http {
+            method,
+            authority,
+            path,
+            version,
+            ..
+        }) = HttpProxy::parse_request(head)
+        else {
+            panic!("not parsed as HTTP");
+        };
+        assert_eq!(
+            HttpProxy::forwarded_head(head, method, &path, version, authority),
+            "POST /x?q=1 HTTP/1.1\r\nHost: a.com:81\r\nContent-Length: 5\r\n\
+             X-Folded: a\r\n b\r\nConnection: close\r\n\r\n"
+        );
     }
 
     #[tokio::test]
@@ -577,12 +733,229 @@ mod tests {
         assert_eq!(HttpProxy::read_headers(&mut &many[..]).await.unwrap(), None);
     }
 
-    #[test]
-    fn test_is_allowed_case_insensitive() {
-        let allowed: HashSet<String> = vec!["example.com".to_string()].into_iter().collect();
+    /// A proxy for `domains`, private destinations allowed (the test servers
+    /// are on loopback). Stops when the sender is dropped.
+    async fn proxy(
+        domains: &[&str],
+        allow_private: bool,
+        idle_timeout: Duration,
+    ) -> (SocketAddr, Arc<Blocked>, oneshot::Sender<()>) {
+        let policy = Arc::new(Policy {
+            domains: allowed(domains),
+            allow_private,
+            idle_timeout,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let blocked = Arc::new(Blocked::default());
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let stop = async move {
+            let _ = stop_rx.await;
+        };
+        tokio::spawn(HttpProxy::serve(
+            listener,
+            policy,
+            Arc::clone(&blocked),
+            stop,
+        ));
+        (addr, blocked, stop_tx)
+    }
 
-        assert!(HttpProxy::is_allowed("EXAMPLE.COM", &allowed));
-        assert!(HttpProxy::is_allowed("Example.Com", &allowed));
+    /// A server on loopback that hands each connection to `handle`.
+    async fn upstream<F, Fut>(handle: F) -> u16
+    where
+        F: Fn(TcpStream) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(handle(stream));
+            }
+        });
+        port
+    }
+
+    /// Everything up to EOF, or what arrived within 5s.
+    async fn read_all(stream: &mut TcpStream) -> String {
+        let mut out = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut out)).await;
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// Reads up to the end of a response head.
+    async fn read_head(stream: &mut TcpStream) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0u8];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            head.push(byte[0]);
+        }
+        String::from_utf8(head).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_http_request_body_reaches_the_server() {
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let port = upstream(move |mut s| {
+            let seen_tx = seen_tx.clone();
+            async move {
+                // The request until the client's end of it (EOF, since the
+                // proxy relays its half-close), then an answer.
+                let request = read_all(&mut s).await;
+                let _ = seen_tx.send(request);
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        })
+        .await;
+        let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
+
+        // Content-Length and chunked, each sent in one write with its
+        // headers, the way clients do.
+        for body in [
+            "Content-Length: 5\r\n\r\nHELLO",
+            "Transfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n",
+        ] {
+            let mut client = TcpStream::connect(proxy).await.unwrap();
+            let request = format!(
+                "POST http://localhost:{port}/up HTTP/1.1\r\nHost: evil.example\r\n\
+                 Connection: keep-alive\r\n{body}"
+            );
+            client.write_all(request.as_bytes()).await.unwrap();
+            client.shutdown().await.unwrap();
+
+            let seen = seen_rx.recv().await.unwrap();
+            let (seen_head, seen_body) = seen.split_once("\r\n\r\n").unwrap();
+            assert!(seen_head.starts_with("POST /up HTTP/1.1\r\n"), "{seen}");
+            assert!(
+                seen_head.contains(&format!("\r\nHost: localhost:{port}\r\n")),
+                "{seen}"
+            );
+            assert!(seen_head.contains("\r\nConnection: close"), "{seen}");
+            assert!(!seen_head.contains("evil.example") && !seen_head.contains("keep-alive"));
+            assert_eq!(seen_body, body.split_once("\r\n\r\n").unwrap().1);
+            assert!(read_all(&mut client).await.ends_with("\r\n\r\nok"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tunnel_keeps_early_data_and_survives_half_close() {
+        let port = upstream(|mut s| async move {
+            let got = read_all(&mut s).await;
+            let _ = s.write_all(format!("got:{got}").as_bytes()).await;
+        })
+        .await;
+        let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
+
+        let mut client = TcpStream::connect(proxy).await.unwrap();
+        // CONNECT and the first bytes for the destination in one write.
+        let request = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\nEARLY");
+        client.write_all(request.as_bytes()).await.unwrap();
+        assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
+        client.write_all(b"+LATER").await.unwrap();
+        // Done sending; the answer still has to come back.
+        client.shutdown().await.unwrap();
+        assert_eq!(read_all(&mut client).await, "got:EARLY+LATER");
+    }
+
+    #[tokio::test]
+    async fn test_idle_timeout_spares_active_connections() {
+        let idle = Duration::from_millis(300);
+        let trickle = upstream(|mut s| async move {
+            for _ in 0..10 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if s.write_all(b".").await.is_err() {
+                    return;
+                }
+            }
+        })
+        .await;
+        let silent = upstream(|s| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(s);
+        })
+        .await;
+        let (proxy, _, _stop) = proxy(&["localhost"], true, idle).await;
+
+        let mut active = TcpStream::connect(proxy).await.unwrap();
+        active
+            .write_all(format!("CONNECT localhost:{trickle} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        read_head(&mut active).await;
+        // 1s in total, well past `idle`, but never idle that long.
+        assert_eq!(read_all(&mut active).await, "..........");
+
+        let mut quiet = TcpStream::connect(proxy).await.unwrap();
+        quiet
+            .write_all(format!("CONNECT localhost:{silent} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        read_head(&mut quiet).await;
+        let start = std::time::Instant::now();
+        assert_eq!(read_all(&mut quiet).await, "");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stopping_cuts_open_connections() {
+        let silent = upstream(|s| async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(s);
+        })
+        .await;
+        let (proxy, _, stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
+
+        let mut client = TcpStream::connect(proxy).await.unwrap();
+        client
+            .write_all(format!("CONNECT localhost:{silent} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        read_head(&mut client).await;
+        drop(stop);
+        let start = std::time::Instant::now();
+        assert_eq!(read_all(&mut client).await, "");
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn test_refusals_and_blocked_hosts() {
+        let port = upstream(|_| async {}).await;
+        // localhost is allowed by name, but not to loopback.
+        let (proxy, blocked, _stop) = proxy(&["localhost"], false, IDLE_TIMEOUT).await;
+
+        for (request, status) in [
+            (
+                "CONNECT evil.example:443 HTTP/1.1\r\n\r\n".to_string(),
+                "403",
+            ),
+            (format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n"), "403"),
+            (
+                format!("GET http://user@localhost:{port}/ HTTP/1.1\r\n\r\n"),
+                "400",
+            ),
+            (
+                "GET /relative HTTP/1.1\r\nHost: localhost\r\n\r\n".to_string(),
+                "400",
+            ),
+            ("CONNECT ::1:443 HTTP/1.1\r\n\r\n".to_string(), "400"),
+        ] {
+            let mut client = TcpStream::connect(proxy).await.unwrap();
+            client.write_all(request.as_bytes()).await.unwrap();
+            let response = read_all(&mut client).await;
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "{request}: {response}"
+            );
+        }
+        assert_eq!(blocked.hosts(), vec!["evil.example", "localhost"]);
     }
 
     #[test]

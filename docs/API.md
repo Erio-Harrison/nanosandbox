@@ -250,6 +250,21 @@ network. `allow_private_destinations()` allows it, for an internal API. The
 proxy resolves each name once and connects to the address it checked, so
 the name can't resolve to something else in between (DNS rebinding).
 
+How requests are relayed:
+
+- Request bodies, uploads and anything the client sends after `CONNECT`
+  reach the server; a client that finishes sending still gets its answer.
+- A connection is cut after 300 s with nothing sent either way. A transfer
+  that keeps going has no time limit (the run's `wall_time_limit` still
+  applies).
+- Plain HTTP is one request per connection: the proxy sends
+  `Connection: close`, and sets `Host` to the URL's host, whatever the
+  client sent. HTTPS isn't decrypted, so what a client says inside TLS (its
+  SNI, its `Host`) isn't checked against the `CONNECT` host.
+- Each run has a proxy listener of its own, closed with the run along with
+  its open connections. `ExecutionResult::blocked_hosts` lists the hosts it
+  refused that run.
+
 Windows only supports `host_network()`.
 
 ### Environment
@@ -304,6 +319,7 @@ pub struct ExecutionResult {
     pub signal: Option<i32>,
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
+    pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
 }
 ```
 
