@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 
 mod run_marker;
 use run_marker::RunMarker;
+mod watchdog;
+use watchdog::Watchdog;
 
 // std's spawn error carries only errno, so the child reports which setrlimit
 // failed through a side pipe as [limit, errno].
@@ -563,6 +565,14 @@ impl PlatformExecutor for MacOSExecutor {
                 return Err(SandboxError::ExecutionFailed(msg));
             }
         };
+
+        // Stands in for PR_SET_PDEATHSIG, which macOS doesn't have (see
+        // watchdog.rs). Kept alive for the rest of this call via Drop.
+        let pgid = child.id() as i32;
+        let _watchdog = Watchdog::spawn(pgid).inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
 
         // stdin is written inside wait_with_timeout's own loop, interleaved
         // with draining stdout/stderr -- not all upfront here. A program

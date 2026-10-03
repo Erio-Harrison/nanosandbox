@@ -304,7 +304,8 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
   the thread that started it, and as init of its PID namespace, takes the
   rest of the sandbox with it. Before, a sandbox outlived a crashed or killed
   host process, with nothing left to enforce its time limit. (macOS has no
-  such mechanism; a sandbox there still outlives its host process.)
+  such mechanism; it uses a watchdog process instead -- see
+  [platform-macos.md](platform-macos.md#process-lifetime).)
 - Signals the host process ignores (Rust ignores `SIGPIPE`) and its signal
   mask are reset to the defaults before `exec`.
 - The command is looked up in `$PATH` by the child, after entering its

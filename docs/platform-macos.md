@@ -149,6 +149,17 @@ fn generate_profile(&self, config: &SandboxConfig) -> String {
 }
 ```
 
+## Process Lifetime
+
+macOS has nothing like Linux's `PR_SET_PDEATHSIG` (see
+[platform-linux.md](platform-linux.md)), so a sandbox used to keep running
+after a crashed or killed host process, with nothing left to enforce its
+time limit. A small watchdog process stands in: it holds the read end of a
+pipe whose write end only the host process has, and kills the run's process
+group the moment that pipe closes -- whether the host closed it on an
+ordinary run end or died and took it down with it. See
+`src/platform/macos/watchdog.rs`.
+
 ## Feature Limitations
 
 ### Compared to Linux

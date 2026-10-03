@@ -252,12 +252,14 @@ fn test_escaped_background_process_killed() {
 }
 
 /// Test: if the process running the sandbox dies, the sandbox does too. It
-/// used to keep running, with nothing left to enforce its time limit.
+/// used to keep running, with nothing left to enforce its time limit (on
+/// Linux, PR_SET_PDEATHSIG; on macOS, a watchdog process -- see
+/// src/platform/macos/watchdog.rs).
 ///
 /// Runs this test binary again as the host process, which the test then
 /// kills (it only kills that one child of its own, by its handle).
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn test_sandbox_dies_with_its_host_process() {
     const MARKER: &str = "31.4159";
     if std::env::var_os("NSB_PDEATH_HOST").is_some() {
