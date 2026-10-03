@@ -326,6 +326,20 @@ impl HttpProxy {
 
     /// The request line's target, or why it can't be served.
     fn parse_request(head: &str) -> Result<Request<'_>, &'static str> {
+        // Obsolete line folding (RFC 7230 §3.2.4): a continuation line is
+        // part of whatever header preceded it, but `forwarded_head` strips
+        // hop-by-hop headers line by line and would let a folded line
+        // through under a kept header's name -- smuggling a client-chosen
+        // Host or Proxy-Authorization past the strip. Refused outright,
+        // the same as this parser already refuses anything else it won't
+        // fully understand; no real client sends this today.
+        if head
+            .lines()
+            .skip(1)
+            .any(|line| line.starts_with([' ', '\t']))
+        {
+            return Err("Line folding not supported");
+        }
         let mut parts = head.lines().next().unwrap_or("").split_whitespace();
         let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
             return Err("Bad Request");
@@ -697,8 +711,7 @@ mod tests {
                     X-Secret: 1\r\n\
                     Keep-Alive: timeout=5\r\n\
                     Content-Length: 5\r\n\
-                    X-Folded: a\r\n \
-                    b\r\n\
+                    X-Kept: a\r\n\
                     \r\n";
         let Ok(Request::Http {
             method,
@@ -713,8 +726,27 @@ mod tests {
         assert_eq!(
             HttpProxy::forwarded_head(head, method, &path, version, authority),
             "POST /x?q=1 HTTP/1.1\r\nHost: a.com:81\r\nContent-Length: 5\r\n\
-             X-Folded: a\r\n b\r\nConnection: close\r\n\r\n"
+             X-Kept: a\r\nConnection: close\r\n\r\n"
         );
+    }
+
+    /// A continuation line inherits whatever a plain line-by-line stripper
+    /// decided for the header it follows, with no look at its own content
+    /// -- so a header that's supposed to be stripped could ride through
+    /// folded under one that's kept. Refusing any folded request instead
+    /// closes that off; verified it's refused for both a stripped and a
+    /// kept header being the one folded under.
+    #[test]
+    fn test_line_folding_refused() {
+        for head in [
+            "GET http://a.com/ HTTP/1.1\r\nX-Kept: a\r\n Proxy-Authorization: x\r\n\r\n",
+            "GET http://a.com/ HTTP/1.1\r\nX-Kept: a\r\n Host: evil.example\r\n\r\n",
+        ] {
+            assert!(matches!(
+                HttpProxy::parse_request(head),
+                Err("Line folding not supported")
+            ));
+        }
     }
 
     #[tokio::test]
