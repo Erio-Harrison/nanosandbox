@@ -221,8 +221,12 @@ fn test_large_output_fast_and_capped() {
             ],
         )
         .unwrap();
+    // Generous margin: this is checking that capped output doesn't create
+    // backpressure that stalls the producer, not a tight perf budget -- a
+    // real regression here would be orders of magnitude slower, not just a
+    // loaded CI runner's variance.
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(10),
+        start.elapsed() < std::time::Duration::from_secs(25),
         "{:?}",
         start.elapsed()
     );
