@@ -12,9 +12,8 @@ use crate::builder::{NetworkMode, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::{ProxiedNetwork, SANDBOX_PROXY_PORT};
 use crate::platform::private_tmp::PrivateTmp;
-use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
+use crate::platform::PlatformExecutor;
 use crate::result::ExecutionResult;
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::{AsRawFd, RawFd};
@@ -22,16 +21,20 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 mod cgroup;
+mod child;
 mod landlock;
 mod mount;
 mod namespace;
+mod prepare;
 mod proxy_link;
 mod seccomp;
 mod wait;
 
 pub use cgroup::CgroupManager;
+use child::ChildSetup;
 use mount::{check_mounts, needed_cgroup_controllers, MountPlan};
 pub use namespace::UserNamespace;
+use prepare::{prepare_cgroup, prepare_env, prepare_rlimits, ExecBuffers, Pipes};
 use proxy_link::{check_network, ProxyLink};
 use seccomp::SyscallFilter;
 use wait::{wait_with_timeout, Waited};
@@ -119,61 +122,25 @@ impl PlatformExecutor for LinuxExecutor {
         stdin: Option<&[u8]>,
         proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
-        use nix::fcntl::OFlag;
         use nix::sched::{clone, CloneFlags};
         use nix::sys::signal::Signal;
-        use nix::unistd::pipe2;
-
-        // Close-on-exec, so no sandboxed program inherits them. Without it,
-        // a run on another thread that clone()s while these are open hands
-        // them to its own program: it could read this run's stdin, write
-        // into its output, and hold its stdin open so it never sees EOF.
-        // dup2() onto 0/1/2 in our own child clears the flag on those.
-        let pipe = || pipe2(OFlag::O_CLOEXEC);
 
         const STACK_SIZE: usize = 1024 * 1024;
 
         let start = Instant::now();
 
-        // Pipes for stdout, stderr, stdin and the ready signal. Owned, so
-        // that any early return closes them; they used to be raw fds that
-        // every error path leaked. The child gets plain copies of the fd
-        // numbers (below): it has its own fd table, and closes its own.
-        let pipe = |what: &str| {
-            pipe().map_err(|e| SandboxError::Internal(format!("create pipe for child {what}: {e}")))
-        };
-        let (stdout_read_fd, stdout_write_fd) = pipe("stdout")?;
-        let (stderr_read_fd, stderr_write_fd) = pipe("stderr")?;
-        let (ready_read_fd, ready_write_fd) = pipe("sync")?;
-        let (stdin_read_fd, stdin_write_fd) = match stdin {
-            Some(_) => {
-                let (r, w) = pipe("stdin")?;
-                (Some(r), Some(w))
-            }
-            None => (None, None),
-        };
-        let stdout_read = stdout_read_fd.as_raw_fd();
-        let stdout_write = stdout_write_fd.as_raw_fd();
-        let stderr_read = stderr_read_fd.as_raw_fd();
-        let stderr_write = stderr_write_fd.as_raw_fd();
-        let ready_read = ready_read_fd.as_raw_fd();
-        let ready_write = ready_write_fd.as_raw_fd();
-        let stdin_read = stdin_read_fd.as_ref().map(AsRawFd::as_raw_fd);
-        let stdin_write = stdin_write_fd.as_ref().map(AsRawFd::as_raw_fd);
-
-        // As root, the sandbox runs as nobody (see namespace::runs_as_root),
-        // and a pipe belongs to whoever made it, mode 0600: so it couldn't
-        // reopen its own stdout through /dev/stdout. Give them to nobody.
-        if namespace::runs_as_root() {
-            for fd in [Some(stdout_write), Some(stderr_write), stdin_read]
-                .into_iter()
-                .flatten()
-            {
-                unsafe {
-                    libc::fchown(fd, namespace::NOBODY, namespace::NOBODY);
-                }
-            }
-        }
+        // Pipes for stdout, stderr, stdin and the ready signal; see
+        // prepare::Pipes. The child gets plain copies of the fd numbers
+        // (below): it has its own fd table, and closes its own.
+        let pipes = Pipes::create(stdin)?;
+        let stdout_read = pipes.stdout_read_fd.as_raw_fd();
+        let stdout_write = pipes.stdout_write_fd.as_raw_fd();
+        let stderr_read = pipes.stderr_read_fd.as_raw_fd();
+        let stderr_write = pipes.stderr_write_fd.as_raw_fd();
+        let ready_read = pipes.ready_read_fd.as_raw_fd();
+        let ready_write = pipes.ready_write_fd.as_raw_fd();
+        let stdin_read = pipes.stdin_read_fd.as_ref().map(AsRawFd::as_raw_fd);
+        let stdin_write = pipes.stdin_write_fd.as_ref().map(AsRawFd::as_raw_fd);
 
         // Build clone flags
         let mut clone_flags = CloneFlags::CLONE_NEWUSER
@@ -195,32 +162,10 @@ impl PlatformExecutor for LinuxExecutor {
             _ => None,
         };
 
-        // Create and configure the cgroup leaf *before* clone(), so a failure
-        // here (rootless with no delegated subtree, a missing controller...)
-        // never leaves a half-started child stuck on the ready pipe. Adding
-        // the process to it is the only step that needs child_pid, so it's
-        // the only cgroup step that still happens after clone() below.
-        let cgroup_controllers = needed_cgroup_controllers(config);
-        // cpu_time_limit alone doesn't need a controller enabled: cpu.stat's
-        // usage_usec, read below, is populated regardless (confirmed for
-        // real against a cgroup with none enabled) -- it just needs the
-        // cgroup to exist.
-        let cgroup = if !cgroup_controllers.is_empty() || config.cpu_time_limit.is_some() {
-            let leaf_id = cgroup::next_leaf_id();
-            let cg = CgroupManager::create(&leaf_id, &cgroup_controllers)?;
-            if let Some(memory) = config.memory_limit {
-                cg.set_memory_limit(memory)?;
-            }
-            if let Some(cpu) = config.cpu_limit {
-                cg.set_cpu_limit(cpu)?;
-            }
-            if let Some(pids) = config.max_pids {
-                cg.set_pids_limit(pids)?;
-            }
-            Some(cg)
-        } else {
-            None
-        };
+        // See prepare::prepare_cgroup: created and configured *before*
+        // clone(), so a failure there never leaves a half-started child
+        // stuck on the ready pipe.
+        let cgroup = prepare_cgroup(config)?;
 
         // Prepare command arguments. A NUL byte in one is an error: it used
         // to panic here.
@@ -231,15 +176,6 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Allocate stack for child
         let mut stack = vec![0u8; STACK_SIZE];
-
-        // clear_env(false): start from this process's environment. It used
-        // to be ignored here, always starting empty.
-        let mut env: HashMap<String, String> = if config.clear_env {
-            HashMap::new()
-        } else {
-            std::env::vars().collect()
-        };
-        env.extend(config.env.clone());
 
         // private_tmp is a tmpfs at /tmp (see MountPlan), or where AppArmor
         // denies mounting, a directory for this run, removed when this
@@ -252,65 +188,28 @@ impl PlatformExecutor for LinuxExecutor {
             .map(PrivateTmp::create)
             .transpose()
             .map_err(|e| SandboxError::Internal(format!("create private /tmp: {e}")))?;
-        if config.private_tmp.is_some() {
-            let dir = private_tmp
-                .as_ref()
-                .map_or(Path::new("/tmp"), PrivateTmp::path);
-            env.entry("TMPDIR".to_string())
-                .or_insert_with(|| dir.to_string_lossy().into_owned());
-        }
 
-        // Add proxy environment variables if using proxied network
-        if proxy_link.is_some() {
-            env.extend(ProxiedNetwork::env_vars(SANDBOX_PROXY_PORT));
-        }
-        if !env.contains_key("PATH") {
-            env.insert(
-                "PATH".to_string(),
-                "/usr/local/bin:/usr/bin:/bin".to_string(),
-            );
-        }
+        // See prepare::prepare_env: clear_env, TMPDIR, the proxy's env vars,
+        // a default PATH.
+        let env = prepare_env(
+            config,
+            proxy_link.is_some(),
+            private_tmp.as_ref().map(PrivateTmp::path),
+        );
 
-        // Built here, before clone(), and just used as-is in the child --
-        // not with std::env::set_var/remove_var there. clone() copies this
-        // whole (multi-threaded) process's memory, but only the calling
-        // thread continues in the child; if another thread here happened to
-        // be inside std::env's internal lock at that exact instant, the
-        // child inherits it frozen "locked", and its own env mutation later
-        // waits forever on a thread that doesn't exist in this process.
-        // Confirmed for real under enough concurrent sandbox creation: the
-        // child hangs there, or execs with a stale/corrupted environment.
-        // A NUL byte in a variable is an error too; it used to be dropped.
-        let envp_cstr: Vec<CString> = env
-            .iter()
-            .map(|(k, v)| CString::new(format!("{k}={v}")))
-            .collect::<std::result::Result<_, _>>()?;
-        let exec_paths = exec_candidates(cmd, env.get("PATH").map(String::as_str).unwrap_or(""))?;
-
-        // execve's own nix wrapper builds a NUL-terminated pointer array
-        // from these each time it's called -- an allocation that, unlike
-        // the ones above, sits on the ordinary success path too, not just
-        // an error branch. Building it here instead, once, means the
-        // child's own execve call is just two pointer derefs and a raw
-        // syscall, no allocation at all. args_cstr/envp_cstr are moved into
-        // the closure alongside these so the strings they point into stay
-        // alive for the call.
-        let mut args_ptrs: Vec<*const libc::c_char> =
-            args_cstr.iter().map(|c| c.as_ptr()).collect();
-        args_ptrs.push(std::ptr::null());
-        let mut envp_ptrs: Vec<*const libc::c_char> =
-            envp_cstr.iter().map(|c| c.as_ptr()).collect();
-        envp_ptrs.push(std::ptr::null());
+        // See prepare::ExecBuffers for why these are built here, before
+        // clone(), and just used as-is in the child.
+        let exec_buffers = ExecBuffers::build(cmd, cmd_cstr, args_cstr, &env)?;
 
         // A pre-built CString, used with raw stat()/chdir() in the child
         // instead of Path::exists()/std::env::set_current_dir() -- both
         // allocate internally (building their own CString from the path),
         // and any allocation in the child risks the same frozen-malloc-lock
-        // hang as the std::env case above (see the comment on envp_cstr):
-        // clone() is a raw syscall here, not libc's fork(), so it doesn't
-        // get glibc's pthread_atfork() malloc-lock protection either.
-        // Confirmed for real via gdb: a child stuck in malloc, called from
-        // eprintln!, itself called from this closure after clone().
+        // hang as ExecBuffers's own envp_cstr (see prepare.rs): clone() is a
+        // raw syscall here, not libc's fork(), so it doesn't get glibc's
+        // pthread_atfork() malloc-lock protection either. Confirmed for real
+        // via gdb: a child stuck in malloc, called from eprintln!, itself
+        // called from child.rs after clone().
         let working_dir_cstr = CString::new(config.working_dir.as_os_str().as_bytes())?;
         let hostname = config.hostname.clone();
         // Where AppArmor denies mounting and sethostname in the sandbox's
@@ -332,33 +231,10 @@ impl PlatformExecutor for LinuxExecutor {
             Some(MountPlan::new(config, false)?)
         };
 
-        // Applied with raw setrlimit() in the child; built here for the same
-        // no-allocation-after-clone() reason as everything above. These used
-        // to be silently ignored on Linux -- confirmed for real: `ulimit -n`
-        // reported 1024 under max_open_files(20), and cpu_time_limit (the
-        // code_judge preset's main limit) wasn't applied at all.
-        let mut rlimits = Vec::new();
-        if let Some(n) = config.max_open_files {
-            rlimits.push((
-                libc::RLIMIT_NOFILE,
-                u64::from(n),
-                &b"Failed to apply max_open_files\n"[..],
-            ));
-        }
-        if let Some(size) = config.max_file_size {
-            rlimits.push((
-                libc::RLIMIT_FSIZE,
-                size,
-                &b"Failed to apply max_file_size\n"[..],
-            ));
-        }
-        if let Some(cpu) = config.cpu_time_limit {
-            rlimits.push((
-                libc::RLIMIT_CPU,
-                rlimit_cpu_secs(cpu),
-                &b"Failed to apply cpu_time_limit\n"[..],
-            ));
-        }
+        // See prepare::prepare_rlimits: applied with raw setrlimit() in the
+        // child, built here for the same no-allocation-after-clone() reason
+        // as everything in child.rs.
+        let rlimits = prepare_rlimits(config);
 
         // Create user namespace config
         let user_ns = UserNamespace::new(config.uid, config.gid);
@@ -380,234 +256,35 @@ impl PlatformExecutor for LinuxExecutor {
             None
         };
 
+        // Everything the child needs, built above; see child.rs.
+        let child_setup = ChildSetup {
+            cmd_cstr: exec_buffers.cmd_cstr,
+            args_cstr: exec_buffers.args_cstr,
+            envp_cstr: exec_buffers.envp_cstr,
+            args_ptrs: exec_buffers.args_ptrs,
+            envp_ptrs: exec_buffers.envp_ptrs,
+            exec_paths: exec_buffers.exec_paths,
+            ready_write,
+            ready_read,
+            become_nobody,
+            stdin_read,
+            stdin_write,
+            stdout_write,
+            stderr_write,
+            stdout_read,
+            stderr_read,
+            userns_restricted,
+            hostname,
+            mount_plan,
+            working_dir_cstr,
+            proxy_link_child,
+            write_rules,
+            rlimits,
+            syscall_filter,
+        };
+
         // Child process entry point
-        let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || {
-            // Keeps these alive in the child for as long as args_ptrs/
-            // envp_ptrs (which point into their buffers) are in use below --
-            // an explicit move rather than relying on them happening to
-            // outlive clone() by virtue of where they're declared above.
-            let _args_cstr = &args_cstr;
-            let _envp_cstr = &envp_cstr;
-
-            // Create a new process group with this process as leader
-            // This allows us to kill all children with killpg
-            unsafe {
-                libc::setpgid(0, 0);
-            }
-
-            // Die with the thread that made us. Without it, the sandbox kept
-            // running after the host process died, with nothing left to
-            // enforce its time limit. As init of its PID namespace, it takes
-            // the rest of the sandbox with it. If the parent is already gone,
-            // the ready pipe below reads EOF.
-            unsafe {
-                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-            }
-
-            // clone() gave us a copy of both pipe ends. Close our own copy
-            // of the write end *before* reading: otherwise, if the parent
-            // (the intended writer) dies before signaling us, the pipe
-            // never reaches EOF — our own inherited copy keeps it "open" —
-            // and the read below blocks forever instead of returning.
-            // Confirmed for real: a parent killed between clone() and its
-            // own write+close left the child permanently stuck here, never
-            // reaching exec, reparented to init once the parent was gone.
-            let _ = close_raw(ready_write);
-
-            // Wait for parent to setup UID/GID mappings and place us in our
-            // cgroup. 0 bytes read means EOF — the parent died before
-            // signaling — nothing valid to continue with either way.
-            let mut buf = [0u8; 1];
-            match read_raw(ready_read, &mut buf) {
-                Ok(1) => {}
-                _ => return 1,
-            }
-            let _ = close_raw(ready_read);
-
-            // Now that gid_map is written, which setgroups needs.
-            // Raw syscalls, not libc's setgroups/setresuid/setresgid: in a
-            // multi-threaded process glibc has every thread switch ids
-            // together, and waits for threads that clone() didn't copy.
-            // Confirmed for real: run as root, children hung in a futex.
-            if become_nobody.is_some()
-                && unsafe { libc::syscall(libc::SYS_setgroups, 0, std::ptr::null::<libc::gid_t>()) }
-                    != 0
-            {
-                let _ = write_raw(2, b"Failed to drop supplementary groups\n");
-                return 1;
-            }
-
-            // Setup stdin
-            if let Some(stdin_fd) = stdin_read {
-                unsafe {
-                    libc::dup2(stdin_fd, libc::STDIN_FILENO);
-                }
-                let _ = close_raw(stdin_fd);
-            }
-            // clone() inherited our copy of the write end too. It's
-            // close-on-exec, but close it now anyway: we never write to it.
-            if let Some(fd) = stdin_write {
-                let _ = close_raw(fd);
-            }
-
-            // Redirect stdout/stderr
-            unsafe {
-                libc::dup2(stdout_write, libc::STDOUT_FILENO);
-                libc::dup2(stderr_write, libc::STDERR_FILENO);
-            }
-            let _ = close_raw(stdout_write);
-            let _ = close_raw(stderr_write);
-            let _ = close_raw(stdout_read);
-            let _ = close_raw(stderr_read);
-
-            // Setup hostname (UTS namespace). Error messages below are
-            // fixed strings via raw write(), not eprintln!/format! -- see
-            // the comment on working_dir_cstr above for why. nix's
-            // sethostname passes the &str's bytes and length straight to
-            // libc (no CString), so it doesn't allocate.
-            if !userns_restricted && nix::unistd::sethostname(&hostname).is_err() {
-                let _ = write_raw(2, b"Failed to set hostname\n");
-            }
-
-            // Mount namespace: caller's rootfs/mounts/tmpfs, then a private
-            // /proc, then pivot into the rootfs if any. A failure in what the
-            // caller asked for fails the run; /proc alone is best effort.
-            if let Some(plan) = &mount_plan {
-                let fatal = |step: &str| {
-                    let _ = write_raw(2, b"Mount setup failed: ");
-                    let _ = write_raw(2, step.as_bytes());
-                    let _ = write_raw(2, b"\n");
-                    1
-                };
-                match plan.apply() {
-                    Err(step) if plan.requested() => return fatal(step),
-                    Err(_) => {
-                        let _ = write_raw(2, b"Failed to mount /proc\n");
-                    }
-                    Ok(()) => {
-                        if !plan.mount_proc() {
-                            let _ = write_raw(2, b"Failed to mount /proc\n");
-                        }
-                        if let Err(step) = plan.enter_rootfs() {
-                            return fatal(step);
-                        }
-                    }
-                }
-            }
-
-            // Environment is passed explicitly to execve below, not set via
-            // std::env here -- see the comment where envp_cstr is built.
-
-            // Change working directory, via raw chdir() rather than
-            // std::env::set_current_dir() -- see working_dir_cstr. A failure
-            // fails the run: it used to be ignored, leaving the program in
-            // whatever directory this process happened to be in.
-            if unsafe { libc::chdir(working_dir_cstr.as_ptr()) } != 0 {
-                let _ = write_raw(2, b"Failed to enter working_dir\n");
-                return 1;
-            }
-
-            // Before the rlimits: a small max_open_files could stop these
-            // sockets from opening.
-            if let Some(link) = proxy_link_child {
-                if let Err(step) = link.bind_and_send() {
-                    let _ = write_raw(2, b"Network setup failed: ");
-                    let _ = write_raw(2, step.as_bytes());
-                    let _ = write_raw(2, b"\n");
-                    return 1;
-                }
-            }
-
-            // Before the rlimits too: it opens a file descriptor per path.
-            if let Some(rules) = &write_rules {
-                if let Err(step) = rules.apply() {
-                    let _ = write_raw(2, b"File system rules failed: ");
-                    let _ = write_raw(2, step.as_bytes());
-                    let _ = write_raw(2, b"\n");
-                    return 1;
-                }
-            }
-
-            // After everything that needs root (mounts, the Landlock rules'
-            // paths), before anything of the program's. NO_NEW_PRIVS first:
-            // root is mapped in this namespace (see write_mappings), and a
-            // setuid-root program mustn't make the program root again.
-            if let Some((uid, gid)) = become_nobody {
-                // Raw syscalls: see setgroups above.
-                let switched = unsafe {
-                    libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0
-                        && libc::syscall(libc::SYS_setresgid, gid, gid, gid) == 0
-                        && libc::syscall(libc::SYS_setresuid, uid, uid, uid) == 0
-                };
-                if !switched {
-                    let _ = write_raw(2, b"Failed to switch to the sandbox's ids\n");
-                    return 1;
-                }
-                // Changing ids clears the parent-death signal: set it again.
-                unsafe {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
-                }
-            }
-
-            for (resource, value, failure) in &rlimits {
-                let limit = libc::rlimit {
-                    rlim_cur: *value as libc::rlim_t,
-                    rlim_max: *value as libc::rlim_t,
-                };
-                if unsafe { libc::setrlimit(*resource, &limit) } != 0 {
-                    let _ = write_raw(2, failure);
-                    return 1;
-                }
-            }
-
-            // Last, so nothing above is filtered. A sandbox that asked for the
-            // filter doesn't run without it.
-            if let Some(filter) = &syscall_filter {
-                if !filter.install() {
-                    let _ = write_raw(2, b"Failed to install the syscall filter\n");
-                    return 1;
-                }
-            }
-
-            // Ignored signals stay ignored across exec, and the signal mask
-            // carries over too. This process ignores SIGPIPE (Rust's runtime
-            // does), so programs did too: `yes | head -1` had `yes` fail with
-            // "Broken pipe" instead of just ending. Give them the defaults.
-            unsafe {
-                libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-                let mut none: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut none);
-                libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
-            }
-
-            // Execute, trying each $PATH candidate in turn as execvp does:
-            // on to the next if this one isn't there or isn't executable.
-            // Raw libc calls with everything built ahead of clone() above,
-            // not nix's execve() wrapper -- see args_ptrs.
-            let mut denied = false;
-            for path in &exec_paths {
-                unsafe {
-                    libc::execve(path.as_ptr(), args_ptrs.as_ptr(), envp_ptrs.as_ptr());
-                }
-                match unsafe { *libc::__errno_location() } {
-                    libc::ENOENT | libc::ENOTDIR => {}
-                    libc::EACCES => denied = true,
-                    _ => {
-                        let _ = write_raw(2, b"execve failed\n");
-                        return 126;
-                    }
-                }
-            }
-            let _ = write_raw(2, b"nanosandbox: ");
-            let _ = write_raw(2, cmd_cstr.as_bytes());
-            if denied {
-                let _ = write_raw(2, b": permission denied\n");
-                126
-            } else {
-                let _ = write_raw(2, b": command not found\n");
-                127
-            }
-        });
+        let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || child_setup.run());
 
         // Clone child
         let child_pid = unsafe {
@@ -634,10 +311,10 @@ impl PlatformExecutor for LinuxExecutor {
         // early return here goes through that same cleanup, rather than
         // needing it repeated (and, before, missed) at each fallible step.
         // The child's ends are the child's now.
-        drop(ready_read_fd);
-        drop(stdout_write_fd);
-        drop(stderr_write_fd);
-        drop(stdin_read_fd);
+        drop(pipes.ready_read_fd);
+        drop(pipes.stdout_write_fd);
+        drop(pipes.stderr_write_fd);
+        drop(pipes.stdin_read_fd);
 
         let setup: Result<()> = (|| {
             user_ns.write_mappings(child_pid.as_raw())?;
@@ -654,7 +331,7 @@ impl PlatformExecutor for LinuxExecutor {
             let _ = nix::sys::wait::waitpid(child_pid, None);
             return Err(e);
         }
-        drop(ready_write_fd);
+        drop(pipes.ready_write_fd);
 
         // Serve the proxy on the listener the child just bound inside its
         // network namespace, for exactly as long as this run lasts: kept
@@ -682,7 +359,7 @@ impl PlatformExecutor for LinuxExecutor {
         // reading more stdin in turn; writing all of stdin here first,
         // before anything reads stdout/stderr at all, deadlocks against
         // that (confirmed for real with a 200KB input).
-        let stdin_pipe = match (stdin, stdin_write_fd) {
+        let stdin_pipe = match (stdin, pipes.stdin_write_fd) {
             (Some(data), Some(fd)) => Some((fd, data)),
             _ => None,
         };
@@ -701,7 +378,7 @@ impl PlatformExecutor for LinuxExecutor {
             output_truncated,
         } = wait_with_timeout(
             child_pid,
-            [stdout_read_fd, stderr_read_fd],
+            [pipes.stdout_read_fd, pipes.stderr_read_fd],
             stdin_pipe,
             timeout,
             private_tmp.as_mut(),
