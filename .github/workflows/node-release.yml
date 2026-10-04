@@ -37,6 +37,10 @@ jobs:
           targets: ${{ matrix.target }}
       - if: matrix.cross
         uses: mlugg/setup-zig@v1
+        with:
+          # "latest" (0.17.0) 404s on every mirror including the official
+          # one as of this writing; pin to an established release instead.
+          version: "0.13.0"
       - run: npm install
       - run: npm run build -- --target ${{ matrix.target }} ${{ matrix.cross && '--cross-compile' || '' }}
       - uses: actions/upload-artifact@v4

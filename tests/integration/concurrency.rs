@@ -334,9 +334,24 @@ fn test_no_fds_leak_between_concurrent_runs() {
             .unwrap(),
     );
 
+    // Baseline, run once up front rather than hardcoding ["0","1","2","3"]:
+    // some CI runners hold an ambient fd open in every child regardless of
+    // anything this crate does (observed on GitHub Actions' Linux runner,
+    // consistently the same fd numbers every time), and that must not be
+    // mistaken for cross-talk between concurrent runs.
+    let baseline = sandbox
+        .run_with_input(
+            "sh",
+            &["-c", "cat >/dev/null; ls /proc/self/fd"],
+            Some(b"in"),
+        )
+        .unwrap()
+        .stdout;
+
     let handles: Vec<_> = (0..8)
         .map(|_| {
             let sandbox = Arc::clone(&sandbox);
+            let baseline = baseline.clone();
             thread::spawn(move || {
                 let mut leaks = Vec::new();
                 for _ in 0..15 {
@@ -348,8 +363,7 @@ fn test_no_fds_leak_between_concurrent_runs() {
                             Some(b"in"),
                         )
                         .unwrap();
-                    let fds: Vec<&str> = result.stdout.split_whitespace().collect();
-                    if fds != ["0", "1", "2", "3"] {
+                    if result.stdout != baseline {
                         leaks.push(result.stdout);
                     }
                 }
