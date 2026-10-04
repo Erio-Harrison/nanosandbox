@@ -51,6 +51,12 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # napi prepublish creates a GitHub release after each platform package
+    # publishes; without this, that call 403s, which napi treats as the
+    # whole prepublish step failing and retries -- the retry then 409s for
+    # real since the first attempt's publish had actually gone through.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
