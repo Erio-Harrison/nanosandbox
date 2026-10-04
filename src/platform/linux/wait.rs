@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 
 use super::{read_raw, write_raw, CgroupManager};
 
+/// See the comment at its one use site, in `wait_with_timeout`'s cpu_limit
+/// check.
+const CPU_LIMIT_GRACE_USEC: u64 = 200_000;
+
 /// How the sandboxed process ended, from `wait_with_timeout`.
 pub(super) struct Waited {
     pub(super) stdout: String,
@@ -190,7 +194,18 @@ pub(super) fn wait_with_timeout(
         if let Some((cg, limit_usec)) = cpu_limit {
             if ret == 0 && !killed_by_cpu_limit {
                 let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
-                if used > limit_usec {
+                // A margin past limit_usec, not limit_usec itself: RLIMIT_CPU
+                // (set in the child, enforced by the kernel roughly every
+                // scheduler tick) targets this same threshold, and should
+                // always be what catches a single process that simply used
+                // too much CPU itself -- this check exists for what RLIMIT_CPU
+                // alone can't, many processes each under budget while the
+                // group's total isn't. Without the margin, this poll (every
+                // ~10ms, slower still if this process itself is scheduled
+                // late) can race ahead of the kernel's own enforcement under
+                // load and claim a single-process timeout as its own --
+                // confirmed for real, flaky under concurrent test-suite load.
+                if used > limit_usec + CPU_LIMIT_GRACE_USEC {
                     kill();
                     killed_by_cpu_limit = true;
                 }
