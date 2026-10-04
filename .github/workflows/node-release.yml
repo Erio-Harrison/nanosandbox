@@ -11,6 +11,7 @@ defaults:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -34,6 +35,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - if: matrix.cross
+        uses: mlugg/setup-zig@v1
       - run: npm install
       - run: npm run build -- --target ${{ matrix.target }} ${{ matrix.cross && '--cross-compile' || '' }}
       - uses: actions/upload-artifact@v4

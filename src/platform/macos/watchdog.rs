@@ -173,9 +173,36 @@ mod tests {
     /// fixed count: it's so much cheaper per iteration (no fork at all)
     /// that a fixed count finished before the racer was even a few forks in,
     /// leaving almost nothing to actually overlap with.
+    /// Lists which fds (other than 0/1/2) are open pipes in a freshly spawned
+    /// `/bin/sh`, as a baseline: some CI runners hold an ambient pipe fd open
+    /// in every child regardless of anything this crate does (observed on
+    /// GitHub Actions' macOS runner), and that must not be mistaken for a
+    /// leak of the watchdog's own pipe.
+    fn open_pipe_fds() -> std::collections::HashSet<String> {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            "for f in /dev/fd/*; do \
+               case \"$f\" in */0|*/1|*/2) continue;; esac; \
+               [ -p \"$f\" ] && basename \"$f\"; \
+             done",
+        );
+        // Without a pre_exec, Command::spawn() can take a posix_spawn fast
+        // path on macOS that the fork race below doesn't reach -- see the
+        // comment on test_fork_lock_closes_the_pipe_leak.
+        unsafe {
+            command.pre_exec(|| Ok(()));
+        }
+        let out = command.output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
     #[test]
     fn test_fork_lock_closes_the_pipe_leak() {
         let iterations = 300;
+        let baseline = open_pipe_fds();
         let leaks = std::sync::atomic::AtomicUsize::new(0);
         let done = std::sync::atomic::AtomicBool::new(false);
         std::thread::scope(|scope| {
@@ -188,23 +215,13 @@ mod tests {
                 }
             });
             for _ in 0..iterations {
-                let out = {
+                let fds = {
                     let _fork = super::super::FORK_LOCK
                         .read()
                         .unwrap_or_else(|e| e.into_inner());
-                    let mut command = Command::new("/bin/sh");
-                    command.arg("-c").arg(
-                        "for f in /dev/fd/*; do \
-                           case \"$f\" in */0|*/1|*/2) continue;; esac; \
-                           [ -p \"$f\" ] && echo LEAK; \
-                         done",
-                    );
-                    unsafe {
-                        command.pre_exec(|| Ok(()));
-                    }
-                    command.output().unwrap()
+                    open_pipe_fds()
                 };
-                if !out.stdout.is_empty() {
+                if fds.difference(&baseline).next().is_some() {
                     leaks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
