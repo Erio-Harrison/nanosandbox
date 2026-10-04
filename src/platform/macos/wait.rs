@@ -134,6 +134,7 @@ impl MacOSExecutor {
                     peak_memory,
                     cpu_time,
                     blocked_hosts: Vec::new(), // filled in by execute()
+                    proc_isolated: true,
                 });
             } else if result == 0 {
                 // Still running, check timeout

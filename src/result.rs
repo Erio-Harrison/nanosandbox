@@ -51,6 +51,13 @@ pub struct ExecutionResult {
     /// was dropped.
     pub output_truncated: bool,
 
+    /// Whether the sandbox got its own private `/proc`, not the host's.
+    /// Linux only: false when AppArmor's `unprivileged_userns` restriction
+    /// applied (see `docs/platform-linux.md`), which also skips the
+    /// private hostname. Always true elsewhere -- macOS and Windows have
+    /// no PID namespace to begin with.
+    pub proc_isolated: bool,
+
     /// Hosts the `allow_network` proxy refused during the run, sorted: not
     /// on the allowlist, or resolving only to non-public addresses. Lets the
     /// caller see what a program tried to reach, and decide what to allow.
@@ -74,6 +81,7 @@ impl ExecutionResult {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         }
     }
 
@@ -133,6 +141,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         };
         assert!(result.success());
         assert!(result.failure_reason().is_none());
@@ -154,6 +163,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Exit code 1".into()));
@@ -175,6 +185,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Execution timed out".into()));
@@ -196,6 +207,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Out of memory".into()));
@@ -217,6 +229,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             output_truncated: false,
+            proc_isolated: true,
         };
         assert!(!result.success());
         assert_eq!(result.failure_reason(), Some("Killed by signal 9".into()));

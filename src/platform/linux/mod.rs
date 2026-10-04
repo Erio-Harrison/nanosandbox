@@ -457,6 +457,7 @@ impl PlatformExecutor for LinuxExecutor {
             cpu_time,
             blocked_hosts,
             output_truncated,
+            proc_isolated: !userns_restricted,
         })
     }
 

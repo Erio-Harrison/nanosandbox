@@ -264,6 +264,7 @@ impl WindowsExecutor {
                         cpu_time: None,
                         blocked_hosts: Vec::new(),
                         output_truncated: false,
+                        proc_isolated: true,
                     });
                 }
                 Ok(None) => {

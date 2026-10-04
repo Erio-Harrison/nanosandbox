@@ -193,6 +193,21 @@ fn test_resource_metrics_structure() {
     // For now, just verify the structure exists
 }
 
+/// Test: a normal (unrestricted) run gets its own private /proc. The
+/// AppArmor-restricted case (`proc_isolated == false`) isn't covered here --
+/// forcing that sysctl mid-suite isn't something a single test can do
+/// safely; see docs/platform-linux.md.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_proc_isolated_true_outside_apparmor_restriction() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let result = sandbox.run("true", &[]).unwrap();
+    assert!(result.proc_isolated);
+}
+
 /// Test: Duration should be accurate for various execution times
 #[test]
 fn test_duration_accuracy() {

@@ -422,7 +422,8 @@ root nor running under its own AppArmor profile. For such a caller:
   `no_network()` still works.
 - The sandbox gets no private `/proc` and no `hostname`. Both are skipped
   quietly, with one `tracing` warning per process, instead of writing to the
-  program's stderr on every run.
+  program's stderr on every run. `ExecutionResult::proc_isolated` is `false`
+  so the caller can tell, without parsing logs.
 - cgroup resource limits are unaffected: the parent sets those up from
   outside the user namespace.
 
