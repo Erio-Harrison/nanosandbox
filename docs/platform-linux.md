@@ -260,6 +260,13 @@ impl CgroupManager {
 }
 ```
 
+`kill_all`/`cleanup` read `cgroup.procs` in a retry loop and stop once it's
+empty. A read error there is not the same as empty: only `ENOENT` (the
+cgroup itself already gone) counts as confirmed-empty; any other error is
+logged and treated as "unknown, keep retrying," not as "done." Treating
+every read error as empty used to let a transient failure end the retry
+loop with live processes never sent a `SIGKILL`.
+
 ## 3. Seccomp-BPF (Syscall Filtering)
 
 Namespaces and cgroups decide what a sandbox sees and how much it can use.

@@ -71,83 +71,25 @@ sandbox-exec -p "(version 1)(deny default)(allow file-read*)" /bin/ls
 
 ## Nanosandbox Implementation
 
-### MacOSExecutor
+`MacOSExecutor::execute()` (`src/platform/macos/mod.rs`) builds the SBPL
+profile, spawns `sandbox-exec -p <profile> -D key=value... -- cmd args...`,
+and waits for the result. Split across a few files by subsystem:
 
-```rust
-pub struct MacOSExecutor {
-    _private: (),
-}
-
-impl PlatformExecutor for MacOSExecutor {
-    fn execute(
-        &self,
-        config: &SandboxConfig,
-        cmd: &str,
-        args: &[&str],
-        stdin: Option<&[u8]>,
-    ) -> Result<ExecutionResult> {
-        // 1. Generate SBPL profile
-        let profile = self.generate_profile(config);
-
-        // 2. Execute using sandbox-exec
-        let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.arg("-p").arg(&profile);
-        command.arg(cmd);
-        command.args(args);
-
-        // 3. Set environment and working directory
-        command.current_dir(&config.working_dir);
-
-        // 4. Execute and wait for result
-        // ...
-    }
-}
-```
+- `mod.rs`: `execute()`/`check_support()`, the resource-limit `pre_exec`
+  closure, and `FORK_LOCK`/`cloexec_pipe` (see Process Lifetime below).
+- `profile.rs`: `generate_profile()`.
+- `wait.rs`: the wait loop, process-tree killing, memory polling.
+- `watchdog.rs`, `run_marker.rs`: see their own sections below.
 
 ### Profile Generation
 
-```rust
-fn generate_profile(&self, config: &SandboxConfig) -> String {
-    let mut profile = String::new();
-
-    // Basic rules
-    profile.push_str("(version 1)\n");
-    profile.push_str("(deny default)\n");
-
-    // Process operations
-    profile.push_str("(allow process-fork)\n");
-    profile.push_str("(allow process-exec)\n");
-
-    // Mach services
-    profile.push_str("(allow mach-lookup)\n");
-
-    // File reading (allow reading from anywhere)
-    profile.push_str("(allow file-read* (subpath \"/\"))\n");
-
-    // File writing (only allow specific directories)
-    profile.push_str("(allow file-write* (subpath \"/tmp\"))\n");
-
-    // Write permissions for custom mount points
-    for mount in &config.mounts {
-        if mount.permission == Permission::ReadWrite {
-            profile.push_str(&format!(
-                "(allow file-write* (subpath \"{}\"))\n",
-                mount.source.to_string_lossy()
-            ));
-        }
-    }
-
-    // Network rules
-    match &config.network_mode {
-        NetworkMode::None => { /* Deny by default */ }
-        NetworkMode::Host => {
-            profile.push_str("(allow network*)\n");
-        }
-    }
-
-    profile
-}
-```
+`generate_profile()` returns the policy text plus a list of `-D key=value`
+pairs, not a single self-contained string: every path from the config
+(writable roots, denied-read paths, the run's marker files) becomes a
+parameter referenced as `(param "KEY")`, never spliced into the policy text
+directly. A mount source containing something that looks like SBPL (e.g. a
+path literally named `x") (allow file-write* (subpath "/`) can't be parsed
+as a rule that way -- it's always just a string value.
 
 ## Process Lifetime
 
@@ -159,6 +101,14 @@ pipe whose write end only the host process has, and kills the run's process
 group the moment that pipe closes -- whether the host closed it on an
 ordinary run end or died and took it down with it. See
 `src/platform/macos/watchdog.rs`.
+
+Every pipe this crate opens for itself (the watchdog's, and the one the
+child reports a rejected `setrlimit` over) goes through one `cloexec_pipe`
+helper, holding `FORK_LOCK` for writing around `pipe()`+`fcntl()`: macOS
+has no atomic `pipe2(O_CLOEXEC)`, so a concurrent `execute()` call forking
+in that gap would otherwise inherit a plain copy, leaking it into an
+unrelated sandboxed process. Confirmed for real: ~1 in 5 tries without the
+lock.
 
 ## Feature Limitations
 

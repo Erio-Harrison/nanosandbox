@@ -12,7 +12,9 @@
 - [x] **Signal handler cleanup** - Handled via process group killing
 
 ### Resource Limits (macOS)
-- [x] **Actually implement setrlimit** - `setrlimit(RLIMIT_AS, ...)` for memory
+- [x] **Resource limits implemented** - `setrlimit` for open files/file size/CPU
+  time; `memory_limit` via polled `rusage` instead (the kernel rejects
+  `RLIMIT_AS`)
   - Note: `RLIMIT_NPROC` intentionally not used (affects entire user)
 
 ### Resource Limits (Linux)
@@ -79,6 +81,9 @@
 - [ ] **Hardened runtime** - Code signing considerations
 
 ### Windows
+- Direction undecided: weighing native Windows support against dropping it
+  for WSL2 (i.e. Linux support) instead. Native work below is on hold until
+  that's settled.
 - [ ] **Actual testing** - Code compiles but never tested on real Windows
 - [ ] **Job Object limits** - Verify memory/CPU limits work
 - [ ] **AppContainer** - Consider for stronger isolation
@@ -91,7 +96,7 @@
 - [ ] **Fuzz testing** - Fuzz command inputs, profile generation
 
 ### Integration Testing
-- [x] **Basic integration tests** - 53 tests passing
+- [x] **Basic integration tests** - 185 tests passing (macOS; Linux adds its own platform-specific set)
 - [ ] **Multi-distro Linux** - Ubuntu, Alpine, Fedora, Arch
 - [ ] **macOS versions** - Ventura, Sonoma, Sequoia
 - [ ] **Windows versions** - Windows 10, 11, Server
@@ -118,12 +123,12 @@
 
 | Phase | Status | Completed |
 |-------|--------|-----------|
-| P0 | 90% | 5/6 items (IP bypass remaining) |
+| P0 | 100% | All items complete |
 | P1 | 100% | All items complete |
-| P2 | 20% | Basic tracing only |
-| P3 | 30% | macOS SBPL done |
-| P4 | 50% | Security + integration tests done |
-| P5 | 70% | Bindings + docs done, guides pending |
+| P2 | 2/9 | Basic tracing + resource usage only |
+| P3 | 2/9 | Linux seccomp + macOS SBPL done; Windows on hold (see above) |
+| P4 | 4/11 | Security + basic integration tests done |
+| P5 | 3/7 | Docs done; Python/Node bindings and guides pending |
 
 ## Documentation
 

@@ -333,6 +333,7 @@ pub struct ExecutionResult {
     pub killed_by_timeout: bool,
     pub killed_by_oom: bool,
     pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows
+    pub killed_by_cpu_limit: bool,     // Linux: the whole cgroup's CPU time, not just one process
     pub signal: Option<i32>,
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
@@ -375,12 +376,15 @@ pub enum Permission {
 
 ### SandboxError
 
-Marked `#[non_exhaustive]`. The ones to expect from `build()`:
+Marked `#[non_exhaustive]`, and most variants are themselves struct
+variants carrying a `source` (`std::error::Error::source()` chains to it),
+so matching one needs `{ .. }`. The ones to expect from `build()`:
 
 - `Unsupported { setting, reason }`: this platform, or this system's
   configuration, can't enforce a setting. The reason says what to do.
-- `Config(String)`: the settings contradict each other, such as a bind
-  target that doesn't exist.
+- `Config { context, source }`: the settings contradict each other, such
+  as a bind target that doesn't exist. `source` is set only where a real
+  underlying error exists (e.g. a path with a NUL byte).
 - `PathNotFound(PathBuf)`: a `read_only`/`writable`/`rootfs` path doesn't
   exist.
 - `UserNamespaceDisabled`, `CgroupV2Unavailable`, `CgroupCreation`,
