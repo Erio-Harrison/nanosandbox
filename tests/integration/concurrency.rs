@@ -301,17 +301,24 @@ fn test_parallel_cleanup() {
         handle.join().unwrap();
     }
 
-    // Wait for cleanup
-    thread::sleep(Duration::from_millis(500));
-
-    // Check for zombie processes
-    let output = Command::new("ps").args(["aux"]).output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let zombies: Vec<&str> = stdout
-        .lines()
-        .filter(|line| line.contains(" Z ") || line.contains(" Z+ "))
-        .filter(|line| line.contains("sandbox") || line.contains("sleep"))
-        .collect();
+    // Poll for cleanup rather than a single fixed sleep: a loaded, shared CI
+    // runner can take longer to reap than a dev machine, and this only cares
+    // that it finishes eventually, not how fast.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let zombies = loop {
+        let output = Command::new("ps").args(["aux"]).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let zombies: Vec<String> = stdout
+            .lines()
+            .filter(|line| line.contains(" Z ") || line.contains(" Z+ "))
+            .filter(|line| line.contains("sandbox") || line.contains("sleep"))
+            .map(str::to_string)
+            .collect();
+        if zombies.is_empty() || std::time::Instant::now() >= deadline {
+            break zombies;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
 
     assert!(
         zombies.is_empty(),
