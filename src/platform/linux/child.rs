@@ -62,8 +62,9 @@ impl ChildSetup {
     pub(super) fn run(&self) -> isize {
         // Create a new process group with this process as leader
         // This allows us to kill all children with killpg
-        unsafe {
-            libc::setpgid(0, 0);
+        if unsafe { libc::setpgid(0, 0) } != 0 {
+            let _ = write_raw(2, b"Failed to create process group\n");
+            return 1;
         }
 
         // Die with the thread that made us. Without it, the sandbox kept
@@ -110,8 +111,9 @@ impl ChildSetup {
 
         // Setup stdin
         if let Some(stdin_fd) = self.stdin_read {
-            unsafe {
-                libc::dup2(stdin_fd, libc::STDIN_FILENO);
+            if unsafe { libc::dup2(stdin_fd, libc::STDIN_FILENO) } < 0 {
+                let _ = write_raw(2, b"Failed to redirect stdin\n");
+                return 1;
             }
             let _ = close_raw(stdin_fd);
         }
@@ -121,10 +123,15 @@ impl ChildSetup {
             let _ = close_raw(fd);
         }
 
-        // Redirect stdout/stderr
-        unsafe {
-            libc::dup2(self.stdout_write, libc::STDOUT_FILENO);
-            libc::dup2(self.stderr_write, libc::STDERR_FILENO);
+        // Redirect stdout/stderr. A failure here leaves the program's
+        // output going wherever fd 1/2 pointed to before (whatever this
+        // process inherited at clone()), not captured -- fail instead of
+        // running with the wrong stdout/stderr.
+        if unsafe { libc::dup2(self.stdout_write, libc::STDOUT_FILENO) } < 0
+            || unsafe { libc::dup2(self.stderr_write, libc::STDERR_FILENO) } < 0
+        {
+            let _ = write_raw(2, b"Failed to redirect output\n");
+            return 1;
         }
         let _ = close_raw(self.stdout_write);
         let _ = close_raw(self.stderr_write);
