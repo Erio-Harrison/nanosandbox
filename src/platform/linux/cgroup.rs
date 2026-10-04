@@ -219,23 +219,40 @@ impl CgroupManager {
         Ok(result)
     }
 
-    /// Check if any process in the cgroup was killed by OOM
+    /// Check if any process in the cgroup was killed by OOM. A read failure
+    /// here is treated the same as the sibling `get_memory_stats`/
+    /// `get_cpu_stats` calls at this same call site (mod.rs): reported as
+    /// the "nothing happened" value rather than failing the whole run over
+    /// what's normally just a best-effort stats read.
     pub fn was_oom_killed(&self) -> bool {
         self.get_memory_events()
             .map(|e| e.oom_kill > 0 || e.oom_group_kill > 0)
             .unwrap_or(false)
     }
 
-    /// Get all PIDs in this cgroup
+    /// Get all PIDs in this cgroup. `kill_all`/`cleanup` read this in a
+    /// retry loop and stop as soon as it's empty, so a read failure here
+    /// must not silently look the same as "no processes left" unless
+    /// that's actually what it means.
     pub fn get_pids(&self) -> Vec<u32> {
         let procs_path = self.path.join("cgroup.procs");
-        fs::read_to_string(&procs_path)
-            .map(|s| {
-                s.lines()
-                    .filter_map(|line| line.trim().parse::<u32>().ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        match fs::read_to_string(&procs_path) {
+            Ok(s) => s
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect(),
+            // The cgroup itself is already gone -- genuinely no processes,
+            // not a failure to report.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            // Anything else (e.g. a permissions problem) is unexpected: log
+            // it, but still return empty rather than making kill_all/cleanup
+            // retry forever on a read that may never succeed -- their own
+            // bounded iteration counts are the backstop either way.
+            Err(e) => {
+                tracing::warn!("read {}: {e:?}", procs_path.display());
+                Vec::new()
+            }
+        }
     }
 
     /// Sends SIGKILL to all processes in the cgroup and waits for them to exit.
