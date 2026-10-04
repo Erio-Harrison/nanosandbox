@@ -20,7 +20,7 @@
 //! fork and exec that aren't known to be safe there.
 
 use crate::error::{Result, SandboxError};
-use std::os::unix::io::{FromRawFd, OwnedFd};
+use std::os::unix::io::OwnedFd;
 use std::process::{Child, Command, Stdio};
 
 /// Guards one run. Dropping it (on every path out of `execute()`, success or
@@ -35,7 +35,7 @@ impl Watchdog {
     /// `pgid`: the run's process group -- its first process is its own
     /// leader (`setpgid(0, 0)` in `pre_exec`), so this is that process's pid.
     pub(super) fn spawn(pgid: i32) -> Result<Self> {
-        let (read_end, write_end) = cloexec_pipe()?;
+        let (read_end, write_end) = super::cloexec_pipe("watchdog")?;
 
         // `read` returns on EOF too, so either way the script moves on to
         // the kill -- a no-op if the group's already gone.
@@ -70,37 +70,6 @@ impl Drop for Watchdog {
         self.write_end.take();
         let _ = self.shell.wait();
     }
-}
-
-/// A pipe whose fds are `O_CLOEXEC`, so neither leaks into a child spawned
-/// after this call -- including the watchdog shell, which only keeps its
-/// `dup2`'d stdin copy (dup2 never carries the flag) across its own exec.
-/// No `pipe2` on macOS, so the flag is set right after `pipe()` instead,
-/// with `FORK_LOCK` held for writing so no other fork in this crate can
-/// land in that gap (see its doc comment).
-fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let _fork = super::FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
-    let mut fds = [0i32; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(SandboxError::Internal {
-            context: "create watchdog pipe".into(),
-            source: Box::new(std::io::Error::last_os_error()),
-        });
-    }
-    for fd in fds {
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
-            let err = std::io::Error::last_os_error();
-            unsafe {
-                libc::close(fds[0]);
-                libc::close(fds[1]);
-            }
-            return Err(SandboxError::Internal {
-                context: "set close-on-exec on watchdog pipe".into(),
-                source: Box::new(err),
-            });
-        }
-    }
-    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
 #[cfg(test)]
@@ -212,7 +181,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                    if let Ok((r, w)) = cloexec_pipe() {
+                    if let Ok((r, w)) = super::super::cloexec_pipe("watchdog") {
                         drop(r);
                         drop(w);
                     }

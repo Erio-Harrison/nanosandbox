@@ -33,18 +33,41 @@ mod wait;
 mod watchdog;
 use watchdog::Watchdog;
 
-/// Guards this crate's own forks (the sandboxed program, the watchdog
-/// shell) against watchdog.rs's `cloexec_pipe()`: macOS has no atomic
-/// `pipe2(O_CLOEXEC)`, so a fork landing between `pipe()` and the `fcntl`
-/// that sets close-on-exec would inherit a plain copy of the watchdog's
-/// write end, leaking it into an unrelated process and keeping the pipe
-/// open long after the real write end closes -- silently defeating the
-/// watchdog for that run. Confirmed for real under concurrent spawns
-/// without this lock: leaked in about 1 in 5 tries. `cloexec_pipe` holds
-/// this for writing around `pipe()`+`fcntl()`; every fork here holds it
-/// for reading, so none can land inside that window. It can't do anything
-/// about some unrelated fork elsewhere in a process embedding this crate.
+/// Guards this crate's own forks against `cloexec_pipe()` below: no atomic
+/// `pipe2(O_CLOEXEC)` on macOS, so a fork landing between `pipe()` and the
+/// `fcntl` that sets close-on-exec inherits a plain copy, leaking it into
+/// an unrelated process. Confirmed for real: leaked ~1 in 5 tries without
+/// this lock. `cloexec_pipe` holds it for writing; every fork here holds
+/// it for reading.
 static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// A pipe whose fds are `O_CLOEXEC`; see FORK_LOCK. Shared by every pipe
+/// this crate creates for itself, so there's one lock-holding gap to get
+/// right instead of one per call site.
+fn cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd)> {
+    let _fork = FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return Err(SandboxError::Internal {
+            context: format!("create {what} pipe"),
+            source: Box::new(std::io::Error::last_os_error()),
+        });
+    }
+    for fd in fds {
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+            }
+            return Err(SandboxError::Internal {
+                context: format!("set close-on-exec on {what} pipe"),
+                source: Box::new(err),
+            });
+        }
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}
 
 // std's spawn error carries only errno, so the child reports which setrlimit
 // failed through a side pipe as [limit, errno].
@@ -108,19 +131,7 @@ impl MacOSExecutor {
     }
 
     fn report_pipe() -> Result<(OwnedFd, OwnedFd)> {
-        let mut fds = [0 as libc::c_int; 2];
-        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(SandboxError::Internal {
-                context: "create limit report pipe".into(),
-                source: Box::new(std::io::Error::last_os_error()),
-            });
-        }
-        for fd in fds {
-            unsafe {
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
-        }
-        Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+        cloexec_pipe("limit report")
     }
 
     /// Turn a child's report into a message naming the rejected setting,
