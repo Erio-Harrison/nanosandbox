@@ -22,6 +22,8 @@ See the [main README](https://github.com/Erio-Harrison/nanosandbox#readme) for t
 
 ## Building from source
 
+Only needed if you're changing the binding itself -- end users want `pip install nanosandbox` above, which installs a prebuilt wheel.
+
 ```bash
 pip install maturin pytest
 maturin develop

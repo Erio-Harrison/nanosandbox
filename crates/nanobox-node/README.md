@@ -22,6 +22,8 @@ See the [main README](https://github.com/Erio-Harrison/nanosandbox#readme) for t
 
 ## Building from source
 
+Only needed if you're changing the binding itself -- end users want `npm install nanosandbox` above, which installs a prebuilt binary.
+
 ```bash
 npm install
 npm run build
