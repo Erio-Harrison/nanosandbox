@@ -241,9 +241,11 @@ fn test_proxied_network_setup() {
     let env_vars = ProxiedNetwork::env_vars(4321);
     assert_eq!(env_vars.len(), 4);
     for key in ["HTTP_PROXY", "HTTPS_PROXY"] {
-        assert!(env_vars
-            .iter()
-            .any(|(k, v)| k == key && v == "http://127.0.0.1:4321"));
+        assert!(
+            env_vars
+                .iter()
+                .any(|(k, v)| k == key && v == "http://127.0.0.1:4321")
+        );
     }
 
     proxy.shutdown();

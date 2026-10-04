@@ -19,8 +19,8 @@ use std::time::Duration;
 #[cfg(unix)]
 fn test_ip_bypass_blocked() {
     use std::io::{Read, Write};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     if crate::common::skip_without_userns_privileges() {
         return;
@@ -349,8 +349,8 @@ fn test_localhost_always_allowed() {
 #[cfg(unix)]
 fn test_private_destinations_refused_by_default() {
     use std::io::{Read, Write};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     if crate::common::skip_without_userns_privileges() {
         return;

@@ -188,23 +188,23 @@ impl ChildSetup {
 
         // Before the rlimits: a small max_open_files could stop these
         // sockets from opening.
-        if let Some(link) = self.proxy_link_child {
-            if let Err(step) = link.bind_and_send() {
-                let _ = write_raw(2, b"Network setup failed: ");
-                let _ = write_raw(2, step.as_bytes());
-                let _ = write_raw(2, b"\n");
-                return 1;
-            }
+        if let Some(link) = self.proxy_link_child
+            && let Err(step) = link.bind_and_send()
+        {
+            let _ = write_raw(2, b"Network setup failed: ");
+            let _ = write_raw(2, step.as_bytes());
+            let _ = write_raw(2, b"\n");
+            return 1;
         }
 
         // Before the rlimits too: it opens a file descriptor per path.
-        if let Some(rules) = &self.write_rules {
-            if let Err(step) = rules.apply() {
-                let _ = write_raw(2, b"File system rules failed: ");
-                let _ = write_raw(2, step.as_bytes());
-                let _ = write_raw(2, b"\n");
-                return 1;
-            }
+        if let Some(rules) = &self.write_rules
+            && let Err(step) = rules.apply()
+        {
+            let _ = write_raw(2, b"File system rules failed: ");
+            let _ = write_raw(2, step.as_bytes());
+            let _ = write_raw(2, b"\n");
+            return 1;
         }
 
         // After everything that needs root (mounts, the Landlock rules'
@@ -241,11 +241,11 @@ impl ChildSetup {
 
         // Last, so nothing above is filtered. A sandbox that asked for the
         // filter doesn't run without it.
-        if let Some(filter) = &self.syscall_filter {
-            if !filter.install() {
-                let _ = write_raw(2, b"Failed to install the syscall filter\n");
-                return 1;
-            }
+        if let Some(filter) = &self.syscall_filter
+            && !filter.install()
+        {
+            let _ = write_raw(2, b"Failed to install the syscall filter\n");
+            return 1;
         }
 
         // Ignored signals stay ignored across exec, and the signal mask

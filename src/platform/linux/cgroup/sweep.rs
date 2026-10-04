@@ -7,8 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::scope::user_app_slice;
 use super::CGROUP_ROOT;
+use super::scope::user_app_slice;
 
 /// How often a long-lived process re-sweeps its scope's neighborhood and the
 /// lock directory, beyond the one-time sweep on first use. Sweeping is cheap
@@ -268,14 +268,18 @@ mod tests {
 
         sweep_stale_locks(locks.path());
 
-        assert!(locks
-            .path()
-            .join(format!("nanosandbox-{alive_pid}.lock"))
-            .exists());
-        assert!(!locks
-            .path()
-            .join(format!("nanosandbox-{dead_pid}.lock"))
-            .exists());
+        assert!(
+            locks
+                .path()
+                .join(format!("nanosandbox-{alive_pid}.lock"))
+                .exists()
+        );
+        assert!(
+            !locks
+                .path()
+                .join(format!("nanosandbox-{dead_pid}.lock"))
+                .exists()
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ Docker is overkill for running a single script. Cloud sandboxes (E2B, etc.) add 
 
 ```toml
 [dependencies]
-nanosandbox = "0.1"
+nanosandbox = "0.2"
 ```
 
 ## Usage

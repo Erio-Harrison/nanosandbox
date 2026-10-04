@@ -18,7 +18,7 @@
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
-extern "C" {
+unsafe extern "C" {
     /// libsystem_sandbox: 0 if `pid` may do `operation` (on the filter's
     /// argument), 1 if not; for a process without a sandbox, 0.
     fn sandbox_check(

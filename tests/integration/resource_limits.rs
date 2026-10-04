@@ -1,6 +1,6 @@
 //! Resource limits tests
 
-use nanosandbox::{Sandbox, MB};
+use nanosandbox::{MB, Sandbox};
 use std::time::{Duration, Instant};
 
 /// Wall time limit test - all platforms supported
@@ -100,10 +100,10 @@ fn test_memory_within_limit() {
         );
 
         // An Err means python3 isn't available
-        if let Ok(r) = result {
-            if r.exit_code == 0 {
-                assert_eq!(r.stdout.trim(), "ok");
-            }
+        if let Ok(r) = result
+            && r.exit_code == 0
+        {
+            assert_eq!(r.stdout.trim(), "ok");
         }
     }
 }

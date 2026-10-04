@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo bench
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nanosandbox::{Sandbox, MB};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
 /// Benchmark sandbox creation overhead

@@ -5,7 +5,7 @@
 use super::proxy::{Blocked, Policy};
 use crate::error::{Result, SandboxError};
 use crate::network::HttpProxy;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
 /// The port the proxy listens on inside a Linux sandbox's own network
@@ -168,9 +168,10 @@ mod tests {
         let vars = ProxiedNetwork::env_vars(3128);
         assert_eq!(vars.len(), 4);
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            assert!(vars
-                .iter()
-                .any(|(k, v)| k == key && v == "http://127.0.0.1:3128"));
+            assert!(
+                vars.iter()
+                    .any(|(k, v)| k == key && v == "http://127.0.0.1:3128")
+            );
         }
     }
 

@@ -132,8 +132,8 @@ struct GoverningUnit {
 }
 
 fn governing_unit() -> Option<GoverningUnit> {
-    use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::blocking::Proxy;
+    use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
     let conn = ConnectionBuilder::session()
@@ -210,10 +210,11 @@ fn warn_if_leaving_resource_limits_behind(unit: &GoverningUnit) {
         ("MemoryMax", "a MemoryMax"),
         ("CPUQuotaPerSecUSec", "a CPUQuota"),
     ] {
-        if let Some(value) = unit_property(unit, prop).and_then(|v| u64::try_from(v).ok()) {
-            if value != INFINITY {
-                tracing::warn!(
-                    "this process is inside {} ({label} of its own), but nanosandbox could \
+        if let Some(value) = unit_property(unit, prop).and_then(|v| u64::try_from(v).ok())
+            && value != INFINITY
+        {
+            tracing::warn!(
+                "this process is inside {} ({label} of its own), but nanosandbox could \
                      not confirm that unit delegates every cgroup controller it needs (or \
                      that unit's own root cgroup holds other processes nanosandbox doesn't \
                      control) — moving into a separate scope of its own, which will no \
@@ -221,16 +222,15 @@ fn warn_if_leaving_resource_limits_behind(unit: &GoverningUnit) {
                      (and, if it has its own main process, `DelegateSubgroup=` — see \
                      systemd.resource-control(5)) if you want the sandboxed process to \
                      remain inside it and count against its limits.",
-                    unit.root.display()
-                );
-            }
+                unit.root.display()
+            );
         }
     }
 }
 
 fn unit_property(unit: &GoverningUnit, property: &str) -> Option<zbus::zvariant::OwnedValue> {
-    use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::blocking::Proxy;
+    use zbus::blocking::connection::Builder as ConnectionBuilder;
 
     let conn = ConnectionBuilder::session()
         .ok()?
@@ -295,8 +295,8 @@ fn relocate_into_delegated_scope(preferred_slice: Option<&str>) -> Result<()> {
 fn try_relocate_into_delegated_scope(
     preferred_slice: Option<&str>,
 ) -> std::result::Result<(), String> {
-    use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::blocking::Proxy;
+    use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::zvariant::{OwnedObjectPath, Value};
 
     // Bounded: a wedged systemd manager can otherwise block this forever.
@@ -336,10 +336,10 @@ fn try_relocate_into_delegated_scope(
     // Poll regardless of call success: systemd's job may still complete
     // after our own wait for a reply timed out.
     for _ in 0..50 {
-        if let Ok(rel) = own_cgroup_path() {
-            if rel.ends_with(&scope_name) {
-                return Ok(());
-            }
+        if let Ok(rel) = own_cgroup_path()
+            && rel.ends_with(&scope_name)
+        {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(10));
     }

@@ -11,8 +11,8 @@
 use crate::builder::{NetworkMode, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::{ProxiedNetwork, SANDBOX_PROXY_PORT};
-use crate::platform::private_tmp::PrivateTmp;
 use crate::platform::PlatformExecutor;
+use crate::platform::private_tmp::PrivateTmp;
 use crate::result::ExecutionResult;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -32,12 +32,12 @@ mod wait;
 
 pub use cgroup::CgroupManager;
 use child::ChildSetup;
-use mount::{check_mounts, needed_cgroup_controllers, MountPlan};
+use mount::{MountPlan, check_mounts, needed_cgroup_controllers};
 pub use namespace::UserNamespace;
-use prepare::{prepare_cgroup, prepare_env, prepare_rlimits, ExecBuffers, Pipes};
-use proxy_link::{check_network, ProxyLink};
+use prepare::{ExecBuffers, Pipes, prepare_cgroup, prepare_env, prepare_rlimits};
+use proxy_link::{ProxyLink, check_network};
 use seccomp::SyscallFilter;
-use wait::{wait_with_timeout, Waited};
+use wait::{Waited, wait_with_timeout};
 
 /// RawFd version of close
 fn close_raw(fd: RawFd) -> nix::Result<()> {
@@ -122,7 +122,7 @@ impl PlatformExecutor for LinuxExecutor {
         stdin: Option<&[u8]>,
         proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
-        use nix::sched::{clone, CloneFlags};
+        use nix::sched::{CloneFlags, clone};
         use nix::sys::signal::Signal;
 
         const STACK_SIZE: usize = 1024 * 1024;

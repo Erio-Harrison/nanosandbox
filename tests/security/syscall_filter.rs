@@ -2,7 +2,7 @@
 
 #![cfg(target_os = "linux")]
 
-use nanosandbox::{Sandbox, MB};
+use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
 /// Calls each syscall from inside the sandbox through python's ctypes and
@@ -141,11 +141,11 @@ fn test_filter_keeps_ordinary_programs_working() {
                   t = threading.Thread(target=print, args=('thread',), kwargs={'flush': True})\n\
                   t.start(); t.join()\n\
                   print(subprocess.run(['echo', 'child'], capture_output=True, text=True).stdout.strip())";
-    if let Ok(r) = sandbox.run("python3", &["-c", script]) {
-        if !r.stderr.contains("No such file") {
-            assert_eq!(r.exit_code, 0, "{}", r.stderr);
-            assert_eq!(r.stdout, "thread\nchild\n");
-        }
+    if let Ok(r) = sandbox.run("python3", &["-c", script])
+        && !r.stderr.contains("No such file")
+    {
+        assert_eq!(r.exit_code, 0, "{}", r.stderr);
+        assert_eq!(r.stdout, "thread\nchild\n");
     }
 }
 

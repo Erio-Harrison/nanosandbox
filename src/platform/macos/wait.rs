@@ -11,8 +11,8 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
-use super::run_marker::RunMarker;
 use super::MacOSExecutor;
+use super::run_marker::RunMarker;
 
 impl MacOSExecutor {
     pub(super) fn wait_with_timeout(
@@ -59,16 +59,16 @@ impl MacOSExecutor {
             // upfront then all output after exit, which deadlocks once
             // either side fills its pipe buffer before the other side has
             // drained it (confirmed for real).
-            if !stdin_remaining.is_empty() {
-                if let Some(pipe) = stdin_pipe.as_mut() {
-                    match pipe.write(stdin_remaining) {
-                        Ok(n) if n > 0 => stdin_remaining = &stdin_remaining[n..],
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                        // Either wrote 0 (shouldn't happen for non-empty
-                        // data) or the reader's gone (e.g. EPIPE) -- nothing
-                        // more to usefully write either way.
-                        _ => stdin_remaining = &[],
-                    }
+            if !stdin_remaining.is_empty()
+                && let Some(pipe) = stdin_pipe.as_mut()
+            {
+                match pipe.write(stdin_remaining) {
+                    Ok(n) if n > 0 => stdin_remaining = &stdin_remaining[n..],
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    // Either wrote 0 (shouldn't happen for non-empty
+                    // data) or the reader's gone (e.g. EPIPE) -- nothing
+                    // more to usefully write either way.
+                    _ => stdin_remaining = &[],
                 }
             }
             if stdin_remaining.is_empty() {
@@ -143,22 +143,23 @@ impl MacOSExecutor {
                     killed_by_timeout = true;
                 }
                 let mut poll = Duration::from_millis(10);
-                if let Some(limit) = memory_limit {
-                    if !killed_by_oom {
-                        let used = Self::tree_footprint(marker);
-                        if used > limit {
-                            Self::kill_run(child_pid, marker);
-                            killed_by_oom = true;
-                        } else if used > limit / 10 * 6 {
-                            poll = Duration::from_millis(2);
-                        }
+                if let Some(limit) = memory_limit
+                    && !killed_by_oom
+                {
+                    let used = Self::tree_footprint(marker);
+                    if used > limit {
+                        Self::kill_run(child_pid, marker);
+                        killed_by_oom = true;
+                    } else if used > limit / 10 * 6 {
+                        poll = Duration::from_millis(2);
                     }
                 }
-                if let Some(tmp) = private_tmp.as_deref_mut() {
-                    if !killed_by_tmp_limit && tmp.over_limit() {
-                        Self::kill_run(child_pid, marker);
-                        killed_by_tmp_limit = true;
-                    }
+                if let Some(tmp) = private_tmp.as_deref_mut()
+                    && !killed_by_tmp_limit
+                    && tmp.over_limit()
+                {
+                    Self::kill_run(child_pid, marker);
+                    killed_by_tmp_limit = true;
                 }
                 std::thread::sleep(poll);
             } else {
@@ -278,11 +279,7 @@ impl MacOSExecutor {
                         &mut info as *mut _ as *mut libc::rusage_info_t,
                     )
                 };
-                if ret == 0 {
-                    info.ri_phys_footprint
-                } else {
-                    0
-                }
+                if ret == 0 { info.ri_phys_footprint } else { 0 }
             })
             .sum()
     }

@@ -30,7 +30,9 @@ pub enum SandboxError {
     PathNotFound(PathBuf),
 
     // Linux
-    #[error("Unprivileged user namespaces disabled. Run: sudo sysctl kernel.unprivileged_userns_clone=1")]
+    #[error(
+        "Unprivileged user namespaces disabled. Run: sudo sysctl kernel.unprivileged_userns_clone=1"
+    )]
     UserNamespaceDisabled,
 
     #[error("Cgroups v2 not available or not mounted")]

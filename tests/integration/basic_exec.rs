@@ -183,7 +183,8 @@ fn test_binary_output() {
 #[test]
 #[cfg(unix)]
 fn test_clear_env() {
-    std::env::set_var("NSB_INHERITED_PROBE", "from-host");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("NSB_INHERITED_PROBE", "from-host") };
     let script = "echo \"${NSB_INHERITED_PROBE:-unset} $NSB_SET\"";
 
     let cleared = Sandbox::builder().env("NSB_SET", "set").build().unwrap();

@@ -488,10 +488,10 @@ impl SandboxBuilder {
         }
 
         // Validate rootfs if specified
-        if let Some(rootfs) = &self.config.rootfs {
-            if !rootfs.exists() || !rootfs.is_dir() {
-                return Err(SandboxError::PathNotFound(rootfs.clone()));
-            }
+        if let Some(rootfs) = &self.config.rootfs
+            && (!rootfs.exists() || !rootfs.is_dir())
+        {
+            return Err(SandboxError::PathNotFound(rootfs.clone()));
         }
 
         Ok(())

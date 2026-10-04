@@ -120,7 +120,8 @@ fn test_macos_file_restriction() {
 #[test]
 fn test_environment_isolation() {
     // Set a variable in parent that should NOT leak to sandbox
-    std::env::set_var("SECRET_VAR", "secret_value");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("SECRET_VAR", "secret_value") };
 
     let sandbox = Sandbox::builder()
         .working_dir(if cfg!(windows) {
@@ -138,7 +139,8 @@ fn test_environment_isolation() {
         assert!(!result.stdout.contains("secret_value"));
     }
 
-    std::env::remove_var("SECRET_VAR");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::remove_var("SECRET_VAR") };
 }
 
 /// Without a rootfs, a mount goes over the host's own path, inside the

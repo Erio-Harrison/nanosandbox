@@ -45,7 +45,7 @@ impl PrivateTmp {
                         dir,
                         limit,
                         last_check: Instant::now(),
-                    })
+                    });
                 }
                 // Left over from an earlier process with the same pid.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

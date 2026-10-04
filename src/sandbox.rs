@@ -6,7 +6,7 @@
 use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 use crate::error::Result;
 use crate::network::ProxiedNetwork;
-use crate::platform::{get_executor, PlatformExecutor};
+use crate::platform::{PlatformExecutor, get_executor};
 use crate::result::ExecutionResult;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

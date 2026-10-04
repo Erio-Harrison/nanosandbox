@@ -3,7 +3,7 @@
 //! mounting works, a private directory elsewhere (macOS, and Linux under
 //! AppArmor's userns restriction). Programs find it through $TMPDIR.
 
-use nanosandbox::{Sandbox, MB};
+use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
 fn sandbox(size: u64) -> Sandbox {

@@ -17,7 +17,7 @@ use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::private_tmp::PrivateTmp;
-use crate::platform::{rlimit_cpu_secs, PlatformExecutor};
+use crate::platform::{PlatformExecutor, rlimit_cpu_secs};
 use crate::result::ExecutionResult;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -318,10 +318,10 @@ impl PlatformExecutor for MacOSExecutor {
         if !config.env.contains_key("PATH") {
             command.env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
         }
-        if let Some(tmp) = &private_tmp {
-            if !config.env.contains_key("TMPDIR") {
-                command.env("TMPDIR", tmp.path());
-            }
+        if let Some(tmp) = &private_tmp
+            && !config.env.contains_key("TMPDIR")
+        {
+            command.env("TMPDIR", tmp.path());
         }
 
         // Set proxy environment variables if proxied network

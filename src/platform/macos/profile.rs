@@ -4,8 +4,8 @@ use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::platform::read_rules;
 use std::path::{Path, PathBuf};
 
-use super::run_marker::RunMarker;
 use super::MacOSExecutor;
+use super::run_marker::RunMarker;
 
 const BASE_POLICY: &str = include_str!("policy/seatbelt_base_policy.sbpl");
 const NETWORK_POLICY: &str = include_str!("policy/seatbelt_network_policy.sbpl");
@@ -251,10 +251,11 @@ mod tests {
 
         let p = profile(&config, None);
         assert!(!p.policy.contains("(allow file-write* (subpath \"/\"))"));
-        assert!(p
-            .params
-            .iter()
-            .any(|(_, v)| v.contains("(allow file-write*")));
+        assert!(
+            p.params
+                .iter()
+                .any(|(_, v)| v.contains("(allow file-write*"))
+        );
     }
 
     #[test]

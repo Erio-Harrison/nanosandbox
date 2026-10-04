@@ -2,7 +2,7 @@
 
 #![cfg(target_os = "macos")]
 
-use nanosandbox::{Sandbox, MB};
+use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
 #[test]
@@ -175,7 +175,8 @@ fn test_wall_time_limit() {
 #[test]
 fn test_environment_isolation() {
     // Set some env vars in the parent
-    std::env::set_var("PARENT_SECRET", "should_not_see");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("PARENT_SECRET", "should_not_see") };
 
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Notify};
+use tokio::sync::{Notify, watch};
 
 /// Connection timeout for proxy connections
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -555,7 +555,10 @@ impl HttpProxy {
         );
         let response = format!(
             "HTTP/1.1 {} {}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            code, msg, body.len(), body
+            code,
+            msg,
+            body.len(),
+            body
         );
         client.write_all(response.as_bytes()).await?;
         Ok(())

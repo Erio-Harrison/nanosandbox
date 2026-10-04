@@ -1,11 +1,11 @@
 [package]
 name = "nanosandbox"
-version = "0.1.0"
-edition = "2021"
+version = "0.2.0"
+edition = "2024"
 license = "MIT"
 description = "Lightweight cross-platform sandbox for secure code execution"
 keywords = ["sandbox", "container", "security", "isolation", "cross-platform"]
-categories = ["os::linux-apis", "development-tools"]
+categories = ["os::linux-apis", "os::macos-apis", "os::windows-apis", "virtualization", "security"]
 repository = "https://github.com/Erio-Harrison/nanosandbox"
 
 [dependencies]

@@ -34,7 +34,8 @@ fn main() {
 
     // 3. Environment isolation
     println!("\n3. Environment isolation:");
-    std::env::set_var("SECRET", "should_not_leak");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("SECRET", "should_not_leak") };
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .env("VISIBLE", "yes")

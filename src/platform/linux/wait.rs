@@ -8,7 +8,7 @@ use crate::platform::private_tmp::PrivateTmp;
 use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
-use super::{read_raw, write_raw, CgroupManager};
+use super::{CgroupManager, read_raw, write_raw};
 
 /// See the comment at its one use site, in `wait_with_timeout`'s cpu_limit
 /// check.
@@ -185,24 +185,27 @@ pub(super) fn wait_with_timeout(
                 output_truncated,
             });
         }
-        if let Some(tmp) = private_tmp.as_deref_mut() {
-            if ret == 0 && !killed_by_tmp_limit && tmp.over_limit() {
-                kill();
-                killed_by_tmp_limit = true;
-            }
+        if let Some(tmp) = private_tmp.as_deref_mut()
+            && ret == 0
+            && !killed_by_tmp_limit
+            && tmp.over_limit()
+        {
+            kill();
+            killed_by_tmp_limit = true;
         }
-        if let Some((cg, limit_usec)) = cpu_limit {
-            if ret == 0 && !killed_by_cpu_limit {
-                let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
-                // Margin past limit_usec so RLIMIT_CPU (same threshold, kernel
-                // side) wins for a single process; this check is for what it
-                // can't catch, many processes each under budget. Without the
-                // margin this poll can race ahead of RLIMIT_CPU under load --
-                // confirmed for real.
-                if used > limit_usec + CPU_LIMIT_GRACE_USEC {
-                    kill();
-                    killed_by_cpu_limit = true;
-                }
+        if let Some((cg, limit_usec)) = cpu_limit
+            && ret == 0
+            && !killed_by_cpu_limit
+        {
+            let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
+            // Margin past limit_usec so RLIMIT_CPU (same threshold, kernel
+            // side) wins for a single process; this check is for what it
+            // can't catch, many processes each under budget. Without the
+            // margin this poll can race ahead of RLIMIT_CPU under load --
+            // confirmed for real.
+            if used > limit_usec + CPU_LIMIT_GRACE_USEC {
+                kill();
+                killed_by_cpu_limit = true;
             }
         }
         if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {
