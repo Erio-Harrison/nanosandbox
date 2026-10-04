@@ -32,6 +32,12 @@ pub struct ExecutionResult {
     /// fails the write with ENOSPC instead.
     pub killed_by_tmp_limit: bool,
 
+    /// Whether the process was killed for using more than `cpu_time_limit`
+    /// in total, across every process of the run, not just one of them.
+    /// Linux only (a cgroup's `cpu.stat`); `cpu_time_limit` is also applied
+    /// per process everywhere via `RLIMIT_CPU`, which this is on top of.
+    pub killed_by_cpu_limit: bool,
+
     /// Signal that killed the process, if any
     pub signal: Option<i32>,
 
@@ -62,6 +68,7 @@ impl ExecutionResult {
             killed_by_timeout: false,
             killed_by_oom: false,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -76,6 +83,7 @@ impl ExecutionResult {
             && !self.killed_by_timeout
             && !self.killed_by_oom
             && !self.killed_by_tmp_limit
+            && !self.killed_by_cpu_limit
             && self.signal.is_none()
     }
 
@@ -87,6 +95,8 @@ impl ExecutionResult {
             Some("Out of memory".into())
         } else if self.killed_by_tmp_limit {
             Some("Exceeded the /tmp size limit".into())
+        } else if self.killed_by_cpu_limit {
+            Some("Exceeded the total CPU time limit".into())
         } else if let Some(sig) = self.signal {
             Some(format!("Killed by signal {}", sig))
         } else if self.exit_code != 0 {
@@ -117,6 +127,7 @@ mod tests {
             killed_by_timeout: false,
             killed_by_oom: false,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -137,6 +148,7 @@ mod tests {
             killed_by_timeout: false,
             killed_by_oom: false,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: None,
             peak_memory: None,
             cpu_time: None,
@@ -157,6 +169,7 @@ mod tests {
             killed_by_timeout: true,
             killed_by_oom: false,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: Some(9),
             peak_memory: None,
             cpu_time: None,
@@ -177,6 +190,7 @@ mod tests {
             killed_by_timeout: false,
             killed_by_oom: true,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: Some(9),
             peak_memory: Some(512 * 1024 * 1024),
             cpu_time: None,
@@ -197,6 +211,7 @@ mod tests {
             killed_by_timeout: false,
             killed_by_oom: false,
             killed_by_tmp_limit: false,
+            killed_by_cpu_limit: false,
             signal: Some(9),
             peak_memory: None,
             cpu_time: None,
@@ -211,6 +226,7 @@ mod tests {
     fn test_execution_result_tmp_limit() {
         let result = ExecutionResult {
             killed_by_tmp_limit: true,
+            killed_by_cpu_limit: false,
             ..ExecutionResult::new()
         };
         assert!(!result.success());

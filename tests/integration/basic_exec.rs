@@ -254,16 +254,7 @@ fn test_sigpipe_default() {
     assert_eq!(result.stderr, "", "SIGPIPE ignored in the sandbox");
 }
 
-/// A missing command says so, with the shell's exit code for it.
-#[test]
-#[cfg(target_os = "linux")]
-fn test_command_not_found_message() {
-    let sandbox = Sandbox::builder().build().unwrap();
-    let result = sandbox.run("nanosandbox-no-such-command", &[]).unwrap();
-    assert_eq!(result.exit_code, 127);
-    assert!(
-        result.stderr.contains("command not found"),
-        "{}",
-        result.stderr
-    );
-}
+// A missing command: see test_error_command_not_found in
+// tests/integration/error_handling.rs, which asserts the actual public
+// contract (Err(SandboxError::CommandNotFound), not Ok() with exit 127 --
+// that was itself the bug this file's version of the test used to assert).

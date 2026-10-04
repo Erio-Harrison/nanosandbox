@@ -183,6 +183,9 @@ fn test_path_lookup_happens_in_the_rootfs() {
     assert_eq!(result.stdout, "from-rootfs\n", "{}", result.stderr);
 
     // On the host's PATH, not in the rootfs.
-    let result = sandbox.run("cargo", &["--version"]).unwrap();
-    assert_eq!(result.exit_code, 127, "{}", result.stdout);
+    let result = sandbox.run("cargo", &["--version"]);
+    assert!(matches!(
+        result,
+        Err(nanosandbox::SandboxError::CommandNotFound(_))
+    ));
 }

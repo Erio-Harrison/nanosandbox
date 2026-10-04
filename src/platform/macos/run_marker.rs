@@ -218,6 +218,26 @@ mod tests {
     }
 
     #[test]
+    fn test_members_includes_the_still_running_root_itself() {
+        let marker = RunMarker::create().unwrap();
+        let mut root = sandboxed(Some(&marker), "sleep 5");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let members = marker.members();
+        let root_included = members.contains(&(root.id() as libc::pid_t));
+
+        let _ = root.kill();
+        let _ = root.wait();
+
+        assert!(
+            root_included,
+            "root's own pid {} missing from members: {:?}",
+            root.id(),
+            members
+        );
+    }
+
+    #[test]
     fn test_no_members_without_the_marker_file() {
         let marker = RunMarker::create().unwrap();
         std::fs::remove_file(&marker.denied).unwrap();

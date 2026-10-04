@@ -196,7 +196,11 @@ impl PlatformExecutor for LinuxExecutor {
         // the process to it is the only step that needs child_pid, so it's
         // the only cgroup step that still happens after clone() below.
         let cgroup_controllers = needed_cgroup_controllers(config);
-        let cgroup = if !cgroup_controllers.is_empty() {
+        // cpu_time_limit alone doesn't need a controller enabled: cpu.stat's
+        // usage_usec, read below, is populated regardless (confirmed for
+        // real against a cgroup with none enabled) -- it just needs the
+        // cgroup to exist.
+        let cgroup = if !cgroup_controllers.is_empty() || config.cpu_time_limit.is_some() {
             let leaf_id = cgroup::next_leaf_id();
             let cg = CgroupManager::create(&leaf_id, &cgroup_controllers)?;
             if let Some(memory) = config.memory_limit {
@@ -686,6 +690,7 @@ impl PlatformExecutor for LinuxExecutor {
             exit_code,
             killed_by_timeout,
             killed_by_tmp_limit,
+            killed_by_cpu_limit,
             signal,
             rusage,
             output_truncated,
@@ -696,6 +701,10 @@ impl PlatformExecutor for LinuxExecutor {
             timeout,
             private_tmp.as_mut(),
             config.max_output,
+            cgroup
+                .as_ref()
+                .zip(config.cpu_time_limit)
+                .map(|(cg, d)| (cg, d.as_micros() as u64)),
         )?;
         let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);
@@ -725,6 +734,24 @@ impl PlatformExecutor for LinuxExecutor {
 
         // Cgroup will be cleaned up when dropped
 
+        // The child writes this exact line, and only from this exact exit
+        // code, right before giving up on every $PATH candidate -- so it's
+        // safe to turn back into an error here, matching Windows (which
+        // can tell "not found" from "ran and failed" synchronously, since
+        // it execs the command directly instead of through a child that
+        // searches $PATH itself). This used to stay an `Ok` with exit 127
+        // on every Unix platform, so a caller matching on
+        // `SandboxError::CommandNotFound` never saw it there.
+        if exit_code == 127
+            && signal.is_none()
+            && !killed_by_timeout
+            && !killed_by_tmp_limit
+            && stderr.starts_with("nanosandbox: ")
+            && stderr.ends_with(": command not found\n")
+        {
+            return Err(SandboxError::CommandNotFound(cmd.to_string()));
+        }
+
         Ok(ExecutionResult {
             stdout,
             stderr,
@@ -733,6 +760,7 @@ impl PlatformExecutor for LinuxExecutor {
             killed_by_timeout,
             killed_by_oom,
             killed_by_tmp_limit,
+            killed_by_cpu_limit,
             signal,
             peak_memory,
             cpu_time,
@@ -1434,6 +1462,7 @@ struct Waited {
     exit_code: i32,
     killed_by_timeout: bool,
     killed_by_tmp_limit: bool,
+    killed_by_cpu_limit: bool,
     signal: Option<i32>,
     rusage: libc::rusage,
     output_truncated: bool,
@@ -1455,7 +1484,9 @@ fn drain(fd: RawFd, out: &mut Captured) -> bool {
 }
 
 /// Feeds stdin, collects stdout/stderr and waits for the process, killing
-/// it on `timeout` or when `private_tmp` goes over its size.
+/// it on `timeout`, when `private_tmp` goes over its size, or (`cpu_limit`)
+/// when the whole cgroup goes over `cpu_time_limit` in total CPU time --
+/// `RLIMIT_CPU` alone only catches one process over it, not the group.
 ///
 /// Waits in poll() on the pipes, and reads each one until it's empty when
 /// it has data. It used to read 4 KB per stream every 10 ms, about 400 KB/s:
@@ -1467,12 +1498,19 @@ fn wait_with_timeout(
     timeout: Duration,
     mut private_tmp: Option<&mut PrivateTmp>,
     max_output: u64,
+    cpu_limit: Option<(&CgroupManager, u64)>,
 ) -> Result<Waited> {
     let start = Instant::now();
     let mut captured = [Captured::new(max_output), Captured::new(max_output)];
     let mut open = [true, true];
     let mut killed_by_timeout = false;
     let mut killed_by_tmp_limit = false;
+    // Total across the whole cgroup, not just `pid` itself: RLIMIT_CPU
+    // (set in the child) is per process, so a program that forks could use
+    // close to N times cpu_time_limit before any one of them individually
+    // hit it. cpu.stat's usage_usec works without the "cpu" controller
+    // enabled (confirmed for real), so this needs only a cgroup to exist.
+    let mut killed_by_cpu_limit = false;
     let kill = || {
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
         unsafe {
@@ -1581,6 +1619,7 @@ fn wait_with_timeout(
                 exit_code: code,
                 killed_by_timeout,
                 killed_by_tmp_limit,
+                killed_by_cpu_limit,
                 signal,
                 rusage,
                 output_truncated,
@@ -1590,6 +1629,15 @@ fn wait_with_timeout(
             if ret == 0 && !killed_by_tmp_limit && tmp.over_limit() {
                 kill();
                 killed_by_tmp_limit = true;
+            }
+        }
+        if let Some((cg, limit_usec)) = cpu_limit {
+            if ret == 0 && !killed_by_cpu_limit {
+                let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
+                if used > limit_usec {
+                    kill();
+                    killed_by_cpu_limit = true;
+                }
             }
         }
         if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {

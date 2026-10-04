@@ -55,6 +55,52 @@ fn test_macos_memory_limit_counts_escaped_child() {
     assert!(result.duration < Duration::from_secs(4));
 }
 
+/// Test: memory_limit counts a daemonized descendant too -- not just one
+/// that left the process group while its parent is still alive (the
+/// previous test), but one orphaned to launchd by a double fork, the
+/// classic daemonize pattern. The live polling check used to walk the
+/// process tree by parent links, which a reparented process isn't in;
+/// confirmed for real, it finished clean under a 5x-over allocation.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_macos_memory_limit_counts_daemonized_descendant() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .memory_limit(64 * 1024 * 1024)
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let script = "
+        python3 -c \"
+import os, time
+if os.fork() == 0:
+    if os.fork() == 0:
+        os.setsid()
+        x = bytearray(300 * 1024 * 1024)
+        for i in range(0, len(x), 4096):
+            x[i] = 1
+        time.sleep(7)
+        os._exit(0)
+    os._exit(0)
+os.wait()
+time.sleep(8)
+print('top-level done', flush=True)
+\"
+    ";
+    let result = sandbox.run("sh", &["-c", script]).unwrap();
+    assert!(
+        result.killed_by_oom,
+        "a daemonized descendant's memory should still be counted: {result:?}"
+    );
+    assert!(!result.killed_by_timeout);
+    assert!(
+        result.duration < Duration::from_secs(5),
+        "{:?}",
+        result.duration
+    );
+}
+
 /// Test: The timeout kill also reaches a child that left the process group
 #[test]
 #[cfg(target_os = "macos")]
@@ -201,6 +247,59 @@ fn test_linux_cgroup_cleanup() {
         initial_count,
         final_count
     );
+}
+
+/// Test: cpu_time_limit counts the whole cgroup, not just one process.
+/// RLIMIT_CPU (set per process too) wouldn't catch a program that forks:
+/// each child gets its own copy of the same limit, so N children could use
+/// close to N times the configured budget before any one of them, on its
+/// own, used enough to hit it. Confirmed for real: 10 busy-loop children
+/// under a 2s limit finished in well under a second once the cgroup-wide
+/// check was added, each individually nowhere near its own 2s.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_linux_cpu_time_limit_counts_the_whole_cgroup() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .cpu_time_limit(Duration::from_secs(2))
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+
+    let script = "for i in $(seq 1 10); do \
+                     ( i=0; while [ $i -lt 999999999 ]; do i=$((i+1)); done ) & \
+                   done; wait";
+    let start = std::time::Instant::now();
+    let result = sandbox.run("sh", &["-c", script]).unwrap();
+    assert!(result.killed_by_cpu_limit, "{result:?}");
+    assert!(!result.killed_by_timeout);
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+/// Test: a single process over cpu_time_limit is still caught by
+/// RLIMIT_CPU, same as before the cgroup-wide check above was added.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_linux_cpu_time_limit_single_process_unaffected() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .cpu_time_limit(Duration::from_secs(2))
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", "i=0; while [ $i -lt 999999999 ]; do i=$((i+1)); done"],
+        )
+        .unwrap();
+    assert_eq!(result.signal, Some(9)); // SIGKILL
+    assert!(!result.killed_by_cpu_limit, "{result:?}");
 }
 
 /// Test: going over memory_limit ends in an OOM kill, reported as one,

@@ -7,7 +7,11 @@
 //! - **Process isolation**: sandbox-exec with SBPL profiles
 //! - **Filesystem**: Sandbox profile file system restrictions
 //! - **Network**: Sandbox profile network restrictions + HTTP proxy for whitelisting
-//! - **Resource limits**: setrlimit (RLIMIT_AS, RLIMIT_NPROC, RLIMIT_NOFILE)
+//! - **Resource limits**: `memory_limit` by polling `rusage` over every
+//!   process of the run (see run_marker.rs); the rest (`max_open_files`,
+//!   `max_file_size`, `cpu_time_limit`) via `setrlimit`. Not `RLIMIT_AS`
+//!   (the kernel rejects it) or `RLIMIT_NPROC` (it counts the whole user,
+//!   not just the sandbox).
 
 use crate::builder::{NetworkMode, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
@@ -20,6 +24,7 @@ use crate::result::ExecutionResult;
 use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -410,9 +415,17 @@ impl MacOSExecutor {
         }
     }
 
-    /// Physical footprint summed over the process tree
-    fn tree_footprint(root: i32) -> u64 {
-        Self::sandbox_pids(root)
+    /// Physical footprint summed over the whole run, including a process
+    /// that's left the tree `sandbox_pids` would have walked (the same
+    /// daemonize pattern `run_marker` exists for). It used to use
+    /// `sandbox_pids`, so a daemonized process ballooning memory went
+    /// uncounted for as long as the run lasted -- confirmed for real: a
+    /// double fork into 300MB, with memory_limit set to 64MB, finished
+    /// clean, neither OOM nor timeout. The process still doesn't outlive
+    /// the run either way: `kill_run` always sweeps by marker too.
+    fn tree_footprint(marker: &RunMarker) -> u64 {
+        marker
+            .members()
             .into_iter()
             .map(|pid| {
                 let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
@@ -431,6 +444,23 @@ impl MacOSExecutor {
             })
             .sum()
     }
+}
+
+/// Whether `cmd` resolves to something executable, the way `execvp` would
+/// search `path_value` (":"-separated): `cmd` itself if it contains '/',
+/// else each directory of `path_value` joined with it.
+fn executable_in_path(cmd: &str, path_value: &str) -> bool {
+    let access_x_ok = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .is_ok_and(|c| unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 })
+    };
+    if cmd.contains('/') {
+        return access_x_ok(Path::new(cmd));
+    }
+    path_value
+        .split(':')
+        .filter(|d| !d.is_empty())
+        .any(|dir| access_x_ok(&Path::new(dir).join(cmd)))
 }
 
 impl Default for MacOSExecutor {
@@ -459,6 +489,22 @@ impl PlatformExecutor for MacOSExecutor {
                 .flat_map(|(k, v)| [k.as_str(), v.as_str()]),
         ) {
             std::ffi::CString::new(s)?;
+        }
+
+        // Command::spawn() below always succeeds (it spawns sandbox-exec,
+        // which exists); without this, a missing `cmd` only ever surfaced
+        // as sandbox-exec's own exit 71 and stderr wording, which is
+        // Apple's text, not this crate's, and not something to depend on
+        // staying the same. Checked directly against the host's $PATH
+        // instead, which macOS (no rootfs remapping, unlike Linux) also
+        // sees. Matches execvp: a `cmd` containing '/' is used as-is.
+        let path_value = config
+            .env
+            .get("PATH")
+            .map(String::as_str)
+            .unwrap_or("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        if !executable_in_path(cmd, path_value) {
+            return Err(SandboxError::CommandNotFound(cmd.to_string()));
         }
 
         // private_tmp: a directory for this run, removed when this returns.
@@ -749,6 +795,7 @@ impl MacOSExecutor {
                     killed_by_timeout,
                     killed_by_oom,
                     killed_by_tmp_limit,
+                    killed_by_cpu_limit: false,
                     signal,
                     peak_memory,
                     cpu_time,
@@ -763,7 +810,7 @@ impl MacOSExecutor {
                 let mut poll = Duration::from_millis(10);
                 if let Some(limit) = memory_limit {
                     if !killed_by_oom {
-                        let used = Self::tree_footprint(child_pid);
+                        let used = Self::tree_footprint(marker);
                         if used > limit {
                             Self::kill_run(child_pid, marker);
                             killed_by_oom = true;

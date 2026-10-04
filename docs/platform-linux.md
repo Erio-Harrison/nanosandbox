@@ -309,8 +309,21 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
 - Signals the host process ignores (Rust ignores `SIGPIPE`) and its signal
   mask are reset to the defaults before `exec`.
 - The command is looked up in `$PATH` by the child, after entering its
-  rootfs, trying each directory in turn as `execvp` does. Not found is exit
-  127 with `command not found` on stderr; not executable, 126.
+  rootfs, trying each directory in turn as `execvp` does. Not executable is
+  exit 126. Not found is exit 127 with `command not found` on stderr, which
+  `execute()` turns into `SandboxError::CommandNotFound` instead of
+  returning it as a normal exit code -- it used to stay an `Ok` with exit
+  127, the only Unix platform where `CommandNotFound` never actually fired.
+- `cpu_time_limit` is also checked against the whole cgroup's total CPU
+  time (`cpu.stat`'s `usage_usec`, polled the same way as the `private_tmp`
+  size check), not just charged to `pid` alone via `RLIMIT_CPU`: a program
+  that forks could otherwise use close to `N times cpu_time_limit` before
+  any one of its `N` children, on its own, used enough to hit its own copy
+  of the rlimit. Confirmed for real: 10 busy-loop children under a 2s limit
+  used to run well past it; the cgroup-wide check now catches them in
+  under a second. This needs only a cgroup to exist, not its "cpu"
+  controller enabled -- `cpu.stat`'s usage figures are populated either
+  way (confirmed for real).
 - Output is read as it arrives (`poll`), up to `max_output` per stream.
 
 ## Complete Execution Flow

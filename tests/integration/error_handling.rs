@@ -9,30 +9,31 @@ use nanosandbox::{Sandbox, SandboxError};
 use std::time::Duration;
 
 /// Test: Missing command should return CommandNotFound error
+///
+/// Used to be `Ok` with a nonzero exit code on Linux and macOS: the actual
+/// exec happens in a child (after clone, or inside sandbox-exec), so
+/// `Command::spawn()` itself never fails for it. Only Windows, which execs
+/// the command directly, could return this synchronously.
 #[test]
+#[cfg(unix)]
 fn test_error_command_not_found() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("nonexistent_command_xyz_123", &[]);
-
     match result {
         Err(SandboxError::CommandNotFound(cmd)) => {
             assert!(cmd.contains("nonexistent_command_xyz_123"));
         }
-        Err(e) => {
-            // On some systems might be ExecutionFailed
-            let msg = format!("{:?}", e);
-            assert!(
-                msg.contains("not found") || msg.contains("No such file"),
-                "Expected CommandNotFound error, got: {:?}",
-                e
-            );
-        }
-        Ok(r) => {
-            // Shell might have caught it
-            assert!(r.exit_code != 0, "Nonexistent command should fail");
-        }
+        other => panic!("expected CommandNotFound, got {other:?}"),
     }
+
+    // An absolute path to a missing file is caught the same way.
+    let result = sandbox.run("/no/such/nanosandbox-binary", &[]);
+    assert!(matches!(result, Err(SandboxError::CommandNotFound(_))));
+
+    // A real command is unaffected.
+    let result = sandbox.run("echo", &["hi"]).unwrap();
+    assert_eq!(result.stdout.trim(), "hi");
 }
 
 /// Test: Permission denied should return appropriate error

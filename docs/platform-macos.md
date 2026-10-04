@@ -215,6 +215,12 @@ the first and allowed the second are the run's. Asking about only one isn't
 enough: apps' own sandboxes can't read the temp directory at all. If the
 check doesn't behave as expected on this process itself, nothing is killed.
 
+The same lookup also finds every process of the run *while it's still
+running*, for `memory_limit`'s own periodic check (below): walking the
+process tree from the root the same way used to miss a daemonized
+descendant's memory entirely, for as long as the run lasted -- confirmed
+for real, a double fork into 300MB with a 64MB limit finished clean.
+
 ### Reading
 
 The profile allows reading everything, then denies `file-read-data` (file
@@ -224,21 +230,20 @@ config names inside those are allowed again with `file-read-data`: an allow
 of `file-read*` doesn't override a deny of the more specific operation,
 whatever the order.
 
-### Resource Limit Alternatives
+### Resource Limits
 
-macOS can use `setrlimit` to provide soft limits:
+`max_open_files`, `max_file_size` and `cpu_time_limit` are plain
+`setrlimit` calls (`RLIMIT_NOFILE`, `RLIMIT_FSIZE`, `RLIMIT_CPU`), applied
+from `Command::pre_exec` between `fork()` and `exec()`.
 
-```rust
-// Called from Command::pre_exec, after fork() but before exec()
-fn apply_resource_limits(config: &SandboxConfig) {
-    if let Some(memory) = config.memory_limit {
-        let rlim = libc::rlimit { rlim_cur: memory, rlim_max: memory };
-        unsafe { libc::setrlimit(libc::RLIMIT_AS, &rlim) };
-    }
-}
-```
-
-However, these are **soft limits** and may be ignored by processes.
+`memory_limit` can't go through `setrlimit`: the kernel rejects
+`RLIMIT_AS`. Instead, the wait loop polls physical footprint
+(`proc_pid_rusage`) summed over every process of the run (see Process
+Cleanup, above) every 2-10 ms, and kills the run once it's over.
+`RLIMIT_NPROC` for `max_pids` isn't used either, for an unrelated reason:
+it counts every process the user has, not just the sandbox's -- there's no
+macOS equivalent to cgroups' `pids.max`, so `max_pids` is refused instead
+of accepted and not enforced.
 
 ## Security Model
 

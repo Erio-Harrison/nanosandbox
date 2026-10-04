@@ -20,9 +20,7 @@
 - [x] **OOM detection** - `was_oom_killed()` reads `memory.events` for oom_kill counter
 
 ### Network Proxy
-- [ ] **Prevent IP bypass** - Sandboxed process can connect directly via IP, bypassing domain whitelist
-  - Fix: Requires iptables/pf rules or network namespace with restricted routing
-  - Status: Tests marked as `#[ignore]` with P0 TODO comment
+- [x] **Prevent IP bypass** - Linux: its own network namespace, with the proxy as the only way out. macOS: the sandbox profile allows outbound only to the proxy's port.
 
 ## P1: Robustness (Production Required)
 

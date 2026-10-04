@@ -201,7 +201,7 @@ don't compile calls to them), and Ubuntu's AppArmor userns restriction makes
 pub fn memory_limit(self, bytes: u64) -> Self
 pub fn cpu_limit(self, cpus: f64) -> Self          // CPU share, e.g. 0.5 or 2.0 cores
 pub fn wall_time_limit(self, d: Duration) -> Self  // killed after this long
-pub fn cpu_time_limit(self, d: Duration) -> Self   // per process, whole seconds
+pub fn cpu_time_limit(self, d: Duration) -> Self   // see below
 pub fn max_pids(self, n: u32) -> Self
 pub fn max_file_size(self, bytes: u64) -> Self
 pub fn max_open_files(self, n: u32) -> Self
@@ -215,13 +215,19 @@ Where a platform can't enforce a limit, `build()` refuses it
 | `memory_limit` | cgroup | checked every 10 ms, killed when over | Job Object |
 | `cpu_limit` | cgroup | refused | Job Object |
 | `wall_time_limit` | ✓ | ✓ | ✓ |
-| `cpu_time_limit` | rlimit | rlimit | refused |
+| `cpu_time_limit` | rlimit *and* cgroup total | rlimit | refused |
 | `max_pids` | cgroup | refused | refused |
 | `max_file_size`, `max_open_files` | rlimit | rlimit | refused |
 
 The presets leave out `cpu_limit` and `max_pids` on macOS. Values that can't
 work (`cpu_limit` under 0.01, NaN, a zero memory, process or file limit) are
 refused too.
+
+`cpu_time_limit` is `RLIMIT_CPU`, which only charges time to the one process
+it's set on. On Linux that's on top of a second check, against the whole
+cgroup's total CPU time, so a program that forks can't multiply its budget
+by however many children it starts; macOS and Windows have no equivalent
+for that second check.
 
 ### Network
 
@@ -381,8 +387,11 @@ Marked `#[non_exhaustive]`. The ones to expect from `build()`:
   `CgroupSetting`, `SandboxExecUnavailable`: the platform's sandboxing isn't
   available or set up.
 
-From `run()`: `CommandNotFound`, `ExecutionFailed`, `NulError` (a NUL byte
-in a command, argument or path), `Io`, `Internal`.
+From `run()`: `CommandNotFound` (the command doesn't exist, on every
+platform -- on Linux and macOS this comes from the sandboxed child's own
+failed lookup, not a host-side guess, so a `rootfs`'s or a `PATH` override's
+own view of what exists is what's checked), `ExecutionFailed`, `NulError`
+(a NUL byte in a command, argument or path), `Io`, `Internal`.
 
 ```rust
 pub type Result<T> = std::result::Result<T, SandboxError>;
