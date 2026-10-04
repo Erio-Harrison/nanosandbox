@@ -109,8 +109,8 @@
 
 ## P5: Documentation & Bindings
 
-- [ ] **Python bindings** - `crates/nanosandbox-python/` (PyO3)
-- [ ] **Node.js bindings** - `crates/nanosandbox-node/` (napi-rs)
+- [x] **Python bindings** - `crates/nanosandbox-python/` (PyO3), published to PyPI
+- [x] **Node.js bindings** - `crates/nanosandbox-node/` (napi-rs), published to npm
 - [x] **API reference** - `docs/API.md`
 - [x] **Architecture doc** - `docs/ARCHITECTURE.md`
 - [x] **Benchmark comparison** - `docs/BENCHMARKS.md`
@@ -128,7 +128,7 @@
 | P2 | 2/9 | Basic tracing + resource usage only |
 | P3 | 2/9 | Linux seccomp + macOS SBPL done; Windows on hold (see above) |
 | P4 | 4/11 | Security + basic integration tests done |
-| P5 | 3/7 | Docs done; Python/Node bindings and guides pending |
+| P5 | 5/7 | Docs + Python/Node bindings done; security/deployment guides pending |
 
 ## Documentation
 

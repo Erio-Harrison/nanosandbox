@@ -73,6 +73,8 @@ update.
 - `max_pids`, `max_open_files`, `max_file_size`, `cpu_limit`.
 - A setting a platform can't enforce is refused by `build()`
   (`SandboxError::Unsupported`), not silently ignored.
+- Python bindings (`crates/nanosandbox-python`, PyO3), published to PyPI.
+- Node.js bindings (`crates/nanosandbox-node`, napi-rs), published to npm.
 
 ### Fixed
 
