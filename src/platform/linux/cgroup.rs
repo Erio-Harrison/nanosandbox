@@ -230,26 +230,21 @@ impl CgroupManager {
     }
 
     /// Get all PIDs in this cgroup. `kill_all`/`cleanup` read this in a
-    /// retry loop and stop as soon as it's empty, so a read failure here
-    /// must not silently look the same as "no processes left" unless
-    /// that's actually what it means.
-    pub fn get_pids(&self) -> Vec<u32> {
+    /// retry loop and stop as soon as it's confirmed empty. `None` means
+    /// unknown (a non-ENOENT read error), not empty -- a caller treating
+    /// that as empty would stop retrying while processes are still alive.
+    fn get_pids(&self) -> Option<Vec<u32>> {
         let procs_path = self.path.join("cgroup.procs");
         match fs::read_to_string(&procs_path) {
-            Ok(s) => s
-                .lines()
-                .filter_map(|line| line.trim().parse::<u32>().ok())
-                .collect(),
-            // The cgroup itself is already gone -- genuinely no processes,
-            // not a failure to report.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            // Anything else (e.g. a permissions problem) is unexpected: log
-            // it, but still return empty rather than making kill_all/cleanup
-            // retry forever on a read that may never succeed -- their own
-            // bounded iteration counts are the backstop either way.
+            Ok(s) => Some(
+                s.lines()
+                    .filter_map(|line| line.trim().parse::<u32>().ok())
+                    .collect(),
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
             Err(e) => {
                 tracing::warn!("read {}: {e:?}", procs_path.display());
-                Vec::new()
+                None
             }
         }
     }
@@ -260,14 +255,16 @@ impl CgroupManager {
         let _ = fs::write(&freeze_path, "1"); // block new forks while killing
 
         for _ in 0..10 {
-            let pids = self.get_pids();
-            if pids.is_empty() {
-                break;
-            }
-            for pid in &pids {
-                unsafe {
-                    libc::kill(*pid as i32, libc::SIGKILL);
+            match self.get_pids() {
+                Some(pids) if pids.is_empty() => break,
+                Some(pids) => {
+                    for pid in &pids {
+                        unsafe {
+                            libc::kill(*pid as i32, libc::SIGKILL);
+                        }
+                    }
                 }
+                None => {}
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -279,7 +276,7 @@ impl CgroupManager {
     pub fn cleanup(&self) {
         self.kill_all();
         for _ in 0..50 {
-            if self.get_pids().is_empty() {
+            if self.get_pids().is_some_and(|p| p.is_empty()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(10));
