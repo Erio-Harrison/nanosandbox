@@ -38,12 +38,12 @@ yarn-error.log*
 .npm
 .yarn
 
-# nanobox-node generated files
-crates/nanobox-node/index.js
-crates/nanobox-node/index.d.ts
-crates/nanobox-node/*.darwin-*.node
-crates/nanobox-node/*.linux-*.node
-crates/nanobox-node/*.win32-*.node
+# nanosandbox-node generated files
+crates/nanosandbox-node/index.js
+crates/nanosandbox-node/index.d.ts
+crates/nanosandbox-node/*.darwin-*.node
+crates/nanosandbox-node/*.linux-*.node
+crates/nanosandbox-node/*.win32-*.node
 
 # IDE
 .idea/

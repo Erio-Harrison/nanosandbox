@@ -47,6 +47,20 @@ jobs:
         with:
           name: bindings-${{ matrix.target }}
           path: crates/nanosandbox-node/*.node
+      # index.js/index.d.ts are the generic multi-platform loader/types --
+      # identical regardless of which target built them. `napi artifacts`
+      # (in the publish job) only ever *updates* an existing one; it won't
+      # generate one from nothing, and the publish job's checkout never ran
+      # `napi build` itself, so without this the root package silently
+      # published with no loader at all (confirmed: that's exactly what
+      # went out in the first 0.2.1 publish).
+      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-loader
+          path: |
+            crates/nanosandbox-node/index.js
+            crates/nanosandbox-node/index.d.ts
 
   publish:
     needs: build
@@ -73,6 +87,10 @@ jobs:
           # the repo root to land where the `run:` steps below expect it.
           path: crates/nanosandbox-node/artifacts
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-loader
+          path: crates/nanosandbox-node
       - run: npx napi artifacts --output-dir artifacts
       # napi prepublish actually publishes each per-platform package itself
       # (confirmed locally -- it's not just a metadata/prep step despite the
@@ -81,6 +99,7 @@ jobs:
       - run: npx napi prepublish -t npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
