@@ -17,14 +17,14 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: crates/nanobox-python
+          working-directory: crates/nanosandbox-python
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: auto
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
-          path: crates/nanobox-python/dist
+          path: crates/nanosandbox-python/dist
 
   macos:
     runs-on: macos-latest
@@ -38,13 +38,13 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: crates/nanobox-python
+          working-directory: crates/nanosandbox-python
           target: ${{ matrix.target }}
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.target }}
-          path: crates/nanobox-python/dist
+          path: crates/nanosandbox-python/dist
 
   windows:
     runs-on: windows-latest
@@ -55,12 +55,12 @@ jobs:
           python-version: "3.12"
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: crates/nanobox-python
+          working-directory: crates/nanosandbox-python
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-windows
-          path: crates/nanobox-python/dist
+          path: crates/nanosandbox-python/dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -68,13 +68,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
         with:
-          working-directory: crates/nanobox-python
+          working-directory: crates/nanosandbox-python
           command: sdist
           args: --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
-          path: crates/nanobox-python/dist
+          path: crates/nanosandbox-python/dist
 
   publish:
     needs: [linux, macos, windows, sdist]

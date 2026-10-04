@@ -6,7 +6,7 @@ on:
 
 defaults:
   run:
-    working-directory: crates/nanobox-node
+    working-directory: crates/nanosandbox-node
 
 jobs:
   build:
@@ -46,7 +46,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
-          path: crates/nanobox-node/*.node
+          path: crates/nanosandbox-node/*.node
 
   publish:
     needs: build
@@ -58,18 +58,23 @@ jobs:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
       - run: npm install
+      - run: npx napi create-npm-dirs
       - uses: actions/download-artifact@v4
         with:
           pattern: bindings-*
-          path: artifacts
-      - run: npm run artifacts
+          # `uses:` steps don't inherit this job's working-directory default
+          # (only `run:` steps do), so this must be spelled out relative to
+          # the repo root to land where the `run:` steps below expect it.
+          path: crates/nanosandbox-node/artifacts
+          merge-multiple: true
+      - run: npx napi artifacts --output-dir artifacts
+      # napi prepublish actually publishes each per-platform package itself
+      # (confirmed locally -- it's not just a metadata/prep step despite the
+      # name); it also updates this package.json's optionalDependencies to
+      # point at them. The root package still needs its own `npm publish`.
+      - run: npx napi prepublish -t npm
         env:
-          NAPI_ARTIFACTS_DIR: artifacts
-      - run: npx napi prepublish -t npm --skip-gh-release
-      - run: |
-          for pkg in npm/*; do
-            npm publish "$pkg" --access public
-          done
-          npm publish --access public
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

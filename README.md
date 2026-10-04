@@ -67,7 +67,7 @@ result = sandbox.run("echo", ["hello"])
 print(result.stdout)
 ```
 
-Install with: `pip install nanosandbox`. Source and build instructions: [crates/nanobox-python](crates/nanobox-python).
+Install with: `pip install nanosandbox`. Source and build instructions: [crates/nanosandbox-python](crates/nanosandbox-python).
 
 ### Node.js Bindings
 
@@ -83,7 +83,7 @@ const result = sandbox.run("echo", ["hello"]);
 console.log(result.stdout);
 ```
 
-Install with: `npm install nanosandbox`. Source and build instructions: [crates/nanobox-node](crates/nanobox-node).
+Install with: `npm install nanosandbox`. Source and build instructions: [crates/nanosandbox-node](crates/nanosandbox-node).
 
 ## Network Control
 
