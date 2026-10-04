@@ -78,7 +78,7 @@ impl ProxiedNetwork {
                 });
             })
             .map_err(|e| SandboxError::Internal {
-                context: "spawn proxy thread".into(),
+                context: "Failed to spawn proxy thread".into(),
                 source: Box::new(e),
             })?;
 
@@ -89,7 +89,7 @@ impl ProxiedNetwork {
                 source: Box::new(e),
             })?
             .map_err(|e| SandboxError::Internal {
-                context: "create proxy runtime".into(),
+                context: "Failed to create proxy runtime".into(),
                 source: Box::new(e),
             })?;
 
