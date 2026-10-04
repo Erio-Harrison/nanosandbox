@@ -146,9 +146,10 @@ pub(super) fn wait_with_timeout(
             if err.raw_os_error() == Some(libc::EINTR) {
                 continue;
             }
-            return Err(SandboxError::Internal(format!(
-                "wait4 for child {pid}: {err}"
-            )));
+            return Err(SandboxError::Internal {
+                context: format!("wait4 for child {pid}"),
+                source: Box::new(err),
+            });
         }
         let exited = ret == pid.as_raw() && libc::WIFEXITED(status);
         let signaled = ret == pid.as_raw() && libc::WIFSIGNALED(status);

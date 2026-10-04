@@ -443,24 +443,29 @@ impl SandboxBuilder {
             .iter()
             .find(|(path, _)| path == Path::new("/tmp") || path == Path::new("/private/tmp"))
         {
-            return Err(SandboxError::Config(format!(
-                "tmpfs({}, ...): use private_tmp(size) for /tmp",
-                path.display()
-            )));
+            return Err(SandboxError::Config {
+                context: format!(
+                    "tmpfs({}, ...): use private_tmp(size) for /tmp",
+                    path.display()
+                ),
+                source: None,
+            });
         }
 
         let c = &self.config;
         if c.allow_private_destinations && !matches!(c.network_mode, NetworkMode::Proxied { .. }) {
-            return Err(SandboxError::Config(
-                "allow_private_destinations() only applies with allow_network()".into(),
-            ));
+            return Err(SandboxError::Config {
+                context: "allow_private_destinations() only applies with allow_network()".into(),
+                source: None,
+            });
         }
         if let Some(cpus) = c.cpu_limit {
             // Linux's cpu.max takes at least 1ms per 100ms period.
             if !cpus.is_finite() || cpus < 0.01 {
-                return Err(SandboxError::Config(format!(
-                    "cpu_limit({cpus}): must be at least 0.01 (cores)"
-                )));
+                return Err(SandboxError::Config {
+                    context: format!("cpu_limit({cpus}): must be at least 0.01 (cores)"),
+                    source: None,
+                });
             }
         }
         for (value, setting) in [
@@ -469,16 +474,17 @@ impl SandboxBuilder {
             (c.max_open_files.map(u64::from), "max_open_files"),
         ] {
             if value == Some(0) {
-                return Err(SandboxError::Config(format!(
-                    "{setting}(0): nothing could run"
-                )));
+                return Err(SandboxError::Config {
+                    context: format!("{setting}(0): nothing could run"),
+                    source: None,
+                });
             }
         }
         if c.hostname.is_empty() || c.hostname.len() > 64 {
-            return Err(SandboxError::Config(format!(
-                "hostname {:?}: must be 1 to 64 bytes",
-                c.hostname
-            )));
+            return Err(SandboxError::Config {
+                context: format!("hostname {:?}: must be 1 to 64 bytes", c.hostname),
+                source: None,
+            });
         }
 
         // Validate rootfs if specified
@@ -504,9 +510,10 @@ impl SandboxBuilder {
         {
             // Check sandbox-exec availability
             if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
-                return Err(SandboxError::Config(
-                    "sandbox-exec not found at /usr/bin/sandbox-exec".into(),
-                ));
+                return Err(SandboxError::Config {
+                    context: "sandbox-exec not found at /usr/bin/sandbox-exec".into(),
+                    source: None,
+                });
             }
 
             // Unlike Linux (where working_dir can be a path that only

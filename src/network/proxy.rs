@@ -216,12 +216,12 @@ impl HttpProxy {
                             let blocked = Arc::clone(&blocked);
                             connections.spawn(async move {
                                 if let Err(e) = Self::handle_connection(stream, &policy, &blocked).await {
-                                    tracing::debug!("Connection from {} error: {}", addr, e);
+                                    tracing::debug!("Connection from {} error: {:?}", addr, e);
                                 }
                             });
                         }
                         Err(e) => {
-                            tracing::error!("Accept error: {}", e);
+                            tracing::error!("Accept error: {:?}", e);
                         }
                     }
                 }
@@ -517,7 +517,7 @@ impl HttpProxy {
                 Self::send_error(client, 403, "Destination address not allowed").await
             }
             ConnectError::Failed(e) => {
-                tracing::debug!("Failed to connect to {host}:{port}: {e}");
+                tracing::debug!("Failed to connect to {host}:{port}: {e:?}");
                 Self::send_error(client, 502, "Bad Gateway").await
             }
             ConnectError::TimedOut => {

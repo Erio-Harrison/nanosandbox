@@ -157,8 +157,10 @@ impl WriteRules {
         handled |= read;
 
         let path = |p: &Path| {
-            CString::new(p.as_os_str().as_bytes())
-                .map_err(|_| SandboxError::Config(format!("path contains NUL: {}", p.display())))
+            CString::new(p.as_os_str().as_bytes()).map_err(|e| SandboxError::Config {
+                context: format!("path contains NUL: {}", p.display()),
+                source: Some(Box::new(e)),
+            })
         };
         let mut paths = vec![(c"/dev".to_owned(), handled & FILE_RIGHTS)];
         for area in writable_areas(config).chain(private_tmp) {

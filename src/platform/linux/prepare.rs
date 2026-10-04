@@ -44,8 +44,10 @@ impl Pipes {
         use nix::unistd::pipe2;
 
         let pipe = |what: &str| {
-            pipe2(OFlag::O_CLOEXEC)
-                .map_err(|e| SandboxError::Internal(format!("create pipe for child {what}: {e}")))
+            pipe2(OFlag::O_CLOEXEC).map_err(|e| SandboxError::Internal {
+                context: format!("create pipe for child {what}"),
+                source: Box::new(e),
+            })
         };
         let (stdout_read_fd, stdout_write_fd) = pipe("stdout")?;
         let (stderr_read_fd, stderr_write_fd) = pipe("stderr")?;

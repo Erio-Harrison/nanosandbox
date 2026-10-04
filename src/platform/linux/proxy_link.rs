@@ -55,10 +55,10 @@ impl ProxyLink {
         let mut fds = [0; 2];
         let flags = libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC;
         if unsafe { libc::socketpair(libc::AF_UNIX, flags, 0, fds.as_mut_ptr()) } != 0 {
-            return Err(SandboxError::Internal(format!(
-                "create proxy socketpair: {}",
-                std::io::Error::last_os_error()
-            )));
+            return Err(SandboxError::Internal {
+                context: "create proxy socketpair".into(),
+                source: Box::new(std::io::Error::last_os_error()),
+            });
         }
         let [parent, child] = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
         Ok(Self {

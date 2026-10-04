@@ -57,9 +57,8 @@ fn test_error_permission_denied() {
 
     // Should fail with some error (permission or execution related)
     match result {
-        Err(SandboxError::ExecutionFailed(msg)) => {
+        Err(SandboxError::ExecutionFailed { .. }) => {
             // Execution failed is expected for permission issues
-            let _ = msg; // Any message is acceptable
         }
         Err(SandboxError::CommandNotFound(_)) => {
             // Also acceptable since file isn't executable
@@ -147,7 +146,7 @@ fn test_graceful_cgroup_check() {
         // Without, should return appropriate error
         match result {
             Ok(_) => { /* Good */ }
-            Err(SandboxError::CgroupCreation(_)) => { /* Cgroup error - acceptable */ }
+            Err(SandboxError::CgroupCreation { .. }) => { /* Cgroup error - acceptable */ }
             Err(SandboxError::CgroupV2Unavailable) => { /* Also acceptable */ }
             Err(e) => {
                 // Any error should be descriptive, not a panic
@@ -273,7 +272,7 @@ fn test_invalid_limits_refused() {
         Sandbox::builder().max_open_files(0),
     ] {
         assert!(
-            matches!(builder.build(), Err(SandboxError::Config(_))),
+            matches!(builder.build(), Err(SandboxError::Config { .. })),
             "an invalid limit was accepted"
         );
     }

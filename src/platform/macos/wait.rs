@@ -170,9 +170,10 @@ impl MacOSExecutor {
                 }
                 Self::kill_run(child_pid, marker);
                 let _ = child.wait();
-                return Err(SandboxError::ExecutionFailed(format!(
-                    "wait4 failed: {err}"
-                )));
+                return Err(SandboxError::ExecutionFailed {
+                    context: "wait4 failed".into(),
+                    source: Box::new(err),
+                });
             }
         }
     }

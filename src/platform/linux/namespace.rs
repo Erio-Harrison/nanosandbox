@@ -72,7 +72,8 @@ impl UserNamespace {
             let setgroups_path = format!("/proc/{}/setgroups", child_pid);
             fs::write(&setgroups_path, "deny").map_err(|e| SandboxError::NamespaceCreation {
                 ns_type: "user".into(),
-                reason: format!("Failed to write setgroups: {}", e),
+                context: "Failed to write setgroups".into(),
+                source: Box::new(e),
             })?;
         }
 
@@ -81,7 +82,8 @@ impl UserNamespace {
         let uid_map_path = format!("/proc/{}/uid_map", child_pid);
         fs::write(&uid_map_path, &uid_map).map_err(|e| SandboxError::NamespaceCreation {
             ns_type: "user".into(),
-            reason: format!("Failed to write uid_map: {}", e),
+            context: "Failed to write uid_map".into(),
+            source: Box::new(e),
         })?;
 
         // Write GID mapping: inner_gid outer_gid 1
@@ -89,7 +91,8 @@ impl UserNamespace {
         let gid_map_path = format!("/proc/{}/gid_map", child_pid);
         fs::write(&gid_map_path, &gid_map).map_err(|e| SandboxError::NamespaceCreation {
             ns_type: "user".into(),
-            reason: format!("Failed to write gid_map: {}", e),
+            context: "Failed to write gid_map".into(),
+            source: Box::new(e),
         })?;
 
         Ok(())

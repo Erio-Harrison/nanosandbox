@@ -394,37 +394,48 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
     let in_tmpfs = |path: &Path| tmpfs.iter().any(|(t, _)| t != path && path.starts_with(t));
     for (path, _) in &config.tmpfs_mounts {
         if !path.exists() {
-            return Err(SandboxError::Config(format!(
-                "tmpfs path {} does not exist; without a rootfs, it's mounted over the \
-                 host's own path, which must already exist",
-                path.display()
-            )));
+            return Err(SandboxError::Config {
+                context: format!(
+                    "tmpfs path {} does not exist; without a rootfs, it's mounted over the \
+                     host's own path, which must already exist",
+                    path.display()
+                ),
+                source: None,
+            });
         }
     }
     for m in &config.mounts {
         if !in_tmpfs(&m.target) && !m.target.exists() {
-            return Err(SandboxError::Config(format!(
-                "bind target {} does not exist; without a rootfs, binds go over the host's \
-                 own paths, so it must already exist",
-                m.target.display()
-            )));
+            return Err(SandboxError::Config {
+                context: format!(
+                    "bind target {} does not exist; without a rootfs, binds go over the host's \
+                     own paths, so it must already exist",
+                    m.target.display()
+                ),
+                source: None,
+            });
         }
     }
     // A tmpfs starts empty: only what's bound into it is there.
     let wd = &config.working_dir;
     if in_tmpfs(wd) && !config.mounts.iter().any(|m| wd.starts_with(&m.target)) {
-        return Err(SandboxError::Config(format!(
-            "working_dir {} is inside a tmpfs, which starts empty; make it readable or \
-             writable to have it there",
-            wd.display()
-        )));
+        return Err(SandboxError::Config {
+            context: format!(
+                "working_dir {} is inside a tmpfs, which starts empty; make it readable or \
+                 writable to have it there",
+                wd.display()
+            ),
+            source: None,
+        });
     }
     Ok(())
 }
 
 fn path_cstring(path: &std::path::Path) -> Result<CString> {
-    CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| SandboxError::Config(format!("path contains a NUL byte: {}", path.display())))
+    CString::new(path.as_os_str().as_bytes()).map_err(|e| SandboxError::Config {
+        context: format!("path contains a NUL byte: {}", path.display()),
+        source: Some(Box::new(e)),
+    })
 }
 
 /// nosuid/nodev/noexec currently set on the mount holding `path`.

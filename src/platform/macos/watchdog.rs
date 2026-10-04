@@ -50,7 +50,10 @@ impl Watchdog {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
-                .map_err(|e| SandboxError::ExecutionFailed(format!("spawn watchdog: {e}")))?
+                .map_err(|e| SandboxError::ExecutionFailed {
+                    context: "spawn watchdog".into(),
+                    source: Box::new(e),
+                })?
         };
         Ok(Self {
             write_end: Some(write_end),
@@ -79,10 +82,10 @@ fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd)> {
     let _fork = super::FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
     let mut fds = [0i32; 2];
     if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(SandboxError::Internal(format!(
-            "create watchdog pipe: {}",
-            std::io::Error::last_os_error()
-        )));
+        return Err(SandboxError::Internal {
+            context: "create watchdog pipe".into(),
+            source: Box::new(std::io::Error::last_os_error()),
+        });
     }
     for fd in fds {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } != 0 {
@@ -91,9 +94,10 @@ fn cloexec_pipe() -> Result<(OwnedFd, OwnedFd)> {
                 libc::close(fds[0]);
                 libc::close(fds[1]);
             }
-            return Err(SandboxError::Internal(format!(
-                "set close-on-exec on watchdog pipe: {err}"
-            )));
+            return Err(SandboxError::Internal {
+                context: "set close-on-exec on watchdog pipe".into(),
+                source: Box::new(err),
+            });
         }
     }
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })

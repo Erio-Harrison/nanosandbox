@@ -187,7 +187,10 @@ impl PlatformExecutor for LinuxExecutor {
             .filter(|_| userns_restricted)
             .map(PrivateTmp::create)
             .transpose()
-            .map_err(|e| SandboxError::Internal(format!("create private /tmp: {e}")))?;
+            .map_err(|e| SandboxError::Internal {
+                context: "create private /tmp".into(),
+                source: Box::new(e),
+            })?;
 
         // See prepare::prepare_env: clear_env, TMPDIR, the proxy's env vars,
         // a default PATH.
@@ -295,7 +298,10 @@ impl PlatformExecutor for LinuxExecutor {
                 Some(Signal::SIGCHLD as i32),
             )
         }
-        .map_err(|e| SandboxError::Internal(format!("clone sandboxed process: {e}")))?;
+        .map_err(|e| SandboxError::Internal {
+            context: "clone sandboxed process".into(),
+            source: Box::new(e),
+        })?;
 
         // Parent process
 
@@ -322,8 +328,10 @@ impl PlatformExecutor for LinuxExecutor {
                 cg.add_process(child_pid.as_raw() as u32)?;
             }
             // Signal child to continue.
-            write_raw(ready_write, &[0u8])
-                .map_err(|e| SandboxError::Internal(format!("signal child to continue: {e}")))?;
+            write_raw(ready_write, &[0u8]).map_err(|e| SandboxError::Internal {
+                context: "signal child to continue".into(),
+                source: Box::new(e),
+            })?;
             Ok(())
         })();
         if let Err(e) = setup {
@@ -343,9 +351,10 @@ impl PlatformExecutor for LinuxExecutor {
                 Some(Err(e)) => {
                     let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
                     let _ = nix::sys::wait::waitpid(child_pid, None);
-                    return Err(SandboxError::Internal(format!(
-                        "serve the proxy inside the sandbox: {e}"
-                    )));
+                    return Err(SandboxError::Internal {
+                        context: "serve the proxy inside the sandbox".into(),
+                        source: Box::new(e),
+                    });
                 }
                 attached => attached.transpose().ok().flatten(),
             },

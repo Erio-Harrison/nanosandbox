@@ -89,7 +89,10 @@ impl PlatformExecutor for WindowsExecutor {
             if e.kind() == std::io::ErrorKind::NotFound {
                 SandboxError::CommandNotFound(cmd.to_string())
             } else {
-                SandboxError::ExecutionFailed(e.to_string())
+                SandboxError::ExecutionFailed {
+                    context: "spawn process".into(),
+                    source: Box::new(e),
+                }
             }
         })?;
 
@@ -271,7 +274,10 @@ impl WindowsExecutor {
                     std::thread::sleep(Duration::from_millis(10));
                 }
                 Err(e) => {
-                    return Err(SandboxError::ExecutionFailed(e.to_string()));
+                    return Err(SandboxError::ExecutionFailed {
+                        context: "wait for process".into(),
+                        source: Box::new(e),
+                    });
                 }
             }
         }

@@ -77,12 +77,21 @@ impl ProxiedNetwork {
                     let _ = shutdown_rx.await;
                 });
             })
-            .map_err(|e| SandboxError::Internal(format!("Failed to spawn proxy thread: {e}")))?;
+            .map_err(|e| SandboxError::Internal {
+                context: "spawn proxy thread".into(),
+                source: Box::new(e),
+            })?;
 
         let runtime = runtime_rx
             .recv()
-            .map_err(|_| SandboxError::Internal("proxy thread went away".into()))?
-            .map_err(|e| SandboxError::Internal(format!("Failed to create proxy runtime: {e}")))?;
+            .map_err(|e| SandboxError::Internal {
+                context: "proxy thread went away".into(),
+                source: Box::new(e),
+            })?
+            .map_err(|e| SandboxError::Internal {
+                context: "create proxy runtime".into(),
+                source: Box::new(e),
+            })?;
 
         Ok(Self {
             shutdown_tx: Some(shutdown_tx),

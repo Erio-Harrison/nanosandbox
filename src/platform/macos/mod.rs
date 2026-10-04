@@ -110,10 +110,10 @@ impl MacOSExecutor {
     fn report_pipe() -> Result<(OwnedFd, OwnedFd)> {
         let mut fds = [0 as libc::c_int; 2];
         if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-            return Err(SandboxError::Internal(format!(
-                "create limit report pipe: {}",
-                std::io::Error::last_os_error()
-            )));
+            return Err(SandboxError::Internal {
+                context: "create limit report pipe".into(),
+                source: Box::new(std::io::Error::last_os_error()),
+            });
         }
         for fd in fds {
             unsafe {
@@ -123,8 +123,12 @@ impl MacOSExecutor {
         Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
     }
 
-    /// Turn a child's report into a message naming the rejected setting.
-    fn limit_failure(report: OwnedFd, config: &SandboxConfig) -> Option<String> {
+    /// Turn a child's report into a message naming the rejected setting,
+    /// and the specific `io::Error` the rejected `setrlimit` call failed
+    /// with (reconstructed from the errno the child sent, not the same
+    /// object as the `Command::spawn()` failure the caller already has --
+    /// but the one that actually explains it).
+    fn limit_failure(report: OwnedFd, config: &SandboxConfig) -> Option<(String, std::io::Error)> {
         let mut buf = [0u8; 5];
         let n = unsafe {
             libc::read(
@@ -155,9 +159,9 @@ impl MacOSExecutor {
             ),
             _ => return None,
         };
-        Some(format!(
-            "cannot apply {setting}={value} ({rlimit}): {}",
-            std::io::Error::from_raw_os_error(errno)
+        Some((
+            format!("cannot apply {setting}={value} ({rlimit})"),
+            std::io::Error::from_raw_os_error(errno),
         ))
     }
 
@@ -240,10 +244,15 @@ impl PlatformExecutor for MacOSExecutor {
             .private_tmp
             .map(PrivateTmp::create)
             .transpose()
-            .map_err(|e| SandboxError::ExecutionFailed(format!("create private /tmp: {e}")))?;
+            .map_err(|e| SandboxError::ExecutionFailed {
+                context: "create private /tmp".into(),
+                source: Box::new(e),
+            })?;
 
-        let marker = RunMarker::create()
-            .map_err(|e| SandboxError::ExecutionFailed(format!("create run marker: {e}")))?;
+        let marker = RunMarker::create().map_err(|e| SandboxError::ExecutionFailed {
+            context: "create run marker".into(),
+            source: Box::new(e),
+        })?;
 
         // allow_network: a proxy listener for this run alone, on a fresh
         // loopback port the profile lets only this run reach. It closes when
@@ -350,8 +359,12 @@ impl PlatformExecutor for MacOSExecutor {
                 return Err(SandboxError::CommandNotFound(cmd.to_string()));
             }
             Err(e) => {
-                let msg = Self::limit_failure(report_rd, config).unwrap_or_else(|| e.to_string());
-                return Err(SandboxError::ExecutionFailed(msg));
+                let (context, source) = Self::limit_failure(report_rd, config)
+                    .unwrap_or_else(|| ("spawn sandbox-exec".into(), e));
+                return Err(SandboxError::ExecutionFailed {
+                    context,
+                    source: Box::new(source),
+                });
             }
         };
 

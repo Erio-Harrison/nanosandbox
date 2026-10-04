@@ -78,8 +78,9 @@ impl CgroupManager {
     pub fn create(sandbox_id: &str, needed: &[&str]) -> Result<Self> {
         let base = ensure_base(needed)?;
         let path = base.join(sandbox_id);
-        fs::create_dir_all(&path).map_err(|e| {
-            SandboxError::CgroupCreation(format!("Failed to create cgroup {}: {}", sandbox_id, e))
+        fs::create_dir_all(&path).map_err(|e| SandboxError::CgroupCreation {
+            context: format!("Failed to create cgroup {sandbox_id}: {e}"),
+            source: Some(Box::new(e)),
         })?;
         Ok(Self { path })
     }
@@ -97,7 +98,7 @@ impl CgroupManager {
             controller: "memory".into(),
             setting: "max".into(),
             value: bytes.to_string(),
-            reason: e.to_string(),
+            source: Box::new(e),
         })?;
 
         // No memory.high: it used to be set to 90% of the limit, where the
@@ -112,7 +113,7 @@ impl CgroupManager {
                 controller: "memory".into(),
                 setting: "swap.max".into(),
                 value: "0".into(),
-                reason: e.to_string(),
+                source: Box::new(e),
             })?;
         }
 
@@ -132,7 +133,7 @@ impl CgroupManager {
             controller: "cpu".into(),
             setting: "max".into(),
             value: value.clone(),
-            reason: e.to_string(),
+            source: Box::new(e),
         })?;
 
         Ok(())
@@ -145,7 +146,7 @@ impl CgroupManager {
             controller: "pids".into(),
             setting: "max".into(),
             value: max.to_string(),
-            reason: e.to_string(),
+            source: Box::new(e),
         })?;
 
         Ok(())
@@ -154,8 +155,9 @@ impl CgroupManager {
     /// Add a process to this cgroup
     pub fn add_process(&self, pid: u32) -> Result<()> {
         let path = self.path.join("cgroup.procs");
-        fs::write(&path, pid.to_string()).map_err(|e| {
-            SandboxError::CgroupCreation(format!("Failed to add PID {} to cgroup: {}", pid, e))
+        fs::write(&path, pid.to_string()).map_err(|e| SandboxError::CgroupCreation {
+            context: format!("Failed to add PID {pid} to cgroup: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         Ok(())
@@ -164,7 +166,10 @@ impl CgroupManager {
     /// Get memory statistics
     pub fn get_memory_stats(&self) -> Result<MemoryStats> {
         let peak = fs::read_to_string(self.path.join("memory.peak"))
-            .map_err(|e| SandboxError::Internal(format!("Failed to read memory.peak: {}", e)))?
+            .map_err(|e| SandboxError::Internal {
+                context: "Failed to read memory.peak".into(),
+                source: Box::new(e),
+            })?
             .trim()
             .parse::<u64>()
             .unwrap_or(0);
@@ -174,8 +179,11 @@ impl CgroupManager {
 
     /// Get CPU statistics
     pub fn get_cpu_stats(&self) -> Result<CpuStats> {
-        let stat = fs::read_to_string(self.path.join("cpu.stat"))
-            .map_err(|e| SandboxError::Internal(format!("Failed to read cpu.stat: {}", e)))?;
+        let stat =
+            fs::read_to_string(self.path.join("cpu.stat")).map_err(|e| SandboxError::Internal {
+                context: "Failed to read cpu.stat".into(),
+                source: Box::new(e),
+            })?;
 
         let total_usec = stat
             .lines()
@@ -189,8 +197,10 @@ impl CgroupManager {
     /// Get memory events (for OOM detection)
     pub fn get_memory_events(&self) -> Result<MemoryEvents> {
         let events_path = self.path.join("memory.events");
-        let events = fs::read_to_string(&events_path)
-            .map_err(|e| SandboxError::Internal(format!("Failed to read memory.events: {}", e)))?;
+        let events = fs::read_to_string(&events_path).map_err(|e| SandboxError::Internal {
+            context: "Failed to read memory.events".into(),
+            source: Box::new(e),
+        })?;
 
         let mut result = MemoryEvents::default();
 
@@ -283,40 +293,44 @@ fn ensure_base(needed: &[&str]) -> Result<PathBuf> {
     let base = scope.join(NANOSANDBOX_CGROUP);
     if base.exists() {
         if !safe_to_build_under(&base) {
-            return Err(SandboxError::CgroupCreation(format!(
-                "{} already exists and holds a process we don't recognize as our own — refusing \
-                 to build sandbox cgroups there in case it belongs to something else",
-                base.display()
-            )));
+            return Err(SandboxError::CgroupCreation {
+                context: format!(
+                    "{} already exists and holds a process we don't recognize as our own — refusing \
+                     to build sandbox cgroups there in case it belongs to something else",
+                    base.display()
+                ),
+                source: None,
+            });
         }
     } else {
-        fs::create_dir_all(&base).map_err(|e| {
-            SandboxError::CgroupCreation(format!(
-                "Failed to create base cgroup {}: {e}",
-                base.display()
-            ))
+        fs::create_dir_all(&base).map_err(|e| SandboxError::CgroupCreation {
+            context: format!("Failed to create base cgroup {}: {e}", base.display()),
+            source: Some(Box::new(e)),
         })?;
     }
 
     let available = read_controller_list(&base.join("cgroup.controllers"))?;
     for controller in needed {
         if !available.iter().any(|c| c == controller) {
-            return Err(SandboxError::CgroupCreation(if root_owned {
-                format!(
-                    "the '{controller}' controller is not available under {} (available: {}); \
-                     the running kernel does not expose it",
-                    base.display(),
-                    available.join(" ")
-                )
-            } else {
-                format!(
-                    "the '{controller}' controller is not available in this process's own \
-                     delegated scope at {} (available: {}); its parent slice does not have it \
-                     enabled in cgroup.subtree_control",
-                    scope.display(),
-                    available.join(" ")
-                )
-            }));
+            return Err(SandboxError::CgroupCreation {
+                context: if root_owned {
+                    format!(
+                        "the '{controller}' controller is not available under {} (available: {}); \
+                         the running kernel does not expose it",
+                        base.display(),
+                        available.join(" ")
+                    )
+                } else {
+                    format!(
+                        "the '{controller}' controller is not available in this process's own \
+                         delegated scope at {} (available: {}); its parent slice does not have it \
+                         enabled in cgroup.subtree_control",
+                        scope.display(),
+                        available.join(" ")
+                    )
+                },
+                source: None,
+            });
         }
     }
 
@@ -349,7 +363,10 @@ fn ensure_own_scope() -> Result<PathBuf> {
     SCOPE
         .get_or_init(compute_own_scope)
         .clone()
-        .map_err(SandboxError::CgroupCreation)
+        .map_err(|context| SandboxError::CgroupCreation {
+            context,
+            source: None,
+        })
 }
 
 /// Every controller nanosandbox might enable for a sandbox run.
@@ -393,6 +410,11 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
             warn_if_leaving_resource_limits_behind(unit);
             preferred_slice = unit_property(unit, "Slice").and_then(|v| String::try_from(v).ok());
         }
+        // Flattened to a String here, not kept as the SandboxError these
+        // return: this whole function's result is cached in SCOPE (above)
+        // and `.clone()`d on every call, and a trait-object source inside
+        // SandboxError can't be Clone. The message text survives intact;
+        // only the structured .source() chain is lost at this one boundary.
         relocate_into_delegated_scope(preferred_slice.as_deref()).map_err(|e| e.to_string())?;
         own_cgroup_path().map_err(|e| e.to_string())?
     };
@@ -590,7 +612,12 @@ fn sweep_stale_scopes(target: &Path) {
 /// that returned true, atomically claiming this call as that next sweep if
 /// so. Shared by the two periodic sweeps below; each keeps its own gate.
 fn sweep_due(last: &std::sync::Mutex<Option<Instant>>) -> bool {
-    let mut last = last.lock().unwrap();
+    // A panic elsewhere while holding this lock must not cascade into every
+    // future caller across the process (see FORK_LOCK in macos/mod.rs for
+    // the same pattern): the sweep is opportunistic housekeeping, not a
+    // correctness-critical section, so a poisoned lock's stale state is
+    // still safe to read.
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
     let due = match *last {
         Some(t) => t.elapsed() >= SWEEP_INTERVAL,
         None => true,
@@ -800,15 +827,18 @@ fn user_app_slice(cgroup_root: &str, uid: u32) -> PathBuf {
 
 /// Reads this process's own cgroup v2 path from `/proc/self/cgroup`.
 fn own_cgroup_path() -> Result<PathBuf> {
-    let raw = fs::read_to_string("/proc/self/cgroup")
-        .map_err(|e| SandboxError::CgroupCreation(format!("cannot read /proc/self/cgroup: {e}")))?;
+    let raw =
+        fs::read_to_string("/proc/self/cgroup").map_err(|e| SandboxError::CgroupCreation {
+            context: format!("cannot read /proc/self/cgroup: {e}"),
+            source: Some(Box::new(e)),
+        })?;
     let rel = raw
         .lines()
         .find_map(|line| line.strip_prefix("0::"))
-        .ok_or_else(|| {
-            SandboxError::CgroupCreation(
-                "not a unified cgroup v2 hierarchy (no '0::' line in /proc/self/cgroup)".into(),
-            )
+        .ok_or_else(|| SandboxError::CgroupCreation {
+            context: "not a unified cgroup v2 hierarchy (no '0::' line in /proc/self/cgroup)"
+                .into(),
+            source: None,
         })?
         .trim();
     let mut acc = PathBuf::from(CGROUP_ROOT);
@@ -825,7 +855,10 @@ fn relocate_into_delegated_scope(preferred_slice: Option<&str>) -> Result<()> {
     RESULT
         .get_or_init(|| try_relocate_into_delegated_scope(preferred_slice))
         .clone()
-        .map_err(SandboxError::CgroupCreation)
+        .map_err(|context| SandboxError::CgroupCreation {
+            context,
+            source: None,
+        })
 }
 
 fn try_relocate_into_delegated_scope(
@@ -888,8 +921,9 @@ fn try_relocate_into_delegated_scope(
 }
 
 fn read_controller_list(path: &Path) -> Result<Vec<String>> {
-    let content = fs::read_to_string(path).map_err(|e| {
-        SandboxError::CgroupCreation(format!("cannot read {}: {e}", path.display()))
+    let content = fs::read_to_string(path).map_err(|e| SandboxError::CgroupCreation {
+        context: format!("cannot read {}: {e}", path.display()),
+        source: Some(Box::new(e)),
     })?;
     Ok(content.split_whitespace().map(str::to_string).collect())
 }
@@ -911,7 +945,10 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
     // genuine cross-process contention (another nanosandbox process
     // sharing this same delegated scope).
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = LOCK.lock().unwrap();
+    // See sweep_due above: a panic elsewhere while holding this lock must
+    // not poison every later caller -- there's no shared data here to be
+    // left inconsistent by it, only serialization.
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let subtree_path = dir.join("cgroup.subtree_control");
     let enabled = read_controller_list(&subtree_path)?;
@@ -949,10 +986,10 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             Ok(()) => return Ok(()),
             Err(e) if e.raw_os_error() == Some(libc::EBUSY) => last_err = Some(e),
             Err(e) => {
-                return Err(SandboxError::CgroupCreation(format!(
-                    "cannot enable '{value}' in {}: {e}",
-                    subtree_path.display()
-                )));
+                return Err(SandboxError::CgroupCreation {
+                    context: format!("cannot enable '{value}' in {}: {e}", subtree_path.display()),
+                    source: Some(Box::new(e)),
+                });
             }
         }
     }
@@ -974,12 +1011,16 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             format!("{pid}({} ppid={})", field("Name:"), field("PPid:"))
         })
         .collect();
-    Err(SandboxError::CgroupCreation(format!(
-        "cannot enable '{value}' in {} (still busy after retries; processes directly in it: [{}]): {}",
-        subtree_path.display(),
-        described.join(" "),
-        last_err.expect("loop only exits via return or after recording an EBUSY error")
-    )))
+    let last_err = last_err.expect("loop only exits via return or after recording an EBUSY error");
+    Err(SandboxError::CgroupCreation {
+        context: format!(
+            "cannot enable '{value}' in {} (still busy after retries; processes directly in it: [{}]): {}",
+            subtree_path.display(),
+            described.join(" "),
+            last_err
+        ),
+        source: Some(Box::new(last_err)),
+    })
 }
 
 #[cfg(test)]

@@ -15,9 +15,15 @@ pub enum SandboxError {
     Unsupported { setting: String, reason: String },
 
     /// The configuration is inconsistent, such as a bind target that doesn't
-    /// exist.
-    #[error("Configuration error: {0}")]
-    Config(String),
+    /// exist. `source` is `Some` only where the problem was detected via an
+    /// underlying error (e.g. a path with a NUL byte); most of these are
+    /// plain validation refusals with nothing to attach.
+    #[error("Configuration error: {context}")]
+    Config {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
     /// A path the configuration names doesn't exist.
     #[error("Path not found: {0}")]
@@ -30,18 +36,36 @@ pub enum SandboxError {
     #[error("Cgroups v2 not available or not mounted")]
     CgroupV2Unavailable,
 
-    #[error("Failed to create {ns_type} namespace: {reason}")]
-    NamespaceCreation { ns_type: String, reason: String },
+    #[error("Failed to create {ns_type} namespace: {context}: {source}")]
+    NamespaceCreation {
+        ns_type: String,
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
-    #[error("Failed to create cgroup: {0}")]
-    CgroupCreation(String),
+    /// `source` is `None` for a plain refusal with no underlying error (an
+    /// existing directory the kernel didn't object to, but that we don't
+    /// recognize as our own), and for the couple of sites where one exists
+    /// but was already flattened to a `String` upstream to make a cached,
+    /// `Clone`-able result possible (see `compute_own_scope` and
+    /// `relocate_into_delegated_scope` in cgroup.rs) -- a trait-object
+    /// source can't be `Clone`, so there's nothing left to attach by the
+    /// time it reaches here.
+    #[error("Failed to create cgroup: {context}")]
+    CgroupCreation {
+        context: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
 
-    #[error("Failed to set {controller}.{setting} = {value}: {reason}")]
+    #[error("Failed to set {controller}.{setting} = {value}: {source}")]
     CgroupSetting {
         controller: String,
         setting: String,
         value: String,
-        reason: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
     },
 
     // macOS
@@ -56,8 +80,12 @@ pub enum SandboxError {
     #[error("Command not found: {0}")]
     CommandNotFound(String),
 
-    #[error("Execution failed: {0}")]
-    ExecutionFailed(String),
+    #[error("Execution failed: {context}: {source}")]
+    ExecutionFailed {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -66,8 +94,12 @@ pub enum SandboxError {
     #[error("NulError: {0}")]
     NulError(#[from] std::ffi::NulError),
 
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Internal error: {context}: {source}")]
+    Internal {
+        context: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Result type alias for nanosandbox operations
