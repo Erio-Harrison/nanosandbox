@@ -310,6 +310,12 @@ impl HttpProxy {
         let mut all_headers = String::new();
         loop {
             let budget = MAX_HEADER_BYTES - all_headers.len() as u64;
+            if budget == 0 {
+                // A prior line landed exactly on the cap: take(0) reads 0
+                // bytes same as real EOF, so this must be checked before
+                // read_line, not inferred from its result.
+                return Ok(None);
+            }
             let mut line = String::new();
             let n = (&mut *reader).take(budget).read_line(&mut line).await?;
             all_headers.push_str(&line);
@@ -763,6 +769,21 @@ mod tests {
         assert_eq!(HttpProxy::read_headers(&mut &long[..]).await.unwrap(), None);
         let many = b"X: y\r\n".repeat(100_000);
         assert_eq!(HttpProxy::read_headers(&mut &many[..]).await.unwrap(), None);
+    }
+
+    /// A line landing exactly on the cap used to be indistinguishable from
+    /// EOF (`take(0)` also reads 0 bytes), so it was accepted as complete
+    /// instead of rejected -- dropping the real terminator and whatever the
+    /// client sent after it.
+    #[tokio::test]
+    async fn test_header_line_exactly_at_the_cap_is_still_rejected() {
+        let filler = "a".repeat(1024 * 64 - "X: \r\n".len());
+        let mut input = format!("X: {filler}\r\n").into_bytes();
+        input.extend_from_slice(b"Host: evil\r\n\r\nbody");
+        assert_eq!(
+            HttpProxy::read_headers(&mut &input[..]).await.unwrap(),
+            None
+        );
     }
 
     /// A proxy for `domains`, private destinations allowed (the test servers
