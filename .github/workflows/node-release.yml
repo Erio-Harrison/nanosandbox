@@ -92,14 +92,14 @@ jobs:
           name: node-loader
           path: crates/nanosandbox-node
       - run: npx napi artifacts --output-dir artifacts
-      # napi prepublish actually publishes each per-platform package itself
-      # (confirmed locally -- it's not just a metadata/prep step despite the
-      # name); it also updates this package.json's optionalDependencies to
-      # point at them. The root package still needs its own `npm publish`.
-      - run: npx napi prepublish -t npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # `npm publish` on the root package already runs `napi prepublish -t npm`
+      # itself, as package.json's `prepublishOnly` hook -- that's what
+      # actually publishes each per-platform package. A second, separate
+      # `napi prepublish` step here (there used to be one) meant it ran
+      # twice: the lifecycle hook's second pass then re-published packages
+      # the first pass had just published seconds earlier, a legitimate 409
+      # that looked like registry flakiness but wasn't.
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
