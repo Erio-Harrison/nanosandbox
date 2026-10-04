@@ -1,0 +1,17 @@
+[package]
+name = "nanosandbox_node"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "Node.js bindings for nanosandbox"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nanosandbox = { path = "../.." }
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

@@ -1,0 +1,33 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nanosandbox"
+version = "0.2.0"
+description = "Lightweight cross-platform sandbox for secure code execution"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+]
+keywords = ["sandbox", "container", "security", "isolation", "cross-platform"]
+
+[project.urls]
+Homepage = "https://github.com/Erio-Harrison/nanosandbox"
+Repository = "https://github.com/Erio-Harrison/nanosandbox"
+Documentation = "https://github.com/Erio-Harrison/nanosandbox#readme"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "nanosandbox._nanosandbox"
+manifest-path = "Cargo.toml"

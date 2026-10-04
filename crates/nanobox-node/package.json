@@ -1,0 +1,36 @@
+{
+  "name": "nanosandbox",
+  "version": "0.2.0",
+  "description": "Lightweight cross-platform sandbox for secure code execution",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "keywords": ["sandbox", "container", "security", "isolation", "cross-platform", "napi-rs", "rust"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Erio-Harrison/nanosandbox.git"
+  },
+  "napi": {
+    "binaryName": "nanosandbox",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "node --test tests/"
+  },
+  "files": ["index.js", "index.d.ts"]
+}

@@ -1,0 +1,15 @@
+[package]
+name = "nanosandbox_python"
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+description = "Python bindings for nanosandbox"
+readme = "README.md"
+
+[lib]
+name = "_nanosandbox"
+crate-type = ["cdylib"]
+
+[dependencies]
+nanosandbox = { path = "../.." }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py38"] }

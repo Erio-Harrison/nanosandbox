@@ -7,6 +7,7 @@ description = "Lightweight cross-platform sandbox for secure code execution"
 keywords = ["sandbox", "container", "security", "isolation", "cross-platform"]
 categories = ["os::linux-apis", "os::macos-apis", "os::windows-apis", "virtualization", "security"]
 repository = "https://github.com/Erio-Harrison/nanosandbox"
+exclude = ["crates/"]
 
 [dependencies]
 # Error handling

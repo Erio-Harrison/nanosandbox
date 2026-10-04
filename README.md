@@ -56,7 +56,7 @@ let sandbox = Sandbox::data_analysis("/input", "/output")
 ### Python Bindings
 
 ```python
-from nanosandbox import Sandbox, Permission, MB
+from nanosandbox import Sandbox, MB
 
 sandbox = (Sandbox.builder()
     .working_dir("/tmp")
@@ -67,7 +67,23 @@ result = sandbox.run("echo", ["hello"])
 print(result.stdout)
 ```
 
-Install with: `pip install nanosandbox`
+Install with: `pip install nanosandbox`. Source and build instructions: [crates/nanobox-python](crates/nanobox-python).
+
+### Node.js Bindings
+
+```javascript
+const { Sandbox, MB } = require("nanosandbox");
+
+const sandbox = Sandbox.builder()
+    .workingDir("/tmp")
+    .memoryLimit(128 * MB)
+    .build();
+
+const result = sandbox.run("echo", ["hello"]);
+console.log(result.stdout);
+```
+
+Install with: `npm install nanosandbox`. Source and build instructions: [crates/nanobox-node](crates/nanobox-node).
 
 ## Network Control
 
