@@ -99,7 +99,18 @@ jobs:
       # twice: the lifecycle hook's second pass then re-published packages
       # the first pass had just published seconds earlier, a legitimate 409
       # that looked like registry flakiness but wasn't.
-      - run: npm publish --access public
+      # Plain `npm publish` 403s hard on an already-published version, unlike
+      # the per-platform packages inside the prepublishOnly hook (those are
+      # caught and skipped internally). A re-run for a version already fully
+      # shipped -- e.g. any push of a tag matching `v*`, including moving an
+      # existing one -- would otherwise fail the whole job over nothing.
+      - run: |
+          version=$(node -p "require('./package.json').version")
+          if npm view "nanosandbox@$version" version >/dev/null 2>&1; then
+            echo "nanosandbox@$version already published, skipping"
+          else
+            npm publish --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
