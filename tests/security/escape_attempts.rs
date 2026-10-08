@@ -318,3 +318,51 @@ fn test_root_caller_runs_as_nobody() {
     assert!(out.contains("write-denied"), "{out}");
     assert!(out.contains("groups=1"), "supplementary groups kept: {out}");
 }
+
+/// A root caller's sandbox runs as nobody (see `test_root_caller_runs_as_nobody`
+/// above), so a `writable` grant nobody can't actually write to -- the usual
+/// case for a directory a root-run container created -- used to fail deep
+/// inside the sandboxed program's own `EACCES`. `build()` catches it instead.
+#[test]
+fn test_root_caller_writable_unwritable_by_nobody_is_refused_upfront() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let err = Sandbox::builder()
+        .writable(dir.path())
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, nanosandbox::SandboxError::Config { .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("nobody"), "{err}");
+}
+
+/// Same setup, but world-writable: nobody from a root caller's sandbox can
+/// write there, so this must build and run, not be refused.
+#[test]
+fn test_root_caller_writable_world_writable_is_accepted() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+
+    let sandbox = Sandbox::builder().writable(dir.path()).build().unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", &format!("touch '{}/f'", dir.path().display())],
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+}

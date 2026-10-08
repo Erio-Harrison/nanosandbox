@@ -5,8 +5,30 @@ use crate::builder::{Mount, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
+
+/// Whether `nobody` (uid/gid [`super::namespace::NOBODY`]) could write to
+/// `path`, going by its owner/group/other mode bits the ordinary way a
+/// permission check would. Not a full simulation (no ACLs, no parent
+/// directory traversal) -- good enough to catch the common case: a root
+/// caller's `writable`/`bind(ReadWrite)` target that a root-owned,
+/// non-world-writable directory (the usual case for anything a root-run
+/// container created) would otherwise fail on at run time, deep inside
+/// `exec`, with nothing but `EACCES` to go on.
+fn nobody_can_write(path: &Path) -> std::io::Result<bool> {
+    let meta = std::fs::metadata(path)?;
+    let mode = meta.mode();
+    const NOBODY: u32 = super::namespace::NOBODY;
+    Ok(if meta.uid() == NOBODY {
+        mode & 0o200 != 0
+    } else if meta.gid() == NOBODY {
+        mode & 0o020 != 0
+    } else {
+        mode & 0o002 != 0
+    })
+}
 
 /// Which cgroup v2 controllers this config's limits actually need.
 pub(super) fn needed_cgroup_controllers(config: &SandboxConfig) -> Vec<&'static str> {
@@ -404,6 +426,7 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
             });
         }
     }
+    let root_caller = super::namespace::runs_as_root();
     for m in &config.mounts {
         if !in_tmpfs(&m.target) && !m.target.exists() {
             return Err(SandboxError::Config {
@@ -411,6 +434,27 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
                     "bind target {} does not exist; without a rootfs, binds go over the host's \
                      own paths, so it must already exist",
                     m.target.display()
+                ),
+                source: None,
+            });
+        }
+        // A root caller's sandbox runs as nobody (see namespace::runs_as_root),
+        // so a writable grant only works if nobody can actually write there --
+        // typically not true for a directory a root-run container created
+        // (root-owned, not world-writable). Catch it here, at build() time,
+        // instead of an EACCES from deep inside the sandboxed program.
+        if root_caller
+            && m.permission == Permission::ReadWrite
+            && !in_tmpfs(&m.target)
+            && !nobody_can_write(&m.target).unwrap_or(true)
+        {
+            return Err(SandboxError::Config {
+                context: format!(
+                    "writable {}: owned by a different user and not group/world-writable; a \
+                     root caller's sandbox runs as nobody (uid {}), which can't write here. \
+                     chmod it to allow group or other write, or change its owner",
+                    m.target.display(),
+                    super::namespace::NOBODY
                 ),
                 source: None,
             });
