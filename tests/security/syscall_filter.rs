@@ -64,6 +64,16 @@ fn probe(sandbox: &Sandbox) -> Option<String> {
         ("finit_module", libc::SYS_finit_module, &[-1, 0, 0]),
         ("delete_module", libc::SYS_delete_module, &[0, 0]),
         (
+            "socket_unix",
+            libc::SYS_socket,
+            &[libc::AF_UNIX as _, libc::SOCK_STREAM as _, 0],
+        ),
+        (
+            "socket_inet",
+            libc::SYS_socket,
+            &[libc::AF_INET as _, libc::SOCK_STREAM as _, 0],
+        ),
+        (
             "ptrace_traceme",
             libc::SYS_ptrace,
             &[libc::PTRACE_TRACEME as _, 0, 0, 0],
@@ -137,6 +147,7 @@ fn test_filter_blocks_kernel_entry_points() {
         "init_module",
         "finit_module",
         "delete_module",
+        "socket_unix",
     ] {
         assert_eq!(
             errno_of(&out, name),
@@ -151,6 +162,8 @@ fn test_filter_blocks_kernel_entry_points() {
     // Not namespaces, so not blocked.
     assert_eq!(errno_of(&out, "unshare_fs"), 0, "{out}");
     assert_eq!(errno_of(&out, "ptrace_traceme"), 0, "{out}");
+    // Only AF_UNIX is denied; other address families are untouched.
+    assert_eq!(errno_of(&out, "socket_inet"), 0, "{out}");
 }
 
 /// The EPERMs above come from the filter, not from the sandbox otherwise.
@@ -192,6 +205,40 @@ fn test_filter_keeps_ordinary_programs_working() {
     {
         assert_eq!(r.exit_code, 0, "{}", r.stderr);
         assert_eq!(r.stdout, "thread\nchild\n");
+    }
+}
+
+/// Denying `socket(AF_UNIX, ...)` shouldn't break ordinary programs that
+/// never deliberately reach for a Unix socket. DNS resolution is the one
+/// to worry about: glibc's resolver can go through `nscd` over a Unix
+/// socket at `/var/run/nscd/socket` on some systems, and must fall back
+/// to resolving directly instead of erroring when that's unreachable.
+#[test]
+fn test_denying_af_unix_sockets_does_not_break_dns_or_compilation() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+
+    let script = "import socket\n\
+                   print(socket.getaddrinfo('localhost', 80)[0][4])";
+    let r = sandbox.run("python3", &["-c", script]).unwrap();
+    assert_eq!(r.exit_code, 0, "{}", r.stderr);
+
+    if let Ok(r) = sandbox.run("gcc", &["--version"])
+        && !r.stderr.contains("No such file")
+    {
+        let script = "echo 'int main(){return 0;}' > /tmp/t.c && \
+                       gcc /tmp/t.c -o /tmp/t && /tmp/t && echo compiled-and-ran";
+        let r = sandbox.run("sh", &["-c", script]).unwrap();
+        assert_eq!(r.stdout.trim(), "compiled-and-ran", "{}", r.stderr);
+    }
+
+    if let Ok(r) = sandbox.run("git", &["--version"])
+        && !r.stderr.contains("No such file")
+    {
+        assert_eq!(r.exit_code, 0, "{}", r.stderr);
     }
 }
 

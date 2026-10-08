@@ -85,6 +85,7 @@ enum Label {
     Next,
     CheckClone,
     CheckUnshare,
+    CheckSocket,
     Allow,
     Deny,
     NoSys,
@@ -141,6 +142,7 @@ impl SyscallFilter {
             jeq(libc::SYS_clone3 as u32, Label::NoSys),
             jeq(libc::SYS_clone as u32, Label::CheckClone),
             jeq(libc::SYS_unshare as u32, Label::CheckUnshare),
+            jeq(libc::SYS_socket as u32, Label::CheckSocket),
         ];
         code.extend(DENIED.iter().map(|&nr| jeq(nr as u32, Label::Deny)));
         code.push(ret(libc::SECCOMP_RET_ALLOW));
@@ -158,6 +160,17 @@ impl SyscallFilter {
                 Label::Allow,
                 flags,
             ));
+        }
+        // AF_UNIX is a value, not a flag to test bits of: jeq, not jset.
+        // socketpair() is a different syscall, so the proxy's own use of it
+        // (see proxy_link.rs) is untouched; only a fresh socket(2) call
+        // naming AF_UNIX is denied, nothing already connected or any other
+        // address family.
+        {
+            targets.push((Label::CheckSocket, code.len()));
+            code.push(load(DATA_ARG0_LOW));
+            code.push(jeq(libc::AF_UNIX as u32, Label::Deny));
+            code.push(ret(libc::SECCOMP_RET_ALLOW));
         }
         for (label, action) in [
             (Label::Allow, libc::SECCOMP_RET_ALLOW),
