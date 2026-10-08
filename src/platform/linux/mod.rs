@@ -96,6 +96,40 @@ fn check_cgroup_v2_support() -> bool {
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
 
+/// Whether this config needs cgroups at all -- a host without cgroup v2 (or
+/// with it unreachable, e.g. a hybrid v1/v2 mount like Ubuntu 20.04's
+/// default) should still be able to run a sandbox that asks for none of
+/// these, instead of being refused over a requirement it doesn't trigger.
+fn needs_cgroup(config: &SandboxConfig) -> bool {
+    config.memory_limit.is_some()
+        || config.cpu_limit.is_some()
+        || config.cpu_time_limit.is_some()
+        || config.max_pids.is_some()
+}
+
+#[cfg(test)]
+mod needs_cgroup_tests {
+    use super::needs_cgroup;
+    use crate::Sandbox;
+
+    #[test]
+    fn only_when_a_cgroup_backed_limit_is_set() {
+        assert!(!needs_cgroup(&Sandbox::builder().into_config()));
+        assert!(needs_cgroup(
+            &Sandbox::builder().memory_limit(1).into_config()
+        ));
+        assert!(needs_cgroup(
+            &Sandbox::builder().cpu_limit(0.5).into_config()
+        ));
+        assert!(needs_cgroup(
+            &Sandbox::builder()
+                .cpu_time_limit(std::time::Duration::from_secs(1))
+                .into_config()
+        ));
+        assert!(needs_cgroup(&Sandbox::builder().max_pids(1).into_config()));
+    }
+}
+
 /// Linux sandbox executor
 pub struct LinuxExecutor {
     _private: (),
@@ -465,7 +499,7 @@ impl PlatformExecutor for LinuxExecutor {
         if !check_user_namespace_support() {
             return Err(SandboxError::UserNamespaceDisabled);
         }
-        if !check_cgroup_v2_support() {
+        if needs_cgroup(config) && !check_cgroup_v2_support() {
             return Err(SandboxError::CgroupV2Unavailable);
         }
         if namespace::runs_as_root() && (config.uid == Some(0) || config.gid == Some(0)) {
