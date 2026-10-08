@@ -167,11 +167,35 @@ impl MountPlan {
     }
 
     /// The caller's tmpfs mounts, plus private_tmp's at /tmp where it can be
-    /// mounted.
+    /// mounted, plus a private tmpfs over `/var/tmp` and `/dev/shm` where
+    /// one can -- both are in `landlock::DEFAULT_WRITABLE` unconditionally
+    /// (not tied to `private_tmp`), so without this they're the host's
+    /// real, shared, persistent paths: writable by every sandbox and the
+    /// host alike, with nothing scoping them to one run. Skipped, like a
+    /// caller's own `tmpfs_mounts`, where `restricted` rules out mounting
+    /// at all (same residual gap private_tmp already has there -- a
+    /// program reaching either path *by name* still reaches the host's).
     pub(super) fn tmpfs_mounts(config: &SandboxConfig, restricted: bool) -> Vec<(PathBuf, u64)> {
         let mut tmpfs = config.tmpfs_mounts.clone();
         if let Some(size) = config.private_tmp.filter(|_| !restricted) {
             tmpfs.insert(0, (PathBuf::from("/tmp"), size));
+        }
+        if !restricted {
+            for path in ["/var/tmp", "/dev/shm"] {
+                let path = Path::new(path);
+                // An explicit read_only/writable/bind naming this exact
+                // path is the caller deliberately asking for the host's
+                // real one instead -- that choice wins over the default.
+                let explicitly_mounted = config.mounts.iter().any(|m| m.target == path);
+                // Mounting needs the target to exist; a tmpfs/bind caller
+                // asked for would be refused over this (see check_mounts),
+                // but this isn't something the caller chose -- a minimal
+                // system missing one of these shouldn't fail sandboxes
+                // that never mentioned it.
+                if path.is_dir() && !explicitly_mounted && !tmpfs.iter().any(|(p, _)| p == path) {
+                    tmpfs.push((path.to_path_buf(), crate::DEFAULT_PRIVATE_TMP_SIZE));
+                }
+            }
         }
         tmpfs
     }

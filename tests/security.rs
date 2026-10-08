@@ -23,6 +23,10 @@ mod syscall_filter;
 #[path = "security/rootfs.rs"]
 mod rootfs;
 
+#[cfg(target_os = "linux")]
+#[path = "security/shared_tmp_dirs.rs"]
+mod shared_tmp_dirs;
+
 #[cfg(target_os = "macos")]
 #[path = "security/sbpl_rules.rs"]
 mod sbpl_rules;
