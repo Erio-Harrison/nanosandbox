@@ -131,6 +131,7 @@ Run on Linux 5.13+ with cgroups v2 and Landlock. On macOS, sandbox-exec is avail
 
 - [Architecture](docs/ARCHITECTURE.md) - Platform internals and design decisions
 - [API Reference](docs/API.md) - Complete API documentation
+- [Threat Model](docs/THREAT_MODEL.md) - What's protected, what isn't, per platform
 - [Benchmarks](docs/BENCHMARKS.md) - Performance comparison with other solutions
 
 ### Platform Details

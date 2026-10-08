@@ -114,7 +114,7 @@
 - [x] **API reference** - `docs/API.md`
 - [x] **Architecture doc** - `docs/ARCHITECTURE.md`
 - [x] **Benchmark comparison** - `docs/BENCHMARKS.md`
-- [ ] **Security guide** - Threat model, limitations, recommendations
+- [x] **Security guide** - `docs/THREAT_MODEL.md`
 - [ ] **Deployment guide** - Linux capabilities, macOS permissions, Windows UAC
 
 ---
@@ -128,10 +128,11 @@
 | P2 | 2/9 | Basic tracing + resource usage only |
 | P3 | 2/9 | Linux seccomp + macOS SBPL done; Windows on hold (see above) |
 | P4 | 4/11 | Security + basic integration tests done |
-| P5 | 5/7 | Docs + Python/Node bindings done; security/deployment guides pending |
+| P5 | 6/7 | Docs + Python/Node bindings + threat model done; deployment guide pending |
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) - Platform internals
 - [API Reference](docs/API.md) - Complete API documentation
+- [Threat Model](docs/THREAT_MODEL.md) - What's protected, what isn't, per platform
 - [Benchmarks](docs/BENCHMARKS.md) - Performance comparison
