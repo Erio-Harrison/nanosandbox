@@ -78,10 +78,14 @@ fn exec_candidates(cmd: &str, path_value: &str) -> Result<Vec<CString>> {
         .collect()
 }
 
-/// Check if Linux sandboxing is supported
+/// Check if Linux sandboxing is supported. Cgroup v2 isn't checked here:
+/// `check_support` only requires it for configs that actually set a
+/// cgroup-backed limit (see `needs_cgroup`), so a host without it (or with
+/// only a hybrid v1/v2 mount, e.g. Ubuntu 20.04's default) can still build
+/// and run a sandbox with none of those -- this would otherwise say no to
+/// that real, working case.
 pub fn is_supported() -> bool {
-    // Check for user namespace support
-    check_user_namespace_support() && check_cgroup_v2_support()
+    check_user_namespace_support()
 }
 
 fn check_user_namespace_support() -> bool {
