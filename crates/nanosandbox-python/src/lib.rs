@@ -15,7 +15,9 @@ fn to_py_err(e: nanosandbox::SandboxError) -> PyErr {
 }
 
 fn builder_consumed() -> PyErr {
-    PyValueError::new_err("this builder was already consumed by build() (or another chained call that didn't keep its return value)")
+    PyValueError::new_err(
+        "this builder was already consumed by build() (or another chained call that didn't keep its return value)",
+    )
 }
 
 /// Read-only or read-write, for [`SandboxBuilder.bind`]. Linux only.
@@ -95,7 +97,11 @@ impl SandboxBuilder {
 
     #[cfg(target_os = "linux")]
     fn bind(&mut self, source: String, target: String, permission: Permission) -> PyResult<Self> {
-        Ok(Self::wrap(self.take()?.bind(source, target, permission.into())))
+        Ok(Self::wrap(self.take()?.bind(
+            source,
+            target,
+            permission.into(),
+        )))
     }
 
     #[cfg(target_os = "linux")]
@@ -119,11 +125,17 @@ impl SandboxBuilder {
     }
 
     fn wall_time_limit(&mut self, seconds: f64) -> PyResult<Self> {
-        Ok(Self::wrap(self.take()?.wall_time_limit(Duration::from_secs_f64(seconds))))
+        Ok(Self::wrap(
+            self.take()?
+                .wall_time_limit(Duration::from_secs_f64(seconds)),
+        ))
     }
 
     fn cpu_time_limit(&mut self, seconds: f64) -> PyResult<Self> {
-        Ok(Self::wrap(self.take()?.cpu_time_limit(Duration::from_secs_f64(seconds))))
+        Ok(Self::wrap(
+            self.take()?
+                .cpu_time_limit(Duration::from_secs_f64(seconds)),
+        ))
     }
 
     fn max_pids(&mut self, n: u32) -> PyResult<Self> {
@@ -235,21 +247,25 @@ impl Sandbox {
     }
 
     #[pyo3(signature = (cmd, args))]
-    fn run(&self, cmd: String, args: Vec<String>) -> PyResult<ExecutionResult> {
-        self.run_with_input(cmd, args, None)
+    fn run(&self, py: Python<'_>, cmd: String, args: Vec<String>) -> PyResult<ExecutionResult> {
+        self.run_with_input(py, cmd, args, None)
     }
 
     #[pyo3(signature = (cmd, args, stdin=None))]
     fn run_with_input(
         &self,
+        py: Python<'_>,
         cmd: String,
         args: Vec<String>,
         stdin: Option<Vec<u8>>,
     ) -> PyResult<ExecutionResult> {
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-        let inner = self
-            .inner
-            .run_with_input(&cmd, &args_ref, stdin.as_deref())
+        // A run can take anywhere from milliseconds to its whole
+        // wall_time_limit; without releasing the GIL here, every other
+        // Python thread -- including ones a concurrent framework needs to
+        // make progress while this one blocks -- is frozen for that long.
+        let inner = py
+            .allow_threads(|| self.inner.run_with_input(&cmd, &args_ref, stdin.as_deref()))
             .map_err(to_py_err)?;
         Ok(ExecutionResult { inner })
     }
