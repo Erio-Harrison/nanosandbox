@@ -159,6 +159,81 @@ fn test_deep_process_tree_killed() {
     }
 }
 
+/// Test: the sandboxed command runs as PID 2, under a tiny init shim
+/// (PID 1 of the namespace) that forwards signals to it -- see `child.rs`.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_sandboxed_command_is_pid_2_under_the_init_shim() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let result = sandbox.run("sh", &["-c", "echo $$"]).unwrap();
+    assert_eq!(result.stdout.trim(), "2", "{result:?}");
+}
+
+/// Test: a sandboxed command can signal itself normally now.
+///
+/// Before the init shim, the sandboxed command *was* PID 1 of its own
+/// namespace, and pid_namespaces(7) has the kernel drop a default-
+/// disposition signal sent to a namespace's init by another member of
+/// that namespace -- including itself -- unless it's caught. Confirmed
+/// for real: `kill -TERM $$`/`kill -KILL $$` did nothing, the process
+/// kept running afterward. Demoted to PID 2 under the shim, it gets the
+/// same signal semantics as any other process -- it's actually killed.
+///
+/// `signal` itself still comes back `None`, not `Some(sig)`: the shim
+/// (still PID 1) can't reproduce a true signal-death on itself for the
+/// same reason it exists, so it reports 128+signal as a normal exit
+/// code instead, the same convention `tini`/`dumb-init` use.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_self_sigterm_now_works_like_anywhere_else() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "kill -TERM $$; sleep 0.2; echo SURVIVED"])
+        .unwrap();
+    assert_eq!(result.exit_code, 128 + 15, "{result:?}"); // SIGTERM
+    assert_eq!(result.signal, None, "{result:?}");
+    assert!(!result.stdout.contains("SURVIVED"), "{result:?}");
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn test_self_sigkill_now_works_like_anywhere_else() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "kill -KILL $$; sleep 0.2; echo SURVIVED"])
+        .unwrap();
+    assert_eq!(result.exit_code, 128 + 9, "{result:?}"); // SIGKILL
+    assert_eq!(result.signal, None, "{result:?}");
+    assert!(!result.stdout.contains("SURVIVED"), "{result:?}");
+}
+
+/// Test: a normal (non-signal) exit code still comes through the shim
+/// unchanged.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_exit_code_passes_through_the_init_shim() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let result = sandbox.run("sh", &["-c", "exit 42"]).unwrap();
+    assert_eq!(result.exit_code, 42, "{result:?}");
+    assert_eq!(result.signal, None, "{result:?}");
+}
+
 // Helper functions
 
 #[cfg(unix)]

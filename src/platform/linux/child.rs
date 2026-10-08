@@ -8,12 +8,30 @@
 
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::landlock::WriteRules;
 use super::mount::MountPlan;
 use super::proxy_link::ProxyLinkChild;
 use super::seccomp::SyscallFilter;
 use super::{close_raw, read_raw, write_raw};
+
+/// The sandboxed command's pid, for [`forward_to_child`] to relay into.
+/// Set once, right after the fork in [`ChildSetup::run`]; read only from a
+/// signal handler from then on, hence the atomic rather than a plain field.
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+
+/// The init shim's signal handler (see [`ChildSetup::run`]): relays
+/// whatever it's given to the real command. `kill` is async-signal-safe
+/// per signal-safety(7); nothing else runs here.
+extern "C" fn forward_to_child(sig: libc::c_int) {
+    let pid = CHILD_PID.load(Ordering::Relaxed);
+    if pid > 0 {
+        unsafe {
+            libc::kill(pid, sig);
+        }
+    }
+}
 
 /// Everything the child needs, built in the parent before clone() so the
 /// child itself never has to. Moved into the clone() closure as one
@@ -248,10 +266,92 @@ impl ChildSetup {
             return 1;
         }
 
+        // This process becomes init of a fresh PID namespace once cloned;
+        // pid_namespaces(7) has the kernel silently drop any default-
+        // disposition signal sent to init by another member of that
+        // namespace -- including one it sends itself -- unless it's
+        // caught. Running the command directly here would leave it unable
+        // to be signaled by anything inside its own sandbox (confirmed for
+        // real, down to self-SIGKILL doing nothing). Fork instead: this
+        // process stays init and relays signals to the command, now PID 2,
+        // the same fix `tini`/`dumb-init`/`docker run --init` use for
+        // Docker containers hitting the identical problem.
+        for sig in (1..=31).chain(libc::SIGRTMIN()..=libc::SIGRTMAX()) {
+            if sig == libc::SIGKILL || sig == libc::SIGSTOP || sig == libc::SIGCHLD {
+                continue;
+            }
+            let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+            sa.sa_sigaction = forward_to_child as *const () as libc::sighandler_t;
+            unsafe {
+                libc::sigaction(sig, &sa, std::ptr::null_mut());
+            }
+        }
+
+        // A raw clone(), not libc's fork(): same no-allocation reasoning
+        // as setgroups/setresuid/setresgid above, still in force here --
+        // nothing since the original clone() has touched the heap.
+        let forked = unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_long, 0i64) };
+        if forked < 0 {
+            let _ = write_raw(2, b"Failed to fork the sandboxed command\n");
+            return 1;
+        }
+
+        if forked != 0 {
+            // Still PID 1: its init from here, not the command itself.
+            // Needs no fds at all -- sigaction/waitpid/kill don't take
+            // any -- so close everything rather than keep whatever this
+            // run's stdout/stdin/etc. pipes happened to dup2/inherit.
+            // That closes a real leak: clone() snapshots this whole
+            // process's fd table, so a run's child can inherit a fresh,
+            // not-yet-CLOEXEC'd pipe fd another thread's concurrent run
+            // was still setting up at that exact moment. Harmless before
+            // this shim existed -- the one process in the child always
+            // exec'd, and CLOEXEC cleaned it up right then -- but this
+            // process never execs, so an inherited stray write end would
+            // otherwise stay open for the run's whole lifetime, and
+            // whatever reads that pipe never sees EOF. Confirmed for
+            // real under concurrent runs: `cat`'s stdin pipe never
+            // closed, because a sibling run's leaked write end kept it
+            // open from outside the sandbox's own process tree entirely.
+            unsafe {
+                libc::syscall(libc::SYS_close_range, 0u32, u32::MAX, 0i32);
+            }
+            CHILD_PID.store(forked as i32, Ordering::Relaxed);
+            loop {
+                let mut status: libc::c_int = 0;
+                let r = unsafe { libc::waitpid(-1, &mut status, 0) };
+                if r < 0 {
+                    if unsafe { *libc::__errno_location() } == libc::EINTR {
+                        continue;
+                    }
+                    return 1; // ECHILD or similar: nothing left to reap
+                }
+                if r == forked as libc::pid_t {
+                    return if libc::WIFEXITED(status) {
+                        libc::WEXITSTATUS(status) as isize
+                    } else if libc::WIFSIGNALED(status) {
+                        // Can't reproduce a true signal-death on itself
+                        // for the same reason this fork exists -- the
+                        // kernel would just drop it again. Same fallback
+                        // `tini` uses: exit with 128+signal rather than
+                        // die by it, so the caller still learns which one.
+                        (128 + libc::WTERMSIG(status)) as isize
+                    } else {
+                        1
+                    };
+                }
+                // Someone else's orphan, reparented here: reaped, keep going.
+            }
+        }
+
+        // PID 2 from here on: the actual sandboxed command.
+
         // Ignored signals stay ignored across exec, and the signal mask
         // carries over too. This process ignores SIGPIPE (Rust's runtime
         // does), so programs did too: `yes | head -1` had `yes` fail with
         // "Broken pipe" instead of just ending. Give them the defaults.
+        // The handlers just installed above for the shim are reset to
+        // their defaults by execve() itself, same as this one.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
             let mut none: libc::sigset_t = std::mem::zeroed();

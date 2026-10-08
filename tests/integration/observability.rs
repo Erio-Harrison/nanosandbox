@@ -99,15 +99,11 @@ fn test_exit_code_accuracy() {
 
 /// Test: Signal information should be captured
 ///
-/// On Linux, the sandboxed process is PID 1 of its own PID namespace
-/// (pid_namespaces(7)), and the kernel suppresses unhandled signals —
-/// including self-directed SIGKILL — sent to an init process from
-/// *within* its own namespace; only a signal sent from an ancestor
-/// namespace is forcibly delivered. So `sh -c "kill -9 $$"` is a no-op
-/// here, not a bug: verified with a real sandbox that it prints and
-/// keeps running afterward. Exercise the delivery path that actually
-/// applies to us instead — our own wall_time_limit kill, sent from
-/// outside the sandbox's namespace.
+/// On Linux, the sandboxed command runs as PID 2 under a tiny init shim
+/// (PID 1 of its own namespace) that relays signals to it -- see
+/// `child.rs` -- so `sh -c "kill -9 $$"` works like it would anywhere
+/// else. Exercise our own wall_time_limit kill here instead, sent from
+/// outside the namespace: it's the one path every build goes through.
 #[test]
 #[cfg(unix)]
 fn test_signal_capture() {
