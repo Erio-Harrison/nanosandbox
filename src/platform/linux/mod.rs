@@ -78,14 +78,16 @@ fn exec_candidates(cmd: &str, path_value: &str) -> Result<Vec<CString>> {
         .collect()
 }
 
-/// Check if Linux sandboxing is supported. Cgroup v2 isn't checked here:
-/// `check_support` only requires it for configs that actually set a
-/// cgroup-backed limit (see `needs_cgroup`), so a host without it (or with
-/// only a hybrid v1/v2 mount, e.g. Ubuntu 20.04's default) can still build
-/// and run a sandbox with none of those -- this would otherwise say no to
-/// that real, working case.
+/// Whether a sandbox with the default config can run here: user namespaces,
+/// plus what that config needs of the kernel -- Landlock, since there's no
+/// rootfs to keep it off the host's files, and a syscall filter for this
+/// architecture. Cgroup v2 isn't checked: `check_support` only requires it
+/// for configs that set a cgroup-backed limit (see `needs_cgroup`).
+/// A host this says no to can still run some configs (a rootfs needs no
+/// Landlock, `seccomp(false)` no filter); `build()` is what decides for a
+/// given one.
 pub fn is_supported() -> bool {
-    check_user_namespace_support()
+    check_user_namespace_support() && landlock::abi() >= 1 && SyscallFilter::supported()
 }
 
 fn check_user_namespace_support() -> bool {
@@ -563,6 +565,16 @@ fn userns_restricted_by_apparmor() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The answer matches whether the default config actually builds.
+    #[test]
+    fn is_supported_agrees_with_building_the_default_sandbox() {
+        let builds = crate::Sandbox::builder()
+            .working_dir("/tmp")
+            .build()
+            .is_ok();
+        assert_eq!(is_supported(), builds);
+    }
 
     #[test]
     fn test_linux_executor_creation() {
