@@ -45,3 +45,30 @@ pub fn sandbox_tempdir_in(parent: impl AsRef<std::path::Path>) -> tempfile::Temp
 pub fn sandbox_tempdir() -> tempfile::TempDir {
     sandbox_tempdir_in(std::env::temp_dir())
 }
+
+/// A root caller's sandbox runs as `nobody`, which can't enter a directory
+/// unless every ancestor allows "others" to traverse it -- not so for a
+/// checkout under a 0750 home, or for `/root`. Prints why and returns true
+/// when that applies, so a test that needs the sandbox to reach `path` can
+/// return early instead of failing on the environment. Never true for a
+/// non-root caller, whose sandbox runs as itself.
+#[allow(dead_code)]
+pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } != 0 {
+        return false;
+    }
+    for ancestor in path.ancestors() {
+        let Ok(meta) = std::fs::metadata(ancestor) else {
+            continue;
+        };
+        if meta.permissions().mode() & 0o001 == 0 {
+            eprintln!(
+                "skipping: running as root, whose sandbox runs as nobody, which can't traverse {}",
+                ancestor.display()
+            );
+            return true;
+        }
+    }
+    false
+}

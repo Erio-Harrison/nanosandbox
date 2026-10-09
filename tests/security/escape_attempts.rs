@@ -262,6 +262,9 @@ fn test_default_sandbox_cannot_write_host_files() {
 #[cfg(unix)]
 fn test_writable_places_still_writable() {
     let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(dir.path()) {
+        return;
+    }
     let path = dir.path().to_str().unwrap();
 
     let sandbox = Sandbox::builder()

@@ -79,6 +79,9 @@ fn test_tmpfs_nested_inside_a_bind_target() {
     // Not under /tmp, which private_tmp (on by default) covers with its
     // own tmpfs.
     let source = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(source.path()) {
+        return;
+    }
     std::fs::create_dir(source.path().join("scratch")).unwrap();
     std::fs::write(source.path().join("scratch/sentinel"), "from source").unwrap();
     std::fs::write(source.path().join("other"), "from source").unwrap();
