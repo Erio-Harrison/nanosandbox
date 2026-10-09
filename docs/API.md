@@ -507,6 +507,12 @@ const result = sandbox.run('node', ['-e', "console.log('hello')"]);
 console.log(result.stdout);
 console.log(result.exitCode);
 
+// run() blocks the event loop for the whole command; these don't. They run
+// on libuv's thread pool (UV_THREADPOOL_SIZE, 4 by default) and return a
+// Promise<ExecutionResult>.
+const later = await sandbox.runAsync('node', ['-e', "console.log('hello')"]);
+const piped = await sandbox.runWithInputAsync('cat', [], Buffer.from('hi'));
+
 // Presets
 const judge = SandboxBuilder.codeJudge('/code').build();
 const agent = SandboxBuilder.agentExecutor('/workspace').build();
@@ -519,7 +525,7 @@ const agent = SandboxBuilder.agentExecutor('/workspace').build();
 - `Sandbox` implements `Send + Sync`
 - Safe to share across threads
 - Each execution is independent
-- Concurrent executions on same sandbox are serialized
+- Concurrent executions on the same sandbox run in parallel
 
 ```rust
 use std::thread;

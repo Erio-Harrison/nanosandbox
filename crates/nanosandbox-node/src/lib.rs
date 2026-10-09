@@ -9,6 +9,7 @@
 #![deny(clippy::all)]
 
 use napi::Error;
+use napi::bindgen_prelude::AsyncTask;
 use napi_derive::napi;
 use std::time::Duration;
 
@@ -182,7 +183,9 @@ impl SandboxBuilder {
     #[napi]
     pub fn build(&mut self) -> napi::Result<Sandbox> {
         let inner = self.take()?.build().map_err(to_napi_err)?;
-        Ok(Sandbox { inner })
+        Ok(Sandbox {
+            inner: std::sync::Arc::new(inner),
+        })
     }
 }
 
@@ -248,7 +251,34 @@ impl SandboxBuilder {
 /// See `nanosandbox::Sandbox`.
 #[napi]
 pub struct Sandbox {
-    inner: nanosandbox::Sandbox,
+    inner: std::sync::Arc<nanosandbox::Sandbox>,
+}
+
+/// A run on libuv's thread pool, for `runAsync`/`runWithInputAsync`: the
+/// synchronous `run` holds the JS thread for the whole sandboxed execution,
+/// freezing the event loop (timers, I/O, other requests) for as long as the
+/// command takes.
+pub struct RunTask {
+    sandbox: std::sync::Arc<nanosandbox::Sandbox>,
+    cmd: String,
+    args: Vec<String>,
+    stdin: Option<Vec<u8>>,
+}
+
+impl napi::Task for RunTask {
+    type Output = nanosandbox::ExecutionResult;
+    type JsValue = ExecutionResult;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let args: Vec<&str> = self.args.iter().map(String::as_str).collect();
+        self.sandbox
+            .run_with_input(&self.cmd, &args, self.stdin.as_deref())
+            .map_err(to_napi_err)
+    }
+
+    fn resolve(&mut self, _env: napi::Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(ExecutionResult { inner: output })
+    }
 }
 
 #[napi]
@@ -297,6 +327,31 @@ impl Sandbox {
             .run_with_input(&cmd, &args_ref, stdin.as_deref())
             .map_err(to_napi_err)?;
         Ok(ExecutionResult { inner })
+    }
+
+    /// Like `run`, but returns a Promise and leaves the event loop free
+    /// while the command runs. Runs on libuv's thread pool (4 threads by
+    /// default, `UV_THREADPOOL_SIZE`), so more concurrent runs than that
+    /// queue behind each other.
+    #[napi(ts_return_type = "Promise<ExecutionResult>")]
+    pub fn run_async(&self, cmd: String, args: Vec<String>) -> AsyncTask<RunTask> {
+        self.run_with_input_async(cmd, args, None)
+    }
+
+    /// Like `runWithInput`, but returns a Promise; see `runAsync`.
+    #[napi(ts_return_type = "Promise<ExecutionResult>")]
+    pub fn run_with_input_async(
+        &self,
+        cmd: String,
+        args: Vec<String>,
+        stdin: Option<napi::bindgen_prelude::Buffer>,
+    ) -> AsyncTask<RunTask> {
+        AsyncTask::new(RunTask {
+            sandbox: self.inner.clone(),
+            cmd,
+            args,
+            stdin: stdin.map(|b| b.to_vec()),
+        })
     }
 
     #[napi(getter)]

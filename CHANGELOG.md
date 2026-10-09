@@ -17,6 +17,9 @@
 
 ### Added
 
+- Node: `runAsync()` and `runWithInputAsync()` return a Promise and run on
+  libuv's thread pool, leaving the event loop free; `run()` and
+  `runWithInput()` are unchanged and still block it for the whole command.
 - Linux: `host_uid()`/`host_gid()` (also in the Python and Node bindings)
   let a root caller pick the host user its sandbox runs as instead of
   `nobody`, so `writable` directories only their owner can write to work.
