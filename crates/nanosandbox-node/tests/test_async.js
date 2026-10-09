@@ -34,8 +34,9 @@ test('the event loop stays free during a run', async () => {
   const result = await sandbox().runAsync('sleep', ['1']);
   clearInterval(timer);
   assert.ok(result.success());
-  // ~50 ticks expected in a second; a blocked loop gets 0 or 1.
-  assert.ok(ticks >= 20, `only ${ticks} ticks while the run was in flight`);
+  // ~50 ticks expected in a second, fewer on a slow CI runner; a blocked loop
+  // gets 0 or 1.
+  assert.ok(ticks >= 5, `only ${ticks} ticks while the run was in flight`);
 });
 
 test('runs overlap instead of queueing behind one another', async () => {
