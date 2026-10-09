@@ -121,7 +121,7 @@ Linux provides the strongest isolation using kernel namespaces, cgroups v2, and 
 │                    │                        │
 │                    ▼                        │
 │  ┌─────────────────────────────────────┐   │
-│  │         Child (PID 1 in ns)         │   │
+│  │   Child (PID 1 in ns, init shim)    │   │
 │  │                                     │   │
 │  │  UID namespace: 0 (root in ns)     │   │
 │  │  PID namespace: isolated           │   │
@@ -138,7 +138,7 @@ Linux provides the strongest isolation using kernel namespaces, cgroups v2, and 
 | Namespace | Flag | Purpose |
 |-----------|------|---------|
 | User | `CLONE_NEWUSER` | UID/GID mapping, unprivileged containers |
-| PID | `CLONE_NEWPID` | Process isolation, child is PID 1 |
+| PID | `CLONE_NEWPID` | Process isolation. The cloned child is PID 1, a small init shim that forwards signals and reaps orphans; the command runs as PID 2 |
 | Mount | `CLONE_NEWNS` | Private mount table |
 | Network | `CLONE_NEWNET` | Network isolation (optional) |
 | UTS | `CLONE_NEWUTS` | Hostname isolation |

@@ -334,7 +334,7 @@ pub struct ExecutionResult {
     pub killed_by_oom: bool,
     pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows
     pub killed_by_cpu_limit: bool,     // Linux: the whole cgroup's CPU time, not just one process
-    pub signal: Option<i32>,
+    pub signal: Option<i32>,           // set when the host's own limit killed the run; a command killed by a signal on Linux reports 128+signal in exit_code instead
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
     pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
@@ -441,7 +441,11 @@ add `.writable(dir)` where the program needs to write.
 
 ### `is_platform_supported`
 
-Check if current platform is supported.
+Check if the current platform can run a sandbox with the default config.
+On Linux that means user namespaces, Landlock and a seccomp filter for this
+architecture (cgroup v2 only matters for configs that set a limit). A host
+that says `false` may still run some configs -- a `rootfs` needs no Landlock,
+`seccomp(false)` no filter -- so `build()` is what decides for a given one.
 
 ```rust
 pub fn is_platform_supported() -> bool

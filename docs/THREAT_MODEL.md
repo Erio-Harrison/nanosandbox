@@ -65,12 +65,34 @@ filesystem writes outside a `rootfs`. See
 |---|---|---|
 | Can't see host processes | PID namespace | `tests/security/escape_attempts.rs: test_pid_namespace_isolation`, `test_cannot_see_host_processes` |
 | Can't create namespaces, mount, load kernel modules, touch `bpf`/`io_uring`/`userfaultfd`/`keyctl`/`perf_event_open` | seccomp-BPF, fail-closed past the last reviewed syscall | `tests/security/syscall_filter.rs` |
-| Can't write outside granted paths (no `rootfs`) | Landlock | `tests/security/escape_attempts.rs`, `tests/security/read_rules.rs` |
+| Can't write outside granted paths (no `rootfs`) | Landlock. `/tmp`, `/var/tmp` and `/dev/shm` are writable by default; where mounting is possible each gets its own private tmpfs per run, so nothing written there reaches the host or another sandbox (see Known gaps for where it isn't) | `tests/security/escape_attempts.rs`, `tests/security/read_rules.rs`, `tests/security/shared_tmp_dirs.rs` |
+| Can't connect to host services over Unix sockets (`docker.sock`, the systemd bus, `ssh-agent`, ...) | seccomp denies `socket(AF_UNIX, ...)` (Landlock governs creating a socket file, not connecting to one, and the filter can't read a `connect()` path). Other address families and `socketpair()` are untouched | `tests/security/syscall_filter.rs: test_filter_blocks_kernel_entry_points`, `test_denying_af_unix_sockets_does_not_break_dns_or_compilation` |
+| A command can signal itself and its children normally | the command runs as PID 2 under a small init shim (PID 1), which relays signals and reaps orphans -- see "The init shim" below | `tests/security/process_management.rs: test_self_sigterm_now_works_like_anywhere_else`, `test_sandboxed_command_is_pid_2_under_the_init_shim` |
 | Can't read credentials/history/`deny_read` paths by default | read-rule allowlist | `tests/security/read_rules.rs: test_credentials_unreadable_by_default` |
 | Can't exceed memory/CPU/PID/wall-time limits | cgroups v2 (`memory.max`, `cpu.max`, `pids.max`) + wall-clock poll | `tests/security/resource_exhaustion.rs`, `tests/security/resource_enforcement.rs` |
 | Can't reach the network outside `allow_network`'s allowlist, including via direct connection bypassing the proxy | own network namespace; the proxy is the only route out | `tests/security/network_security.rs: test_ip_bypass_blocked` |
 | Can't outlive the host process | `PR_SET_PDEATHSIG` | `tests/security/process_management.rs: test_sandbox_dies_with_its_host_process` |
 | Fork bombs, background processes that detach from the tracked tree | PID namespace init death takes the whole subtree down | `tests/security/resource_exhaustion.rs: test_fork_bomb_contained`, `test_subprocess_bomb_contained` |
+
+### The init shim
+
+The sandbox's PID namespace needs an init, and the kernel treats it
+specially: a default-disposition signal sent to it by another member of the
+namespace, itself included, is dropped unless it has a handler. Running the
+command directly as PID 1 therefore meant `kill -KILL $$` inside the
+sandbox did nothing. The command now runs as PID 2 under a small shim
+(`src/platform/linux/child.rs`) that forwards signals to it and reaps
+orphans, the same job `tini` does for containers.
+
+What this does not change: `wall_time_limit`, `cpu_time_limit` and the
+other limits kill from the host, in an ancestor namespace, where the
+special treatment doesn't apply -- they were never affected.
+
+One visible consequence: the shim can't die *by* a signal on behalf of the
+command (the kernel would drop it), so when the command is killed by a
+signal, `ExecutionResult.exit_code` is `128 + signal` and
+`ExecutionResult.signal` is `None`. A kill by the host's own limits still
+reports `signal`.
 
 ### ptrace is allowed, deliberately
 
@@ -91,6 +113,15 @@ that's not what this protects. Run them in separate sandboxes.
 
 ### Known gaps
 
+- Where AppArmor's `unprivileged_userns` profile applies (Ubuntu 23.10+,
+  unprivileged and unconfined caller), nothing can be mounted, so
+  `/var/tmp` and `/dev/shm` remain the host's real, shared, persistent
+  paths: writable by every sandbox and the host alike. `/tmp` is covered by
+  `$TMPDIR` pointing at a per-run directory there; these two have no
+  equivalent. Don't rely on them being private on such a host.
+- A root caller's sandbox runs as `nobody`, so a `writable`/`bind(ReadWrite)`
+  source `nobody` can't write to is refused at `build()` rather than failing
+  at run time. The check reads the source's mode bits only (no ACLs).
 - `allow_network`'s DNS-rebinding defense (resolve once, connect to the
   resolved address) is implemented and unit-tested, but has no real
   end-to-end adversarial test with an actual rebinding DNS server --

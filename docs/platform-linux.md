@@ -309,7 +309,15 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
 
 - The child sets `PR_SET_PDEATHSIG(SIGKILL)` first thing, so it dies with
   the thread that started it, and as init of its PID namespace, takes the
-  rest of the sandbox with it. Before, a sandbox outlived a crashed or killed
+  rest of the sandbox with it. (That process is a small init shim, not the
+  command: the command runs as PID 2 under it. The kernel drops a default-
+  disposition signal sent to a namespace's init by another member of that
+  namespace, itself included, so a command run directly as PID 1 couldn't be
+  signaled from inside the sandbox -- `kill -KILL $$` did nothing. The shim
+  relays signals to the command and reaps orphans, like `tini`. When the
+  command is killed by a signal the shim exits with `128 + signal`, so
+  `ExecutionResult.signal` is `None` and `exit_code` carries it. Limits the
+  host enforces kill from outside the namespace, and are unaffected.) Before, a sandbox outlived a crashed or killed
   host process, with nothing left to enforce its time limit. (macOS has no
   such mechanism; it uses a watchdog process instead -- see
   [platform-macos.md](platform-macos.md#process-lifetime).)
