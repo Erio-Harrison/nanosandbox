@@ -22,6 +22,7 @@ pub(super) fn sweep_stale_leaves(
     dir: &Path,
     pid_of: impl Fn(&str) -> Option<&str>,
     owner_is_gone: impl Fn(u32) -> bool,
+    kill: impl Fn(&Path),
 ) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -38,7 +39,7 @@ pub(super) fn sweep_stale_leaves(
             continue;
         }
         let leaf = entry.path();
-        kill_cgroup_atomically(&leaf);
+        kill(&leaf);
         let _ = fs::remove_dir(&leaf);
     }
 }
@@ -110,6 +111,7 @@ pub(super) fn sweep_scope_neighbors_if_due(own: &Path) {
                 .and_then(|s| s.split('-').next())
         },
         owner_is_gone,
+        kill_cgroup_atomically,
     );
 }
 
@@ -213,7 +215,7 @@ fn sweep_stale_locks(dir: &Path) {
 /// Atomically kills every process in `dir` (`cgroup.kill`, kernel ≥ 5.14 —
 /// avoids the read-then-kill race of a process forking in between) and
 /// waits for it to take effect.
-fn kill_cgroup_atomically(dir: &Path) {
+pub(super) fn kill_cgroup_atomically(dir: &Path) {
     if fs::write(dir.join("cgroup.kill"), "1").is_err() {
         return;
     }
@@ -229,14 +231,6 @@ fn kill_cgroup_atomically(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Makes a plain test directory reject new files, standing in for a
-    /// real cgroup leaf with no `cgroup.kill` to write (a real cgroup
-    /// directory's write there never adds a dirent; a tempdir's would).
-    fn make_readonly(dir: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
-    }
 
     #[test]
     fn owner_is_gone_reflects_whether_the_lock_is_held() {
@@ -313,12 +307,12 @@ mod tests {
         ] {
             fs::create_dir(p).unwrap();
         }
-        make_readonly(&dead_leaf); // no real cgroup.kill here to write instead
 
         sweep_stale_leaves(
             dir.path(),
             |name| name.strip_prefix("nanosandbox-supervisor-"),
             |pid| owner_is_gone_in(locks.path(), pid),
+            |_| {}, // a plain directory has no cgroup.kill; writing one would fill it
         );
 
         assert!(our_leaf.exists(), "must not remove our own leaf");
@@ -349,12 +343,12 @@ mod tests {
         for p in [&our_leaf, &dead_leaf] {
             fs::create_dir(p).unwrap();
         }
-        make_readonly(&dead_leaf);
 
         sweep_stale_leaves(
             dir.path(),
             |name| name.split('-').next(),
             |pid| owner_is_gone_in(locks.path(), pid),
+            |_| {},
         );
 
         assert!(our_leaf.exists());

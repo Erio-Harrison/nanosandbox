@@ -349,7 +349,12 @@ fn ensure_base(needed: &[&str]) -> Result<PathBuf> {
 
     enable_subtree_control(&base, needed)?;
 
-    sweep::sweep_stale_leaves(&base, |name| name.split('-').next(), sweep::owner_is_gone); // Drop doesn't run on SIGKILL/process::exit
+    sweep::sweep_stale_leaves(
+        &base,
+        |name| name.split('-').next(),
+        sweep::owner_is_gone,
+        sweep::kill_cgroup_atomically,
+    ); // Drop doesn't run on SIGKILL/process::exit
 
     // Last, not first: the sweeps above still need a stale pid's lock file
     // to exist to confirm it via owner_is_gone — removing it any earlier in
