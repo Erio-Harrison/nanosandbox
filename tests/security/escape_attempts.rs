@@ -152,8 +152,8 @@ fn test_working_directory_confinement() {
     if crate::common::skip_without_userns_privileges() {
         return;
     }
-    let source = tempfile::tempdir().unwrap();
-    let target = tempfile::tempdir().unwrap();
+    let source = crate::common::sandbox_tempdir();
+    let target = crate::common::sandbox_tempdir();
 
     let sandbox = Sandbox::builder()
         .bind(source.path(), target.path(), Permission::ReadWrite)
@@ -261,7 +261,7 @@ fn test_default_sandbox_cannot_write_host_files() {
 #[test]
 #[cfg(unix)]
 fn test_writable_places_still_writable() {
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     let path = dir.path().to_str().unwrap();
 
     let sandbox = Sandbox::builder()
@@ -365,4 +365,103 @@ fn test_root_caller_writable_world_writable_is_accepted() {
         )
         .unwrap();
     assert_eq!(result.exit_code, 0, "{}", result.stderr);
+}
+
+/// A root caller's sandbox runs as nobody unless told otherwise; `host_uid`/
+/// `host_gid` pick the host user instead, so a directory only its owner can
+/// write to (what a root-run container creates for another user) works.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_root_caller_host_ids_reach_a_directory_nobody_cannot() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    const OWNER: u32 = 12345;
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    std::os::unix::fs::chown(dir.path(), Some(OWNER), Some(OWNER)).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    // Without the ids, refused up front.
+    let err = Sandbox::builder()
+        .writable(dir.path())
+        .build()
+        .err()
+        .unwrap();
+    assert!(err.to_string().contains("host_uid"), "{err}");
+
+    let sandbox = Sandbox::builder()
+        .writable(dir.path())
+        .host_uid(OWNER)
+        .host_gid(OWNER)
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", &format!("echo hi > '{}/f'", dir.path().display())],
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    let meta = std::fs::metadata(dir.path().join("f")).unwrap();
+    assert_eq!((meta.uid(), meta.gid()), (OWNER, OWNER));
+}
+
+/// The output pipes belong to whoever the sandbox runs as, or it couldn't
+/// reopen its own stdout through /dev/stdout.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_root_caller_host_ids_keep_dev_stdout_working() {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .host_uid(12345)
+        .host_gid(12345)
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &["-c", "echo out > /dev/stdout; echo err > /dev/stderr"],
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{}", result.stderr);
+    assert_eq!(result.stdout.trim(), "out");
+    assert_eq!(result.stderr.trim(), "err");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_host_ids_of_root_are_refused() {
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: not root");
+        return;
+    }
+    for builder in [
+        Sandbox::builder().host_uid(0),
+        Sandbox::builder().host_gid(0),
+    ] {
+        let err = builder.build().err().unwrap();
+        assert!(
+            matches!(err, nanosandbox::SandboxError::Unsupported { .. }),
+            "{err:?}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_host_ids_need_a_root_caller() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: root");
+        return;
+    }
+    let err = Sandbox::builder().host_uid(12345).build().err().unwrap();
+    assert!(
+        matches!(err, nanosandbox::SandboxError::Unsupported { .. }),
+        "{err:?}"
+    );
 }

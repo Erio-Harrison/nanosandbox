@@ -230,6 +230,16 @@ impl SandboxBuilder {
     }
 
     #[napi]
+    pub fn host_uid(&mut self, uid: u32) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.host_uid(uid)))
+    }
+
+    #[napi]
+    pub fn host_gid(&mut self, gid: u32) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.host_gid(gid)))
+    }
+
+    #[napi]
     pub fn hostname(&mut self, name: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.hostname(name)))
     }

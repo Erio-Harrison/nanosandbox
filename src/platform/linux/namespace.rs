@@ -24,6 +24,9 @@ pub struct UserNamespace {
     inner_uid: u32,
     /// GID inside the namespace
     inner_gid: u32,
+    /// The host ids a root caller's sandbox runs as; `NOBODY` if unset.
+    host_uid: Option<u32>,
+    host_gid: Option<u32>,
 }
 
 impl UserNamespace {
@@ -32,7 +35,24 @@ impl UserNamespace {
         Self {
             inner_uid: uid.unwrap_or(1000),
             inner_gid: gid.unwrap_or(1000),
+            host_uid: None,
+            host_gid: None,
         }
+    }
+
+    /// For a root caller: run as these host ids instead of nobody.
+    pub fn with_host_ids(mut self, uid: Option<u32>, gid: Option<u32>) -> Self {
+        self.host_uid = uid;
+        self.host_gid = gid;
+        self
+    }
+
+    /// The host ids a root caller's sandbox runs as.
+    pub fn host_ids(&self) -> (u32, u32) {
+        (
+            self.host_uid.unwrap_or(NOBODY),
+            self.host_gid.unwrap_or(NOBODY),
+        )
     }
 
     /// The UID and GID inside the namespace.
@@ -45,8 +65,8 @@ impl UserNamespace {
         // Mapped to the caller's own ids, the sandbox has whatever the caller
         // can do to the host's files as their owner. For root, that's
         // writing /etc/passwd or reading /etc/shadow, capabilities or not:
-        // so a root caller's inner ids map to nobody instead, which root may
-        // map to, and the child switches to them before exec (a mapping
+        // so a root caller's inner ids map to nobody instead (or to the host
+        // ids it chose), which root may map to, and the child switches to them before exec (a mapping
         // alone doesn't change whose process it is). Root itself is mapped
         // too, as 0: the child is root until then, and needs an id the
         // namespace knows to create files in its tmpfs or rootfs. NO_NEW_PRIVS
@@ -54,7 +74,7 @@ impl UserNamespace {
         // afterwards. See runs_as_root for the groups.
         let root = runs_as_root();
         let (outer_uid, outer_gid) = if root {
-            (NOBODY, NOBODY)
+            self.host_ids()
         } else {
             unsafe { (libc::getuid(), libc::getgid()) }
         };

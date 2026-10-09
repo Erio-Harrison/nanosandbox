@@ -110,7 +110,16 @@ host's files as their owner, capabilities or not. For root that's writing
 - `uid(0)`/`gid(0)` are refused: 0 is root's, for the setup.
 
 `writable` paths then have to be writable by uid 65534, like any other
-nobody process: `chown` them, or make them group- or world-writable. An
+nobody process: `chown` them, make them group- or world-writable, or tell
+the sandbox which host user to run as instead (`host_uid()`/`host_gid()`,
+root callers only, 0 refused). `host_uid`/`host_gid` are the ids permission
+checks on the host's files use; `uid()`/`gid()` stay what the program sees
+inside. Pick the owner of the directories you pass to `writable`, e.g.
+the user a root-run container created them for; the program can then reach
+whatever that user can on the host, within the rest of the sandbox's limits.
+`build()` checks each `writable` source's mode bits against the chosen ids
+(no ACLs) and refuses one they can't write. The same checks apply with a
+`rootfs`. An
 unprivileged caller can't do any of this (it may only map its own ids, and
 the kernel keeps its groups), and needs none of it.
 

@@ -114,7 +114,7 @@ Allow specific domains only (uses a local HTTP proxy):
 Where a setting can't be enforced, `build()` returns an error rather than
 running without it. On Windows that means `host_network()` is required and
 `read_only`/`writable`/`private_tmp` are refused. Settings only Linux has
-(`rootfs`, `bind`, `tmpfs`, `uid`, `gid`, `hostname`, `seccomp`) don't
+(`rootfs`, `bind`, `tmpfs`, `uid`, `gid`, `host_uid`, `host_gid`, `hostname`, `seccomp`) don't
 exist on other platforms. See [docs/API.md](docs/API.md).
 
 ## Building

@@ -39,7 +39,7 @@ impl Pipes {
     /// to its own program: it could read this run's stdin, write into its
     /// output, and hold its stdin open so it never sees EOF. dup2() onto
     /// 0/1/2 in the child clears the flag on those.
-    pub(super) fn create(stdin: Option<&[u8]>) -> Result<Self> {
+    pub(super) fn create(stdin: Option<&[u8]>, owner: (u32, u32)) -> Result<Self> {
         use nix::fcntl::OFlag;
         use nix::unistd::pipe2;
 
@@ -60,9 +60,10 @@ impl Pipes {
             None => (None, None),
         };
 
-        // As root, the sandbox runs as nobody (see namespace::runs_as_root),
-        // and a pipe belongs to whoever made it, mode 0600: so it couldn't
-        // reopen its own stdout through /dev/stdout. Give them to nobody.
+        // As root, the sandbox runs as nobody, or the host ids chosen (see
+        // namespace::runs_as_root), and a pipe belongs to whoever made it,
+        // mode 0600: so it couldn't reopen its own stdout through
+        // /dev/stdout. Give them to `owner`.
         if namespace::runs_as_root() {
             for fd in [
                 Some(stdout_write_fd.as_raw_fd()),
@@ -73,7 +74,7 @@ impl Pipes {
             .flatten()
             {
                 unsafe {
-                    libc::fchown(fd, namespace::NOBODY, namespace::NOBODY);
+                    libc::fchown(fd, owner.0, owner.1);
                 }
             }
         }

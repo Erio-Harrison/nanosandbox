@@ -125,7 +125,8 @@ pub fn writable(self, path: impl Into<PathBuf>) -> Self
 Let the sandbox read, or read and write, a host file or directory, at the
 same path. Writes land on the host. The path must exist. On Linux run as
 root, the sandbox runs as `nobody`, so a `writable` path must be writable by
-uid 65534 (see [platform-linux.md](platform-linux.md#running-as-root)).
+uid 65534 (see [platform-linux.md](platform-linux.md#running-as-root)), or
+the host user `host_uid`/`host_gid` name.
 
 ```rust
 builder
@@ -301,6 +302,8 @@ this process's environment instead.
 ```rust
 pub fn uid(self, uid: u32) -> Self
 pub fn gid(self, gid: u32) -> Self
+pub fn host_uid(self, uid: u32) -> Self
+pub fn host_gid(self, gid: u32) -> Self
 pub fn hostname(self, name: impl Into<String>) -> Self
 pub fn seccomp(self, enabled: bool) -> Self
 ```

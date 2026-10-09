@@ -18,7 +18,7 @@ fn home() -> std::path::PathBuf {
 #[cfg(unix)]
 fn test_deny_read_with_read_only_inside() {
     // Not under /tmp, which is a fresh tmpfs inside Linux sandboxes.
-    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir(dir.path().join("open")).unwrap();
     std::fs::write(dir.path().join("secret"), "s").unwrap();
     std::fs::write(dir.path().join("open/file"), "o").unwrap();
@@ -38,8 +38,8 @@ fn test_deny_read_with_read_only_inside() {
 #[test]
 #[cfg(unix)]
 fn test_hide_home_except_what_is_named() {
-    let hidden = tempfile::tempdir_in(home()).unwrap();
-    let shown = tempfile::tempdir_in(home()).unwrap();
+    let hidden = crate::common::sandbox_tempdir_in(home());
+    let shown = crate::common::sandbox_tempdir_in(home());
     std::fs::write(hidden.path().join("f"), "h").unwrap();
     std::fs::write(shown.path().join("f"), "s").unwrap();
 

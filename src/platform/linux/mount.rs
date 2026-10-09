@@ -9,21 +9,20 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
-/// Whether `nobody` (uid/gid [`super::namespace::NOBODY`]) could write to
-/// `path`, going by its owner/group/other mode bits the ordinary way a
-/// permission check would. Not a full simulation (no ACLs, no parent
-/// directory traversal) -- good enough to catch the common case: a root
-/// caller's `writable`/`bind(ReadWrite)` target that a root-owned,
+/// Whether a process with uid `uid` and gid `gid` (and no other groups)
+/// could write to `path`, going by its owner/group/other mode bits the
+/// ordinary way a permission check would. Not a full simulation (no ACLs, no
+/// parent directory traversal) -- good enough to catch the common case: a
+/// root caller's `writable`/`bind(ReadWrite)` target that a root-owned,
 /// non-world-writable directory (the usual case for anything a root-run
 /// container created) would otherwise fail on at run time, deep inside
 /// `exec`, with nothing but `EACCES` to go on.
-fn nobody_can_write(path: &Path) -> std::io::Result<bool> {
+fn can_write(path: &Path, uid: u32, gid: u32) -> std::io::Result<bool> {
     let meta = std::fs::metadata(path)?;
     let mode = meta.mode();
-    const NOBODY: u32 = super::namespace::NOBODY;
-    Ok(if meta.uid() == NOBODY {
+    Ok(if meta.uid() == uid {
         mode & 0o200 != 0
-    } else if meta.gid() == NOBODY {
+    } else if meta.gid() == gid {
         mode & 0o020 != 0
     } else {
         mode & 0o002 != 0
@@ -418,26 +417,31 @@ impl MountPlan {
     }
 }
 
-/// A root caller's sandbox runs as nobody (see namespace::runs_as_root), so
-/// a writable grant only works if nobody can actually write there --
-/// typically not true for a directory a root-run container created
-/// (root-owned, not world-writable). Catch it at build() time, instead of
-/// an EACCES from deep inside the sandboxed program. The source's
-/// permissions are what count, even when the target sits inside a tmpfs or
-/// a rootfs: the bind brings the host's own directory along.
-fn check_writable_by_nobody(config: &SandboxConfig) -> Result<()> {
+/// A root caller's sandbox runs as nobody, or the host ids it chose (see
+/// namespace::runs_as_root), so a writable grant only works if that user can
+/// actually write there -- typically not true for nobody on a directory a
+/// root-run container created (root-owned, not world-writable). Catch it at
+/// build() time, instead of an EACCES from deep inside the sandboxed
+/// program. The source's permissions are what count, even when the target
+/// sits inside a tmpfs or a rootfs: the bind brings the host's own directory
+/// along.
+fn check_writable_by_sandbox(config: &SandboxConfig) -> Result<()> {
     if !super::namespace::runs_as_root() {
         return Ok(());
     }
+    let (uid, gid) = super::namespace::UserNamespace::new(None, None)
+        .with_host_ids(config.host_uid, config.host_gid)
+        .host_ids();
     for m in &config.mounts {
-        if m.permission == Permission::ReadWrite && !nobody_can_write(&m.source).unwrap_or(true) {
+        if m.permission == Permission::ReadWrite && !can_write(&m.source, uid, gid).unwrap_or(true)
+        {
             return Err(SandboxError::Config {
                 context: format!(
-                    "writable {}: owned by a different user and not group/world-writable; a \
-                     root caller's sandbox runs as nobody (uid {}), which can't write here. \
-                     chmod it to allow group or other write, or change its owner",
+                    "writable {}: the sandbox runs as uid {uid}/gid {gid} (nobody unless \
+                     host_uid/host_gid say otherwise), which can't write here. chmod it to \
+                     allow group or other write, change its owner, or set host_uid/host_gid \
+                     to its owner",
                     m.source.display(),
-                    super::namespace::NOBODY
                 ),
                 source: None,
             });
@@ -462,7 +466,7 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
         });
     }
     if config.rootfs.is_some() {
-        return check_writable_by_nobody(config);
+        return check_writable_by_sandbox(config);
     }
     let tmpfs = MountPlan::tmpfs_mounts(config, restricted);
     let in_tmpfs = |path: &Path| tmpfs.iter().any(|(t, _)| t != path && path.starts_with(t));
@@ -490,7 +494,7 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
             });
         }
     }
-    check_writable_by_nobody(config)?;
+    check_writable_by_sandbox(config)?;
     // A tmpfs starts empty: only what's bound into it is there.
     let wd = &config.working_dir;
     if in_tmpfs(wd) && !config.mounts.iter().any(|m| wd.starts_with(&m.target)) {

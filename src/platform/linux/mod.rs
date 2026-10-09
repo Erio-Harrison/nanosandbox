@@ -172,7 +172,9 @@ impl PlatformExecutor for LinuxExecutor {
         // Pipes for stdout, stderr, stdin and the ready signal; see
         // prepare::Pipes. The child gets plain copies of the fd numbers
         // (below): it has its own fd table, and closes its own.
-        let pipes = Pipes::create(stdin)?;
+        let user_ns = UserNamespace::new(config.uid, config.gid)
+            .with_host_ids(config.host_uid, config.host_gid);
+        let pipes = Pipes::create(stdin, user_ns.host_ids())?;
         let stdout_read = pipes.stdout_read_fd.as_raw_fd();
         let stdout_write = pipes.stdout_write_fd.as_raw_fd();
         let stderr_read = pipes.stderr_read_fd.as_raw_fd();
@@ -279,10 +281,8 @@ impl PlatformExecutor for LinuxExecutor {
         // as everything in child.rs.
         let rlimits = prepare_rlimits(config);
 
-        // Create user namespace config
-        let user_ns = UserNamespace::new(config.uid, config.gid);
         // As root, the ids the child switches to before exec (mapped to
-        // nobody), having dropped root's groups. See namespace::runs_as_root.
+        // nobody, or the host ids chosen), having dropped root's groups. See namespace::runs_as_root.
         let become_nobody = namespace::runs_as_root().then(|| user_ns.ids());
 
         let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
@@ -514,6 +514,20 @@ impl PlatformExecutor for LinuxExecutor {
                 reason: "a root caller's sandbox runs as nobody, under its uid/gid; 0 is \
                          reserved for setting it up"
                     .into(),
+            });
+        }
+        if !namespace::runs_as_root() && (config.host_uid.is_some() || config.host_gid.is_some()) {
+            return Err(SandboxError::Unsupported {
+                setting: "host_uid/host_gid".into(),
+                reason: "only a root caller can choose the host user its sandbox runs as; an \
+                         unprivileged caller can only map its own ids"
+                    .into(),
+            });
+        }
+        if config.host_uid == Some(0) || config.host_gid == Some(0) {
+            return Err(SandboxError::Unsupported {
+                setting: "host_uid(0)/host_gid(0)".into(),
+                reason: "0 is root's, which the sandbox must not run as".into(),
             });
         }
         // Without a rootfs, working_dir is a host path: check it now rather

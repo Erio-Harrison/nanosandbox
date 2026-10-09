@@ -80,6 +80,8 @@ pub(crate) struct SandboxConfig {
     /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
     pub(crate) seccomp: bool,
     pub(crate) uid: Option<u32>,
+    pub(crate) host_uid: Option<u32>,
+    pub(crate) host_gid: Option<u32>,
     pub(crate) gid: Option<u32>,
 
     // Environment
@@ -113,6 +115,8 @@ impl Default for SandboxConfig {
             allow_private_destinations: false,
             seccomp: true,
             uid: None,
+            host_uid: None,
+            host_gid: None,
             gid: None,
 
             env: HashMap::new(),
@@ -387,6 +391,29 @@ impl SandboxBuilder {
     #[cfg(target_os = "linux")]
     pub fn gid(mut self, gid: u32) -> Self {
         self.config.gid = Some(gid);
+        self
+    }
+
+    /// Linux only, for a root caller: the host user the sandbox runs as,
+    /// instead of `nobody` (65534). Permission checks on the host's files
+    /// use this id, not [`uid`](Self::uid), which is only what the program
+    /// sees inside. Set it to the owner of the directories passed to
+    /// [`writable`](Self::writable) when `nobody` can't write to them, e.g.
+    /// ones a root-run container created. Whatever this user can reach on
+    /// the host is then reachable by the program, within the rest of the
+    /// sandbox's limits. 0 is refused, and so is setting this when the
+    /// caller isn't root: an unprivileged caller can only run as itself.
+    #[cfg(target_os = "linux")]
+    pub fn host_uid(mut self, uid: u32) -> Self {
+        self.config.host_uid = Some(uid);
+        self
+    }
+
+    /// Linux only, for a root caller: the host group the sandbox runs as,
+    /// instead of `nogroup` (65534). See [`host_uid`](Self::host_uid).
+    #[cfg(target_os = "linux")]
+    pub fn host_gid(mut self, gid: u32) -> Self {
+        self.config.host_gid = Some(gid);
         self
     }
 

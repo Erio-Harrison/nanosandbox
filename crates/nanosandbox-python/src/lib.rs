@@ -190,6 +190,16 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.gid(gid)))
     }
 
+    #[cfg(target_os = "linux")]
+    fn host_uid(&mut self, uid: u32) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.host_uid(uid)))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_gid(&mut self, gid: u32) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.host_gid(gid)))
+    }
+
     // ===== Environment =====
 
     fn env(&mut self, key: String, value: String) -> PyResult<Self> {

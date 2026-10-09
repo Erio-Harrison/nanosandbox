@@ -15,6 +15,13 @@
   instead of as PID 1, so it can signal itself and its children normally
   (before, `kill -KILL $$` inside the sandbox did nothing).
 
+### Added
+
+- Linux: `host_uid()`/`host_gid()` (also in the Python and Node bindings)
+  let a root caller pick the host user its sandbox runs as instead of
+  `nobody`, so `writable` directories only their owner can write to work.
+  0 is refused, and so is setting them as a non-root caller.
+
 ### Changed
 
 - Linux: when the command is killed by a signal, `ExecutionResult.exit_code`

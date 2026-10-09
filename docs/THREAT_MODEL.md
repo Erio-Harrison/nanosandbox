@@ -121,7 +121,9 @@ that's not what this protects. Run them in separate sandboxes.
   equivalent. Don't rely on them being private on such a host.
 - A root caller's sandbox runs as `nobody`, so a `writable`/`bind(ReadWrite)`
   source `nobody` can't write to is refused at `build()` rather than failing
-  at run time. The check reads the source's mode bits only (no ACLs).
+  at run time. Pass `host_uid`/`host_gid` to run as the source's owner
+  instead (what that user can reach on the host, the program can). The check
+  reads the source's mode bits only (no ACLs).
 - `allow_network`'s DNS-rebinding defense (resolve once, connect to the
   resolved address) is implemented and unit-tested, but has no real
   end-to-end adversarial test with an actual rebinding DNS server --

@@ -46,7 +46,7 @@ fn test_readwrite_mount_and_tmpfs() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let data = tempfile::tempdir().unwrap();
+    let data = crate::common::sandbox_tempdir();
     let sandbox = minimal_rootfs(root.path())
         .bind(data.path(), "/data", Permission::ReadWrite)
         .tmpfs("/scratch", 16 * 1024 * 1024)
@@ -78,12 +78,12 @@ fn test_tmpfs_nested_inside_a_bind_target() {
     }
     // Not under /tmp, which private_tmp (on by default) covers with its
     // own tmpfs.
-    let source = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let source = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir(source.path().join("scratch")).unwrap();
     std::fs::write(source.path().join("scratch/sentinel"), "from source").unwrap();
     std::fs::write(source.path().join("other"), "from source").unwrap();
 
-    let target = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let target = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     // Must exist on the host already: check_mounts requires every tmpfs
     // target to, the same as a bind target.
     std::fs::create_dir(target.path().join("scratch")).unwrap();

@@ -29,3 +29,19 @@ pub fn skip_without_userns_privileges() -> bool {
     }
     false
 }
+
+/// A temp directory the sandbox can use even when the caller is root, whose
+/// sandbox runs as `nobody` (see `host_uid`): `tempfile` makes it mode 0700,
+/// owned by the caller, which nobody can't enter, let alone write to.
+#[allow(dead_code)]
+pub fn sandbox_tempdir_in(parent: impl AsRef<std::path::Path>) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir_in(parent).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    dir
+}
+
+#[allow(dead_code)]
+pub fn sandbox_tempdir() -> tempfile::TempDir {
+    sandbox_tempdir_in(std::env::temp_dir())
+}
