@@ -57,6 +57,12 @@ impl SandboxBuilder {
     }
 }
 
+impl Default for SandboxBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[napi]
 impl SandboxBuilder {
     #[napi(constructor)]
@@ -115,12 +121,18 @@ impl SandboxBuilder {
 
     #[napi]
     pub fn wall_time_limit(&mut self, seconds: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.wall_time_limit(Duration::from_secs_f64(seconds))))
+        Ok(Self::wrap(
+            self.take()?
+                .wall_time_limit(Duration::from_secs_f64(seconds)),
+        ))
     }
 
     #[napi]
     pub fn cpu_time_limit(&mut self, seconds: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.cpu_time_limit(Duration::from_secs_f64(seconds))))
+        Ok(Self::wrap(
+            self.take()?
+                .cpu_time_limit(Duration::from_secs_f64(seconds)),
+        ))
     }
 
     #[napi]
@@ -204,7 +216,11 @@ impl SandboxBuilder {
         target: String,
         permission: Permission,
     ) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.bind(source, target, permission.into())))
+        Ok(Self::wrap(self.take()?.bind(
+            source,
+            target,
+            permission.into(),
+        )))
     }
 
     #[napi]
