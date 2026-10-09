@@ -418,6 +418,34 @@ impl MountPlan {
     }
 }
 
+/// A root caller's sandbox runs as nobody (see namespace::runs_as_root), so
+/// a writable grant only works if nobody can actually write there --
+/// typically not true for a directory a root-run container created
+/// (root-owned, not world-writable). Catch it at build() time, instead of
+/// an EACCES from deep inside the sandboxed program. The source's
+/// permissions are what count, even when the target sits inside a tmpfs or
+/// a rootfs: the bind brings the host's own directory along.
+fn check_writable_by_nobody(config: &SandboxConfig) -> Result<()> {
+    if !super::namespace::runs_as_root() {
+        return Ok(());
+    }
+    for m in &config.mounts {
+        if m.permission == Permission::ReadWrite && !nobody_can_write(&m.source).unwrap_or(true) {
+            return Err(SandboxError::Config {
+                context: format!(
+                    "writable {}: owned by a different user and not group/world-writable; a \
+                     root caller's sandbox runs as nobody (uid {}), which can't write here. \
+                     chmod it to allow group or other write, or change its owner",
+                    m.source.display(),
+                    super::namespace::NOBODY
+                ),
+                source: None,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Refuses, at build() time, mount setups that can only fail or silently do
 /// something other than asked once the sandbox runs.
 pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
@@ -434,7 +462,7 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
         });
     }
     if config.rootfs.is_some() {
-        return Ok(());
+        return check_writable_by_nobody(config);
     }
     let tmpfs = MountPlan::tmpfs_mounts(config, restricted);
     let in_tmpfs = |path: &Path| tmpfs.iter().any(|(t, _)| t != path && path.starts_with(t));
@@ -450,7 +478,6 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
             });
         }
     }
-    let root_caller = super::namespace::runs_as_root();
     for m in &config.mounts {
         if !in_tmpfs(&m.target) && !m.target.exists() {
             return Err(SandboxError::Config {
@@ -462,29 +489,8 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
                 source: None,
             });
         }
-        // A root caller's sandbox runs as nobody (see namespace::runs_as_root),
-        // so a writable grant only works if nobody can actually write there --
-        // typically not true for a directory a root-run container created
-        // (root-owned, not world-writable). Catch it here, at build() time,
-        // instead of an EACCES from deep inside the sandboxed program.
-        // The source's permissions are what count, even when the target sits
-        // inside a tmpfs: the bind brings the host's own directory along.
-        if root_caller
-            && m.permission == Permission::ReadWrite
-            && !nobody_can_write(&m.source).unwrap_or(true)
-        {
-            return Err(SandboxError::Config {
-                context: format!(
-                    "writable {}: owned by a different user and not group/world-writable; a \
-                     root caller's sandbox runs as nobody (uid {}), which can't write here. \
-                     chmod it to allow group or other write, or change its owner",
-                    m.source.display(),
-                    super::namespace::NOBODY
-                ),
-                source: None,
-            });
-        }
     }
+    check_writable_by_nobody(config)?;
     // A tmpfs starts empty: only what's bound into it is there.
     let wd = &config.working_dir;
     if in_tmpfs(wd) && !config.mounts.iter().any(|m| wd.starts_with(&m.target)) {

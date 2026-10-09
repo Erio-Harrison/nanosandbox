@@ -189,3 +189,38 @@ fn test_path_lookup_happens_in_the_rootfs() {
         Err(nanosandbox::SandboxError::CommandNotFound(_))
     ));
 }
+
+/// A root caller's sandbox runs as nobody, so a writable bind whose host
+/// source nobody can't write to is refused at build(), rootfs or not --
+/// the check used to be skipped entirely with a rootfs.
+#[test]
+fn test_root_caller_unwritable_bind_source_is_refused_with_a_rootfs() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } != 0 || skip_without_userns_privileges() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let err = minimal_rootfs(root.path())
+        .bind(data.path(), "/data", Permission::ReadWrite)
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, nanosandbox::SandboxError::Config { .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("nobody"), "{err}");
+
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let sandbox = minimal_rootfs(root.path())
+        .bind(data.path(), "/data", Permission::ReadWrite)
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run("/bin/sh", &["-c", "echo hi > /data/out"])
+        .unwrap();
+    assert!(result.success(), "stderr: {}", result.stderr);
+}
