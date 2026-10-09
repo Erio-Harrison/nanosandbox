@@ -467,17 +467,18 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
         // typically not true for a directory a root-run container created
         // (root-owned, not world-writable). Catch it here, at build() time,
         // instead of an EACCES from deep inside the sandboxed program.
+        // The source's permissions are what count, even when the target sits
+        // inside a tmpfs: the bind brings the host's own directory along.
         if root_caller
             && m.permission == Permission::ReadWrite
-            && !in_tmpfs(&m.target)
-            && !nobody_can_write(&m.target).unwrap_or(true)
+            && !nobody_can_write(&m.source).unwrap_or(true)
         {
             return Err(SandboxError::Config {
                 context: format!(
                     "writable {}: owned by a different user and not group/world-writable; a \
                      root caller's sandbox runs as nobody (uid {}), which can't write here. \
                      chmod it to allow group or other write, or change its owner",
-                    m.target.display(),
+                    m.source.display(),
                     super::namespace::NOBODY
                 ),
                 source: None,
