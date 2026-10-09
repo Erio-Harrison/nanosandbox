@@ -1,46 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Security
-
-- Linux: `/var/tmp` and `/dev/shm`, writable by default, each get their own
-  private tmpfs per run where mounting is possible, instead of being the
-  host's shared paths. (Still shared under AppArmor's `unprivileged_userns`
-  restriction.)
-- Linux: `socket(AF_UNIX, ...)` is denied, closing connections to host
-  services over Unix sockets (`docker.sock`, the systemd bus, `ssh-agent`).
-  `socketpair()` and other address families are unaffected.
-- Linux: the sandboxed command runs as PID 2 under a small init shim
-  instead of as PID 1, so it can signal itself and its children normally
-  (before, `kill -KILL $$` inside the sandbox did nothing).
-
-### Added
-
-- Node: `runAsync()` and `runWithInputAsync()` return a Promise and run on
-  libuv's thread pool, leaving the event loop free; `run()` and
-  `runWithInput()` are unchanged and still block it for the whole command.
-- Linux: `host_uid()`/`host_gid()` (also in the Python and Node bindings)
-  let a root caller pick the host user its sandbox runs as instead of
-  `nobody`, so `writable` directories only their owner can write to work.
-  0 is refused, and so is setting them as a non-root caller.
-
-### Changed
-
-- Linux: when the command is killed by a signal, `ExecutionResult.exit_code`
-  is `128 + signal` and `signal` is `None` (before, `signal` was `Some`).
-  Kills by the host's own limits (`wall_time_limit`, ...) still set it.
-- Linux: `build()` refuses, for a root caller, a `writable`/`bind(ReadWrite)`
-  source that `nobody` can't write to, with or without a `rootfs`, instead of
-  failing at run time with `EACCES`.
-- Linux: `is_platform_supported()` no longer requires cgroup v2, and now
-  requires Landlock and a seccomp filter for this architecture, matching
-  what building the default config needs.
-- Linux: cgroup v2 is only required for configs that set a cgroup-backed
-  limit.
-- Python: `run()` and `run_with_input()` release the GIL while the sandbox
-  runs.
-
 ## 0.2.0
 
 The published `0.1.0` was cut from this project's first commit, before
