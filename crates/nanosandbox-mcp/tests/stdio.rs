@@ -650,3 +650,34 @@ fn the_first_command_of_a_fresh_server_is_not_killed() {
         assert_eq!(out["exit_code"], 0, "start {i}: {out}");
     }
 }
+
+/// A command must not be able to delete its own run marker, which is how a
+/// process that left the group (setsid, double fork) would outlive the call.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_command_cannot_strip_its_markers_to_leave_a_daemon_behind() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let script = r#"rm -f "$(dirname "$TMPDIR")"/nanosandbox-run-*-out 2>/dev/null
+python3 -c '
+import os, time
+if os.fork() == 0:
+    os.setsid()
+    if os.fork() == 0:
+        os.execvp("sleep", ["sleep", "31987"])
+    os._exit(0)
+time.sleep(0.5)'"#;
+    let out = c.run(1, "sh", &["-c", script]);
+    assert_eq!(out["exit_code"], 0, "{out}");
+    std::thread::sleep(Duration::from_millis(500));
+    let left = Command::new("pgrep")
+        .args(["-f", "[s]leep 31987"])
+        .output()
+        .unwrap();
+    let _ = Command::new("pkill").args(["-f", "[s]leep 31987"]).status();
+    assert!(
+        left.stdout.is_empty(),
+        "a daemon outlived the call: {}",
+        String::from_utf8_lossy(&left.stdout)
+    );
+}

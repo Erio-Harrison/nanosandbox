@@ -98,8 +98,8 @@ impl RunMarker {
         }
     }
 
-    /// The profile rules that mark the run.
-    pub(super) fn rules(&self) -> [(&'static str, &Path); 2] {
+    /// The profile rules that mark the run, and keep it from touching them.
+    pub(super) fn rules(&self) -> [(&'static str, &Path); 4] {
         [
             (
                 "(deny file-read-metadata (literal (param \"{}\")))",
@@ -109,6 +109,11 @@ impl RunMarker {
                 "(allow file-read-metadata (literal (param \"{}\")))",
                 &self.allowed,
             ),
+            // The run could otherwise delete or replace a marker, and then
+            // `members()` finds nothing: a process that left the group would
+            // outlive the call.
+            ("(deny file-write* (literal (param \"{}\")))", &self.denied),
+            ("(deny file-write* (literal (param \"{}\")))", &self.allowed),
         ]
     }
 
@@ -180,6 +185,31 @@ mod tests {
             .args(["-p", &profile, "/bin/sh", "-c", script])
             .spawn()
             .unwrap()
+    }
+
+    #[test]
+    fn test_a_run_cannot_remove_its_own_markers() {
+        let marker = RunMarker::create().unwrap();
+        let script = format!(
+            "rm -f '{}' '{}' 2>/dev/null; mv '{}' '{}.x' 2>/dev/null; : > '{}' 2>/dev/null; exit 0",
+            marker.denied.display(),
+            marker.allowed.display(),
+            marker.allowed.display(),
+            marker.allowed.display(),
+            marker.allowed.display(),
+        );
+        let mut run = sandboxed(Some(&marker), &script);
+        run.wait().unwrap();
+        assert!(marker.denied.exists(), "the denied marker was removed");
+        assert!(
+            marker.allowed.exists(),
+            "the allowed marker was removed or renamed"
+        );
+        assert_eq!(
+            std::fs::metadata(&marker.allowed).unwrap().len(),
+            0,
+            "the allowed marker was written"
+        );
     }
 
     /// Only checks; sends no signals except to its own children, through
