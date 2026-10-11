@@ -291,6 +291,7 @@ dependencies = [
 name = "nanosandbox-mcp"
 version = "0.3.0"
 dependencies = [
+ "libc",
  "nanosandbox",
  "serde_json",
  "tempfile",

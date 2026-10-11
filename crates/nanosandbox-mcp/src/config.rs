@@ -3,8 +3,12 @@
 
 use crate::protocol::{RunOutput, Runner};
 use nanosandbox::{Sandbox, SandboxBuilder};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+/// Where, in the workspace, npm's and pip's caches are kept.
+const CACHE_DIR: &str = ".nanosandbox-cache";
+const CACHE_SUBDIRS: [&str; 3] = ["npm", "pip", "xdg"];
 
 pub const USAGE: &str = "\
 nanosandbox-mcp: an MCP server (stdio) that runs commands in a nanosandbox sandbox.
@@ -38,6 +42,10 @@ LIMITS
     --max-concurrent <N>    Commands running at once         [default: CPU count]
 
 ENVIRONMENT
+    --no-cache              Don't keep npm's and pip's download caches in
+                            <workspace>/.nanosandbox-cache (kept by default,
+                            so a reinstall doesn't download again; delete the
+                            directory to clear it)
     --env <KEY=VALUE>       Environment variable for commands (repeatable).
                             Commands otherwise get this process's PATH (so
                             what your terminal finds, they find), a HOME in
@@ -67,6 +75,7 @@ pub struct Config {
     pub writable: Vec<PathBuf>,
     pub deny_read: Vec<PathBuf>,
     pub no_hide_home: bool,
+    pub no_cache: bool,
     pub allow_network: Vec<String>,
     pub host_network: bool,
     pub memory: u64,
@@ -124,6 +133,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
             "--writable" => cfg.writable.push(PathBuf::from(value("a path")?)),
             "--deny-read" => cfg.deny_read.push(PathBuf::from(value("a path")?)),
             "--no-hide-home" => cfg.no_hide_home = true,
+            "--no-cache" => cfg.no_cache = true,
             "--allow-network" => cfg.allow_network.extend(
                 value("a host")?
                     .split(',')
@@ -249,6 +259,11 @@ impl Config {
         for (k, v) in &self.env {
             b = b.env(k, v);
         }
+        for (k, v) in self.cache_env(&workspace) {
+            if !self.env.iter().any(|(set, _)| *set == k) {
+                b = b.env(k, v);
+            }
+        }
         // Commands start with an empty environment. A PATH of the library's
         // own default would leave out anything outside /usr/bin (Homebrew's
         // node and python on Apple silicon); this process's is what the
@@ -290,6 +305,66 @@ impl Config {
             }
         }
         Ok(b)
+    }
+
+    /// Points npm, pip and anything that follows `XDG_CACHE_HOME` at a
+    /// directory in the workspace, so a download is kept for the next call.
+    /// `HOME` stays private to each call, so configuration and credentials
+    /// don't outlive it; only caches do. They aren't in `HOME` because that is
+    /// the run's private temp directory, which has a size limit (256 MB) a large
+    /// package would hit; the workspace has none. The directory ignores itself
+    /// in git (a `.gitignore` holding `*`, as `.pytest_cache` has), so it
+    /// doesn't show in `git status`. Nothing is returned if it can't be made:
+    /// commands then just don't have a persistent cache.
+    fn cache_env(&self, workspace: &Path) -> Vec<(String, String)> {
+        if self.no_cache {
+            return Vec::new();
+        }
+        let dir = workspace.join(CACHE_DIR);
+        let made = (|| -> std::io::Result<()> {
+            for sub in CACHE_SUBDIRS {
+                std::fs::create_dir_all(dir.join(sub))?;
+            }
+            let ignore = dir.join(".gitignore");
+            if !ignore.exists() {
+                std::fs::write(ignore, "# Created by nanosandbox-mcp.\n*\n")?;
+            }
+            // Run as root, commands run as nobody, or the host user chosen:
+            // the directories made here have to be theirs to write.
+            #[cfg(target_os = "linux")]
+            if unsafe { libc::geteuid() } == 0 {
+                const NOBODY: u32 = 65534;
+                let (uid, gid) = (
+                    self.host_uid.unwrap_or(NOBODY),
+                    self.host_gid.unwrap_or(NOBODY),
+                );
+                std::os::unix::fs::chown(&dir, Some(uid), Some(gid))?;
+                for sub in CACHE_SUBDIRS {
+                    std::os::unix::fs::chown(dir.join(sub), Some(uid), Some(gid))?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(e) = made {
+            eprintln!(
+                "nanosandbox-mcp: no download cache, can't make {}: {e}",
+                dir.display()
+            );
+            return Vec::new();
+        }
+        [
+            ("npm_config_cache", "npm"),
+            ("PIP_CACHE_DIR", "pip"),
+            ("XDG_CACHE_HOME", "xdg"),
+        ]
+        .into_iter()
+        .map(|(var, sub)| {
+            (
+                var.to_string(),
+                dir.join(sub).to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
     }
 
     #[cfg(target_os = "macos")]
@@ -420,6 +495,12 @@ mod tests {
         assert_eq!(c.env, [("K".to_string(), "V=W".to_string())]);
         assert_eq!(c.timeout, 2.5);
         assert_eq!(c.memory, 1 << 30);
+    }
+
+    #[test]
+    fn the_download_cache_is_on_unless_turned_off() {
+        assert!(!cfg(&["--workspace", "/w"]).no_cache);
+        assert!(cfg(&["--workspace", "/w", "--no-cache"]).no_cache);
     }
 
     #[test]

@@ -416,6 +416,102 @@ fn one_noisy_command_cannot_flood_the_model() {
 }
 
 #[test]
+fn downloads_are_cached_in_the_workspace_and_kept_out_of_git() {
+    let ws = workspace();
+    let git_here = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(ws.path())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    let has_git = git_here(&["init", "-q"]).is_some();
+
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let out = c.run(
+        1,
+        "sh",
+        &[
+            "-c",
+            "echo \"$npm_config_cache\"; echo \"$PIP_CACHE_DIR\"; echo \"$XDG_CACHE_HOME\"; \
+             echo cached > \"$npm_config_cache/entry\"; echo \"$HOME\"",
+        ],
+    );
+    assert_eq!(out["exit_code"], 0, "{out}");
+    let lines: Vec<&str> = out["stdout"].as_str().unwrap().lines().collect();
+    let cache = ws.path().canonicalize().unwrap().join(".nanosandbox-cache");
+    assert_eq!(lines[0], cache.join("npm").to_str().unwrap());
+    assert_eq!(lines[1], cache.join("pip").to_str().unwrap());
+    assert_eq!(lines[2], cache.join("xdg").to_str().unwrap());
+    // HOME is still the run's own, not the cache: configuration and
+    // credentials don't outlive the call.
+    assert!(!lines[3].starts_with(cache.to_str().unwrap()), "{lines:?}");
+
+    // What was cached is there for the next call.
+    let again = c.run(2, "sh", &["-c", "cat \"$npm_config_cache/entry\""]);
+    assert_eq!(again["stdout"], "cached\n", "{again}");
+
+    // The directory ignores itself, so it isn't in `git status`.
+    assert_eq!(
+        std::fs::read_to_string(cache.join(".gitignore")).unwrap(),
+        "# Created by nanosandbox-mcp.\n*\n"
+    );
+    if has_git {
+        let status = git_here(&["status", "--porcelain"]).unwrap().stdout;
+        assert_eq!(
+            String::from_utf8_lossy(&status),
+            "",
+            "the cache shows in git"
+        );
+    }
+}
+
+#[test]
+fn no_cache_leaves_the_workspace_alone() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &["--no-cache"]);
+    let out = c.run(
+        1,
+        "sh",
+        &[
+            "-c",
+            "echo \"[${npm_config_cache-unset}|${PIP_CACHE_DIR-unset}]\"",
+        ],
+    );
+    assert_eq!(out["stdout"], "[unset|unset]\n", "{out}");
+    assert!(!ws.path().join(".nanosandbox-cache").exists());
+}
+
+#[test]
+fn a_cache_variable_the_operator_sets_wins() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &["--env", "PIP_CACHE_DIR=/somewhere/else"]);
+    let out = c.run(
+        1,
+        "sh",
+        &["-c", "echo \"$PIP_CACHE_DIR\"; echo \"$npm_config_cache\""],
+    );
+    let lines: Vec<&str> = out["stdout"].as_str().unwrap().lines().collect();
+    assert_eq!(lines[0], "/somewhere/else");
+    assert!(lines[1].ends_with(".nanosandbox-cache/npm"), "{lines:?}");
+}
+
+/// The reason the cache isn't in HOME: HOME is the run's private temp
+/// directory, capped at 256 MB, and a large package is bigger than that.
+#[test]
+fn a_download_bigger_than_the_private_temp_directory_fits_in_the_cache() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let script = "dd if=/dev/zero bs=1048576 count=300 2>/dev/null > \"$npm_config_cache/big\" \
+                  && wc -c < \"$npm_config_cache/big\" && rm \"$npm_config_cache/big\"";
+    let out = c.run(1, "sh", &["-c", script]);
+    assert_eq!(out["exit_code"], 0, "{out}");
+    assert_eq!(out["tmp_limit_hit"], false, "{out}");
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), "314572800", "{out}");
+}
+
+#[test]
 fn commands_get_a_home_they_can_write() {
     let ws = workspace();
     let mut c = Client::in_workspace(ws.path(), &[]);

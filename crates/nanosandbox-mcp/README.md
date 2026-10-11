@@ -55,6 +55,7 @@ is refused.
 | `--max-output <SIZE>` | Cap on each of stdout and stderr per command, so one call can't flood the model | 1M |
 | `--max-concurrent <N>` | Commands running at once | CPU count |
 | `--env <KEY=VALUE>` | Environment variable for commands (repeatable) | see below |
+| `--no-cache` | Don't keep npm's and pip's download caches in `<workspace>/.nanosandbox-cache/` | cache kept |
 | `--strict-tmp` | macOS only: make `/tmp` and the other system temp directories read-only; commands get a private `$TMPDIR`. Breaks `/tmp` by name, `mktemp -t` and `/usr/bin/clang`/`cc`; see [platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse) | off |
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
@@ -64,14 +65,23 @@ Run `nanosandbox-mcp --help` for the full text. A limit this platform can't enfo
 
 ## What a command's environment holds
 
-Not your whole environment: `PATH`, a `HOME`, `TMPDIR`, and whatever you pass with `--env`.
+Not your whole environment: `PATH`, a `HOME`, `TMPDIR`, cache locations (below), and whatever you pass
+with `--env`.
 
 - `PATH` is the server's own, so what your terminal finds, commands find. A client that starts the
   server from a GUI often gives it a bare `PATH` (`/usr/bin:/bin`): then pass the real one with
   `--env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`. An explicit `--env PATH=` wins.
 - `HOME` is the command's private temp directory, writable and gone after the call. npm, pip and
   git keep caches and config under `HOME`; without one they find your real home, which the sandbox
-  can't write, and fail. It also means nothing they cache survives to the next call.
+  can't write, and fail. Config and credentials they write there (an `.npmrc` with a token, a
+  `.gitconfig`) don't outlive the call either.
+- Downloads are kept, though, in `<workspace>/.nanosandbox-cache/`: `npm_config_cache`,
+  `PIP_CACHE_DIR` and `XDG_CACHE_HOME` point into it. So a reinstall after deleting `node_modules`
+  or a venv doesn't download again (tried: `npm install --offline` works afterwards). It's in the
+  workspace, not in `HOME`, because `HOME` is a private temp directory capped at 256 MB, which a
+  large package overflows (tried: a 300 MB write there is cut off; in the workspace it isn't). The
+  directory holds a `.gitignore` with `*`, so it isn't in `git status`. It only grows; delete it to
+  clear it. `--no-cache` turns it off, and an `--env` for one of those variables wins.
 - Everything else (API keys included) is absent unless you pass it with `--env`.
 
 ## Recipes
@@ -82,7 +92,7 @@ What follows is what was tried, on macOS and Linux, not a promise for every setu
 (`python3 -m venv .venv`, then `.venv/bin/pip install ...`); `pip` goes through the proxy.
 
 **Node**: `--allow-network registry.npmjs.org`, and the right `PATH` for where `node` lives (see
-above). `npm install` works: its cache lands in the private `HOME`, so every call downloads again.
+above). `npm install` works, and what it downloads is cached in the workspace (see above).
 
 **Git**: `--allow-network github.com` to clone over https. `git config --global` writes to the
 private `HOME` and is gone after the call, so if git asks who you are, give it
