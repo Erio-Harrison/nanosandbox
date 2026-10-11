@@ -65,8 +65,8 @@ LINUX ONLY
 OTHER
     --log-io                Also log stdin/stdout/stderr bodies to stderr
     --clean-tmp             Remove private temp directories that killed
-                            servers left behind, then exit. Uses $TMPDIR and
-                            the system default; ones still in use are kept
+                            servers left behind, then exit. Looks in $TMPDIR
+                            (and /tmp on Linux); ones still in use are kept
     -h, --help              Print this help
     -V, --version           Print the version
 ";

@@ -159,26 +159,13 @@ fn sweep_if_due() {
         });
 }
 
-/// The temp directories a run may have been using: this process's, and the
-/// system's default, since `TMPDIR` may have been set differently when a dead
+/// The temp directories a run may have been using: this process's, and on
+/// Linux `/tmp` too, since `TMPDIR` may have been different when a dead run
+/// started. Not macOS's per-user default: `confstr(_CS_DARWIN_USER_TEMP_DIR)`,
+/// the way to ask for it, got about one run in five killed when called as a
 /// run started.
 fn temp_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
-    #[cfg(target_os = "macos")]
-    {
-        let mut buf = [0u8; libc::PATH_MAX as usize];
-        let n = unsafe {
-            libc::confstr(
-                libc::_CS_DARWIN_USER_TEMP_DIR,
-                buf.as_mut_ptr().cast(),
-                buf.len(),
-            )
-        };
-        if n > 1 && n <= buf.len() {
-            let path = String::from_utf8_lossy(&buf[..n - 1]).into_owned();
-            roots.push(PathBuf::from(path));
-        }
-    }
     #[cfg(not(target_os = "macos"))]
     roots.push(PathBuf::from("/tmp"));
     let mut seen = Vec::new();
@@ -356,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn the_roots_swept_include_the_system_default_once() {
+    fn the_roots_swept_are_listed_once() {
         let roots = temp_roots();
         let canon: Vec<_> = roots
             .iter()

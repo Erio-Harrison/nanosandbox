@@ -637,3 +637,16 @@ fn clean_tmp_removes_unheld_directories_and_keeps_held_ones() {
     assert!(other.exists(), "a directory not ours was removed");
     drop(held);
 }
+
+/// The first command of a fresh server was once killed about one time in
+/// five (a libc call made while the run started); it only shows over many
+/// starts.
+#[test]
+fn the_first_command_of_a_fresh_server_is_not_killed() {
+    let ws = workspace();
+    for i in 0..25 {
+        let mut c = Client::in_workspace(ws.path(), &[]);
+        let out = c.run(1, "echo", &["hi"]);
+        assert_eq!(out["exit_code"], 0, "start {i}: {out}");
+    }
+}

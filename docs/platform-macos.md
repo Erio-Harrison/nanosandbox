@@ -146,8 +146,7 @@ process dies however it dies. Whichever process next creates a directory
 old, and whose lock it can take. A directory a live agent holds is never
 touched, so several agents on one machine don't affect each other. A process
 ID is never used for this: it can be reused, or belong to another namespace.
-It looks in `$TMPDIR` and the system's default temp directory, since `TMPDIR`
-may have been different when the dead run started. To do it now, call
+It looks in `$TMPDIR`, and on Linux in `/tmp`. To do it now, call
 `nanosandbox::clean_stale_tmp()` or run `nanosandbox-mcp --clean-tmp`. File
 systems that can't lock (some NFS mounts) are never swept, and another user's
 directories are left to that user.
