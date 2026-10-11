@@ -1,6 +1,6 @@
 [package]
 name = "nanosandbox"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 license = "MIT"
 description = "Lightweight cross-platform sandbox for secure code execution"
