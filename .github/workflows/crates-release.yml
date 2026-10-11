@@ -1,0 +1,80 @@
+name: Release crates
+
+# A `v*` tag publishes `nanosandbox`, then `nanosandbox-mcp`, which depends on
+# it, to crates.io. "Run workflow" (workflow_dispatch) publishes nothing: it
+# checks the same conditions and dry-runs what isn't published yet.
+#
+# Needs the CARGO_REGISTRY_TOKEN secret: a crates.io token scoped to
+# `publish-update` for these two crates.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  publish-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          # A tag publishes the version in Cargo.toml: refuse a mismatch
+          # rather than ship a version nobody tagged.
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match nanosandbox's version $version in Cargo.toml"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' -A nanosandbox-ci \
+            "https://crates.io/api/v1/crates/nanosandbox/$version")
+          if [ "$code" = 200 ]; then
+            echo "nanosandbox $version already published, skipping"
+          elif [ "$GITHUB_REF_TYPE" != tag ]; then
+            cargo publish --dry-run
+          elif [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set, so nanosandbox $version can't be published"
+            exit 1
+          else
+            cargo publish
+          fi
+
+  publish-mcp:
+    needs: publish-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          core=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          version=$(grep -m1 '^version' crates/nanosandbox-mcp/Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match nanosandbox-mcp's version $version"
+            exit 1
+          fi
+          # It's built against the core crate as published, so its requirement
+          # has to name the core's current major.minor.
+          wanted="nanosandbox = { version = \"$(echo "$core" | cut -d. -f1,2)\""
+          if ! grep -qF "$wanted" crates/nanosandbox-mcp/Cargo.toml; then
+            echo "::error::crates/nanosandbox-mcp/Cargo.toml should depend on $wanted (core is $core)"
+            exit 1
+          fi
+          status() { curl -s -o /dev/null -w '%{http_code}' -A nanosandbox-ci "https://crates.io/api/v1/crates/$1/$2"; }
+          cd crates/nanosandbox-mcp
+          if [ "$(status nanosandbox-mcp "$version")" = 200 ]; then
+            echo "nanosandbox-mcp $version already published, skipping"
+          elif [ "$GITHUB_REF_TYPE" != tag ]; then
+            if [ "$(status nanosandbox "$core")" = 200 ]; then
+              cargo publish --dry-run
+            else
+              echo "nanosandbox $core isn't on crates.io yet, so nanosandbox-mcp can't be dry-run against it"
+            fi
+          elif [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not set, so nanosandbox-mcp $version can't be published"
+            exit 1
+          else
+            cargo publish
+          fi

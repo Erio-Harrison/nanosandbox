@@ -1,9 +1,10 @@
 name: Release nanosandbox-mcp
 
-# A `v*` tag builds and publishes to npm, PyPI and crates.io, like the other
-# release workflows. "Run workflow" (workflow_dispatch) builds and packages
-# everything and uploads it as artifacts but publishes nothing, to check the
-# pipeline without cutting a release.
+# A `v*` tag builds and publishes to npm and PyPI, like the other release
+# workflows. (crates.io is crates-release.yml: the core crate goes first.)
+# "Run workflow" (workflow_dispatch) builds and packages everything and
+# uploads it as artifacts but publishes nothing, to check the pipeline
+# without cutting a release.
 on:
   push:
     tags: ["v*"]
@@ -164,26 +165,3 @@ jobs:
         with:
           command: upload
           args: --non-interactive --skip-existing dist/*
-
-  # Needs a `nanosandbox` on crates.io that already has every API this
-  # crate uses (the dependency's version in Cargo.toml), so publish that first.
-  publish-crate:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: binaries
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          code=$(curl -s -o /dev/null -w '%{http_code}' -A nanosandbox-ci \
-            "https://crates.io/api/v1/crates/nanosandbox-mcp/$version")
-          if [ "$code" = 200 ]; then
-            echo "nanosandbox-mcp $version already published, skipping"
-          elif [ -z "$CARGO_REGISTRY_TOKEN" ]; then
-            echo "::warning::CARGO_REGISTRY_TOKEN is not set; not publishing to crates.io"
-          else
-            cargo publish
-          fi
