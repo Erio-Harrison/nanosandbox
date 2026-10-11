@@ -511,6 +511,71 @@ fn a_download_bigger_than_the_private_temp_directory_fits_in_the_cache() {
     assert_eq!(out["stdout"].as_str().unwrap().trim(), "314572800", "{out}");
 }
 
+/// Several servers on one machine, as when a person has more than one agent
+/// open. A server that dies mid-run leaves its private temp directory behind;
+/// the next one to run a command sweeps it. It must not touch a live
+/// server's, however old that looks.
+#[test]
+fn a_dead_servers_leftover_directory_is_swept_and_a_live_ones_is_not() {
+    let temp = std::env::temp_dir();
+    let dir_of = |c: &Client| temp.join(format!("nanosandbox-tmp-{}-0", c.child.id()));
+    let wait_for = |what: &str, cond: &dyn Fn() -> bool| {
+        for _ in 0..200 {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        eprintln!("gave up waiting for: {what}");
+        false
+    };
+    let age = |dir: &std::path::Path| {
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .unwrap();
+    };
+    let start_running = |ws: &std::path::Path| {
+        let mut c = Client::in_workspace(ws, &[]);
+        c.send(json!({"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"run_command","arguments":{"command":"sleep","args":["60"]}}}));
+        c
+    };
+
+    let ws = workspace();
+    let live = start_running(ws.path());
+    let mut dead = start_running(ws.path());
+    if !wait_for("the live server's directory", &|| dir_of(&live).exists()) {
+        // Where the private temp directory is a tmpfs mount, there's no
+        // directory on the host to leak or to sweep.
+        eprintln!("skipping: this host mounts a tmpfs instead of making a directory");
+        return;
+    }
+    assert!(wait_for("the second server's directory", &|| dir_of(&dead).exists()));
+
+    // One dies with no chance to clean up. Both directories look abandoned
+    // by their age; only one actually is.
+    let dead_dir = dir_of(&dead);
+    dead.child.kill().unwrap();
+    dead.child.wait().unwrap();
+    age(&dead_dir);
+    age(&dir_of(&live));
+
+    // A new server runs a command, which sweeps.
+    let mut fresh = Client::in_workspace(ws.path(), &[]);
+    assert_eq!(fresh.run(1, "echo", &["hi"])["exit_code"], 0);
+
+    assert!(
+        wait_for("the dead server's directory to be swept", &|| !dead_dir
+            .exists()),
+        "the leftover directory of a killed server was not removed"
+    );
+    assert!(
+        dir_of(&live).exists(),
+        "SAFETY: a live server's directory was removed from under it"
+    );
+}
+
 #[test]
 fn commands_get_a_home_they_can_write() {
     let ws = workspace();

@@ -444,6 +444,7 @@ root nor running under its own AppArmor profile. For such a caller:
   `TMPDIR` pointing to it, as on macOS (see
   [platform-macos.md](platform-macos.md#tmpfs)). Programs that write to
   `/tmp` by name get the host's `/tmp`.
+  Directories left by a killed host are swept the same way.
 - `build()` refuses `allow_network(...)` too: loopback can't be brought up in
   the sandbox's network namespace (`CAP_NET_ADMIN` is denied), and falling
   back to the host network would let programs skip the proxy.

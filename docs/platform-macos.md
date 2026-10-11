@@ -138,6 +138,15 @@ while the program runs, and the program is killed if it's over
 fail with `ENOSPC` here. A short burst can go over before the next check,
 but not fill the disk.
 
+If the host process is killed, its directory is left behind. Each directory
+holds an exclusive `flock` for the run, which the kernel drops when the
+process dies however it dies. Whichever process next creates a directory
+(at most every 5 minutes) removes the ones in `$TMPDIR` that are named
+`nanosandbox-tmp-*`, are real directories of its own uid, are over 2 minutes
+old, and whose lock it can take. A directory a live agent holds is never
+touched, so several agents on one machine don't affect each other. A process
+ID is never used for this: it can be reused, or belong to another namespace.
+
 A program that writes to `/tmp` by name gets the host's `/tmp`. By default
 that stays writable, because making it read-only breaks some programs (below).
 
