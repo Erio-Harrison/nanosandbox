@@ -46,7 +46,7 @@ is refused.
 | Option | Meaning | Default |
 |---|---|---|
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
-| `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable) | |
+| `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). They add access: a `--read-only` path inside the workspace or another writable path is refused on macOS, since it would stay writable | |
 | `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory | home hidden |
 | `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` works | network off |
 | `--host-network` | Unrestricted network. Use with care. | |

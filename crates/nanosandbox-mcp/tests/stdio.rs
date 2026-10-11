@@ -681,3 +681,20 @@ time.sleep(0.5)'"#;
         String::from_utf8_lossy(&left.stdout)
     );
 }
+
+/// `--read-only` adds access; inside the workspace it would change nothing,
+/// so the server says so instead of starting as if it had.
+#[cfg(target_os = "macos")]
+#[test]
+fn it_refuses_a_read_only_path_inside_the_workspace() {
+    let ws = workspace();
+    std::fs::create_dir(ws.path().join(".git")).unwrap();
+    let (code, err) = refused(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--read-only",
+        ws.path().join(".git").to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("would stay writable"), "{err}");
+}

@@ -128,6 +128,10 @@ root, the sandbox runs as `nobody`, so a `writable` path must be writable by
 uid 65534 (see [platform-linux.md](platform-linux.md#running-as-root)), or
 the host user `host_uid`/`host_gid` name.
 
+These add access; neither narrows the other. A `read_only` path inside a
+`writable` one (the workspace, say) would stay writable, so on macOS `build()`
+refuses it. Protecting something inside a writable directory isn't expressible.
+
 ```rust
 builder
     .read_only("/data/input")
