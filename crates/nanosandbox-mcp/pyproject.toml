@@ -1,0 +1,30 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nanosandbox-mcp"
+dynamic = ["version"]
+description = "MCP server (stdio) that runs commands in a nanosandbox sandbox"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Rust",
+    "Topic :: Security",
+]
+keywords = ["mcp", "sandbox", "agent", "security", "isolation"]
+
+[project.urls]
+Homepage = "https://github.com/Erio-Harrison/nanosandbox"
+Repository = "https://github.com/Erio-Harrison/nanosandbox"
+
+[tool.maturin]
+# Ship the compiled program itself, not a Python extension module: this is a
+# command (`uvx nanosandbox-mcp`), and has no Python API.
+bindings = "bin"
