@@ -60,4 +60,22 @@ jobs:
       - working-directory: crates/nanosandbox-node
         run: npm run build
       - working-directory: crates/nanosandbox-node
-        run: node --test tests/test_basic.js
+        run: node --test tests/*.js
+
+  mcp-server:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - working-directory: crates/nanosandbox-mcp
+        run: cargo fmt --check
+      - working-directory: crates/nanosandbox-mcp
+        run: cargo clippy --all-targets -- -D warnings
+      - working-directory: crates/nanosandbox-mcp
+        run: cargo test
