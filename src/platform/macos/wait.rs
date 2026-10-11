@@ -100,7 +100,8 @@ impl MacOSExecutor {
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
                     (libc::WEXITSTATUS(status), None)
                 } else if libc::WIFSIGNALED(status) {
-                    (-1, Some(libc::WTERMSIG(status)))
+                    // 128 + signal, the shell's convention and Linux's here.
+                    (128 + libc::WTERMSIG(status), Some(libc::WTERMSIG(status)))
                 } else {
                     (-1, None)
                 };

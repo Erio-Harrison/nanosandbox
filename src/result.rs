@@ -14,7 +14,8 @@ pub struct ExecutionResult {
     /// Standard error captured from the process
     pub stderr: String,
 
-    /// Exit code of the process (0 typically means success)
+    /// Exit code of the process (0 typically means success). When a signal
+    /// killed it, `128 + signal` on every platform, as a shell reports it.
     pub exit_code: i32,
 
     /// Wall-clock duration of execution

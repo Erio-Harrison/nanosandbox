@@ -111,6 +111,20 @@ fn test_home_is_the_private_temp_directory() {
     assert_eq!(lines[2], "writable");
 }
 
+/// A command killed by a signal reports 128 + signal, the same on every
+/// platform (macOS used to say -1).
+#[test]
+#[cfg(unix)]
+fn test_killed_by_a_signal_reports_128_plus_the_signal() {
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    for (script, expected) in [("kill -TERM $$", 143), ("kill -KILL $$", 137)] {
+        let result = sandbox.run("sh", &["-c", script]).unwrap();
+        assert_eq!(result.exit_code, expected, "{script}: {result:?}");
+        assert!(!result.success());
+        assert!(result.failure_reason().is_some());
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn test_a_home_the_caller_sets_wins() {

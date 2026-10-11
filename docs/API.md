@@ -348,7 +348,7 @@ pub struct ExecutionResult {
     pub killed_by_oom: bool,
     pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows
     pub killed_by_cpu_limit: bool,     // Linux: the whole cgroup's CPU time, not just one process
-    pub signal: Option<i32>,           // set when the host's own limit killed the run; a command killed by a signal on Linux reports 128+signal in exit_code instead
+    pub signal: Option<i32>,           // the signal that killed the process; see below
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
     pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
@@ -359,6 +359,14 @@ pub struct ExecutionResult {
 
 `success()` is true when the exit code is 0 and nothing killed the
 program. `failure_reason()` says why not, as text.
+
+When a signal kills the program, `exit_code` is `128 + signal` on every
+platform (143 for `SIGTERM`, 137 for `SIGKILL`), as a shell reports it. `signal`
+holds the number too where the platform can say: always on macOS, but on Linux
+only when the host did the killing (a limit such as `wall_time_limit`). A command
+killed inside the Linux sandbox runs as PID 2 under an init shim, which can't die
+by the signal on its behalf, so its `signal` is `None`. Go by `exit_code` and the
+`killed_by_*` flags rather than by `signal`.
 
 ```rust
 let result = sandbox.run("python3", &["script.py"])?;
