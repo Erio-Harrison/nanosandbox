@@ -53,6 +53,10 @@ pub(crate) struct SandboxConfig {
     pub(crate) tmpfs_mounts: Vec<(PathBuf, u64)>,
     /// [`SandboxBuilder::private_tmp`]'s size.
     pub(crate) private_tmp: Option<u64>,
+    /// macOS: whether the system temp directories are writable. See
+    /// [`SandboxBuilder::shared_tmp`].
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) shared_tmp: bool,
     pub(crate) working_dir: PathBuf,
     pub(crate) rootfs: Option<PathBuf>,
     /// [`SandboxBuilder::deny_read`].
@@ -97,6 +101,7 @@ impl Default for SandboxConfig {
             tmpfs_mounts: Vec::new(),
             // Windows has no file system isolation to make it private with.
             private_tmp: (!cfg!(windows)).then_some(DEFAULT_PRIVATE_TMP_SIZE),
+            shared_tmp: true,
             working_dir: PathBuf::from("/"),
             rootfs: None,
             deny_read: Vec::new(),
@@ -199,6 +204,30 @@ impl SandboxBuilder {
     /// No [`private_tmp`](Self::private_tmp).
     pub fn no_private_tmp(mut self) -> Self {
         self.config.private_tmp = None;
+        self
+    }
+
+    /// macOS only: whether the system's temp directories (`/tmp`,
+    /// `/private/tmp`, `/private/var/tmp`, `/private/var/folders`) stay
+    /// writable. On by default.
+    ///
+    /// macOS has no mount namespaces to give a run its own `/tmp`, so with
+    /// this on, a program that writes there by name writes to the host's:
+    /// the file stays after the run, other sandboxes see it, and the program
+    /// can modify the user's other temp files. `shared_tmp(false)` makes them
+    /// read-only; the program then has only [`private_tmp`](Self::private_tmp),
+    /// reached through `$TMPDIR`.
+    ///
+    /// Programs that honor `$TMPDIR` (Python, Node, `mktemp "$TMPDIR/x.XXXX"`)
+    /// are unaffected. These break: anything writing to `/tmp` by name;
+    /// `mktemp -t`, which uses the user's own temp directory instead of
+    /// `$TMPDIR`; and Apple's `xcrun` shims in `/usr/bin` (`clang`, `cc`, ...),
+    /// which reset `$TMPDIR` the same way. Run the real binaries by their path
+    /// under `xcode-select -p` instead. Needs a `private_tmp`, which is on
+    /// unless turned off.
+    #[cfg(target_os = "macos")]
+    pub fn shared_tmp(mut self, shared: bool) -> Self {
+        self.config.shared_tmp = shared;
         self
     }
 

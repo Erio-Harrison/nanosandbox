@@ -363,6 +363,18 @@ if result.success() {
 
 ## Configuration Types
 
+### macOS only: Temp Directories
+
+```rust
+pub fn shared_tmp(self, shared: bool) -> Self
+```
+
+`true` by default: `/tmp`, `/private/tmp`, `/private/var/tmp` and
+`/private/var/folders` are the host's own and writable. `false` makes them
+read-only, leaving only `private_tmp` (through `$TMPDIR`). It breaks programs
+that write `/tmp` by name, `mktemp -t`, and Apple's `/usr/bin/clang`/`cc`
+shims; see [platform-macos.md](platform-macos.md#shared_tmpfalse).
+
 ### Permission (Linux only)
 
 For `bind`.

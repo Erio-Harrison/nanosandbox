@@ -252,3 +252,119 @@ fn test_cannot_execute_arbitrary_path() {
         }
     }
 }
+
+/// By default the system temp directories are the host's own: a program that
+/// writes to /tmp by name leaves the file there.
+#[test]
+fn test_shared_tmp_is_the_hosts_by_default() {
+    let probe = format!("/tmp/nsb-shared-tmp-default-{}", std::process::id());
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let result = sandbox
+        .run("sh", &["-c", &format!("echo hi > {probe}")])
+        .unwrap();
+    let on_host = std::path::Path::new(&probe).exists();
+    let _ = std::fs::remove_file(&probe);
+    assert!(result.success(), "{}", result.stderr);
+    assert!(on_host, "the write should have reached the host's /tmp");
+}
+
+/// `shared_tmp(false)` takes the host's temp directories away: /tmp by name is
+/// read-only, and only the run's private directory (`$TMPDIR`) is writable.
+#[test]
+fn test_shared_tmp_false_denies_the_hosts_temp_directories() {
+    let probe = format!("/tmp/nsb-shared-tmp-strict-{}", std::process::id());
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .shared_tmp(false)
+        .build()
+        .unwrap();
+
+    let script = format!(
+        "echo hi > {probe}; echo \"tmp:$?\"; \
+         echo hi > /private/var/tmp/nsb-strict-vartmp-{pid}; echo \"vartmp:$?\"; \
+         echo hi > \"$TMPDIR/own.txt\"; echo \"private:$?\"; cat \"$TMPDIR/own.txt\"; \
+         f=$(mktemp \"$TMPDIR/x.XXXXXX\") && echo \"mktemp:ok\"",
+        pid = std::process::id()
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    let leaked = std::path::Path::new(&probe).exists();
+    let _ = std::fs::remove_file(&probe);
+
+    assert!(!leaked, "a file reached the host's /tmp");
+    let out = result.stdout;
+    assert!(
+        out.contains("tmp:1"),
+        "/tmp by name should be denied: {out}"
+    );
+    assert!(out.contains("vartmp:1"), "/var/tmp should be denied: {out}");
+    assert!(
+        out.contains("private:0"),
+        "$TMPDIR should be writable: {out}"
+    );
+    assert!(out.contains("hi\n"), "{out}");
+    assert!(out.contains("mktemp:ok"), "{out}");
+}
+
+/// Programs that honor $TMPDIR keep working without the host's temp directories.
+/// (Perl, not python3: /usr/bin/python3 is an xcrun shim, which resets TMPDIR
+/// -- the documented limit of `shared_tmp(false)`.)
+#[test]
+fn test_shared_tmp_false_still_runs_programs_that_use_tmpdir() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .shared_tmp(false)
+        .build()
+        .unwrap();
+    let script = "perl -MFile::Temp=tempfile -e 'my ($fh, $name) = tempfile(); print $name' \
+                  | grep -q \"^$TMPDIR/\" && echo in-private-tmp";
+    let result = sandbox.run("sh", &["-c", script]).unwrap();
+    assert_eq!(result.stdout.trim(), "in-private-tmp", "{}", result.stderr);
+}
+
+/// Apple's xcrun shims reset TMPDIR to the user's own temp directory, which
+/// `shared_tmp(false)` makes read-only: they fail. The real binaries by path
+/// don't. Documented in `shared_tmp`.
+#[test]
+fn test_shared_tmp_false_breaks_the_xcrun_shims_but_not_the_real_tools() {
+    let developer_dir = std::process::Command::new("xcode-select")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let Some(developer_dir) = developer_dir else {
+        eprintln!("skipping: no developer tools installed");
+        return;
+    };
+    let clang = format!("{developer_dir}/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang");
+    if !std::path::Path::new(&clang).exists() {
+        eprintln!("skipping: no clang at {clang}");
+        return;
+    }
+    let sdk = std::process::Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let work = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    std::fs::write(work.path().join("hello.c"), "int main(void){return 0;}\n").unwrap();
+    let sandbox = Sandbox::builder()
+        .writable(work.path())
+        .working_dir(work.path())
+        .shared_tmp(false)
+        .build()
+        .unwrap();
+
+    let shim = sandbox
+        .run("/usr/bin/clang", &["hello.c", "-o", "shim.out"])
+        .unwrap();
+    assert!(!shim.success(), "the xcrun shim was expected to fail");
+    assert!(shim.stderr.contains("temporary file"), "{}", shim.stderr);
+
+    let real = sandbox
+        .run(&clang, &["-isysroot", &sdk, "hello.c", "-o", "real.out"])
+        .unwrap();
+    assert!(real.success(), "{}", real.stderr);
+    assert!(work.path().join("real.out").exists());
+}

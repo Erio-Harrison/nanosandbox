@@ -74,7 +74,15 @@ impl MacOSExecutor {
         // way, that used to open it (all of "/", in the default case) for
         // writing. A ReadWrite mount is how to make it writable.
         let mut roots: Vec<PathBuf> = Vec::new();
-        let candidates = DEFAULT_WRITABLE
+        // Without the shared temp directories, only the run's own private one
+        // (below) is left to write to: roots stay unlisted, so default-deny
+        // covers them.
+        let defaults: &[&str] = if config.shared_tmp {
+            &DEFAULT_WRITABLE
+        } else {
+            &[]
+        };
+        let candidates = defaults
             .iter()
             .map(PathBuf::from)
             .chain(
@@ -203,6 +211,40 @@ mod tests {
         let p = profile(&config, None);
         assert!(p.params.iter().any(|(_, v)| v.ends_with("test_mount")));
         assert!(!p.policy.contains("test_mount"));
+    }
+
+    #[test]
+    fn test_shared_tmp_false_leaves_only_the_private_directory_writable() {
+        let private = std::env::temp_dir().join("nanosandbox-tmp-test");
+        let mut config = SandboxConfig::default();
+        config.mounts.push(Mount {
+            source: private.clone(),
+            target: private.clone(),
+            permission: Permission::ReadWrite,
+        });
+
+        let shared = MacOSExecutor::new().generate_profile(&config, None, Some(&private), None);
+        assert!(writable(&shared).iter().any(|w| w == "/private/tmp"));
+        assert!(
+            writable(&shared)
+                .iter()
+                .any(|w| w == "/private/var/folders")
+        );
+
+        config.shared_tmp = false;
+        let strict = MacOSExecutor::new().generate_profile(&config, None, Some(&private), None);
+        let roots = writable(&strict);
+        for shared_dir in ["/private/tmp", "/private/var/tmp", "/private/var/folders"] {
+            assert!(
+                !roots.iter().any(|w| w == shared_dir),
+                "{shared_dir}: {roots:?}"
+            );
+        }
+        // What was asked for explicitly is still there.
+        assert!(
+            roots.iter().any(|w| w.ends_with("nanosandbox-tmp-test")),
+            "{roots:?}"
+        );
     }
 
     /// The writable roots, canonicalized, as the profile's parameters hold them.

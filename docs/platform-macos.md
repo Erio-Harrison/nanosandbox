@@ -138,8 +138,8 @@ while the program runs, and the program is killed if it's over
 fail with `ENOSPC` here. A short burst can go over before the next check,
 but not fill the disk.
 
-A program that writes to `/tmp` by name gets the host's `/tmp`. Making that
-read-only instead would break it.
+A program that writes to `/tmp` by name gets the host's `/tmp`. By default
+that stays writable, because making it read-only breaks some programs (below).
 
 Apple's developer tools launched through `xcrun` (`/usr/bin/python3`,
 `/usr/bin/clang`, `cc`, `make`, `git` and the rest of the `/usr/bin` shims)
@@ -149,6 +149,35 @@ tools outside the sandbox, or run by their real path under
 `/Library/Developer/CommandLineTools/usr/bin`, keep it; so do Homebrew's and
 other non-`xcrun` programs. That directory is writable by default, as it
 was before.
+
+#### `shared_tmp(false)`
+
+With the default, `/tmp`, `/private/tmp`, `/private/var/tmp` and
+`/private/var/folders` are the host's own: a program writing there leaves
+the file after the run, other sandboxes see it, and it can modify the user's
+other temp files. `shared_tmp(false)` (`--strict-tmp` in `nanosandbox-mcp`)
+makes them read-only, leaving only the run's private directory writable. It
+needs `private_tmp`, which is on unless turned off.
+
+Tried on 15 common cases, three break:
+
+- A program that writes to `/tmp` by name (`Operation not permitted`).
+- `mktemp -t`, which uses the user's own temp directory, not `$TMPDIR`.
+  `mktemp "$TMPDIR/x.XXXXXX"` works.
+- The `xcrun` shims that need a scratch file, `/usr/bin/clang` and `cc`
+  (`unable to make temporary file`). Compile with the real binary instead:
+  `$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -isysroot $(xcrun --show-sdk-path) ...`.
+
+Working: Python and Node by their real paths or from Homebrew, `git`
+(`/usr/bin` and Homebrew), `make`, shell here-documents, `$TMPDIR` by hand.
+One that works differently: `/usr/bin/python3` is a shim, so `tempfile`
+finds nothing writable in `TMPDIR`, `/tmp` or `/var/tmp` and falls back to
+the working directory, so its temp files land in the workspace.
+
+That list is the 15 cases tried, not a guarantee: `swiftc`, `ld`,
+`xcodebuild` and anything that needs the network weren't. Linux has no
+equivalent option, since there `/tmp`, `/var/tmp` and `/dev/shm` already get
+a private tmpfs per run where the kernel allows mounting.
 
 ### Process Cleanup
 
