@@ -308,6 +308,52 @@ fn it_refuses_a_limit_this_platform_cannot_enforce() {
     assert!(stderr.contains("max_pids"), "{stderr}");
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn strict_tmp_leaves_only_the_private_temp_directory_writable() {
+    let ws = workspace();
+    let probe = format!("/tmp/nsb-mcp-strict-{}", std::process::id());
+
+    let mut c = Client::in_workspace(ws.path(), &["--strict-tmp"]);
+    let r = c.request(1, "tools/list", json!({}));
+    let description = r["result"]["tools"][0]["description"].as_str().unwrap();
+    assert!(description.contains("/tmp is read-only"), "{description}");
+
+    let script =
+        format!("echo hi > {probe}; echo \"tmp:$?\"; echo hi > \"$TMPDIR/p\"; echo \"private:$?\"");
+    let out = c.run(2, "sh", &["-c", &script]);
+    let leaked = std::path::Path::new(&probe).exists();
+    let _ = std::fs::remove_file(&probe);
+    assert!(!leaked, "a command wrote the host's /tmp");
+    let stdout = out["stdout"].as_str().unwrap();
+    assert!(
+        stdout.contains("tmp:1") && stdout.contains("private:0"),
+        "{stdout}"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn without_strict_tmp_the_host_tmp_is_writable() {
+    let ws = workspace();
+    let probe = format!("/tmp/nsb-mcp-default-{}", std::process::id());
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let out = c.run(1, "sh", &["-c", &format!("echo hi > {probe}")]);
+    let there = std::path::Path::new(&probe).exists();
+    let _ = std::fs::remove_file(&probe);
+    assert_eq!(out["exit_code"], 0, "{out}");
+    assert!(there);
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn it_refuses_strict_tmp_off_macos() {
+    let ws = workspace();
+    let (code, stderr) = refused(&["--workspace", ws.path().to_str().unwrap(), "--strict-tmp"]);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("macOS only"), "{stderr}");
+}
+
 #[test]
 fn help_and_version() {
     let out = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))

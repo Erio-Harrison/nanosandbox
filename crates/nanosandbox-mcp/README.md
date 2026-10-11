@@ -54,6 +54,7 @@ is refused.
 | `--cpu <N>`, `--max-pids <N>` | Linux only | pids: 128 on Linux |
 | `--max-output <SIZE>`, `--max-concurrent <N>` | Output cap; commands running at once | CPU count |
 | `--env <KEY=VALUE>` | Environment variable for commands (repeatable) | clean environment |
+| `--strict-tmp` | macOS only: make `/tmp` and the other system temp directories read-only; commands get a private `$TMPDIR`. Breaks `/tmp` by name, `mktemp -t` and `/usr/bin/clang`/`cc`; see [platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse) | off |
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
 
@@ -98,6 +99,7 @@ before relying on it, including the platform differences: macOS is structurally 
 Running as root on Linux, commands run as `nobody` unless `--host-uid`/`--host-gid` say otherwise,
 and the workspace must be writable by that user; the server says so at startup if it isn't.
 On macOS, `/tmp` and the other temp directories are the host's own: commands can write there and
-what they write stays; writes anywhere else outside the workspace are denied.
+what they write stays, unless you start the server with `--strict-tmp`; writes anywhere else
+outside the workspace are denied.
 On Ubuntu 23.10+ under AppArmor's `unprivileged_userns` restriction, `--allow-network` is refused
 at startup, and `/var/tmp` and `/dev/shm` are the host's shared paths.

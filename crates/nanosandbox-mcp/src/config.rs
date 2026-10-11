@@ -39,6 +39,12 @@ LIMITS
 ENVIRONMENT
     --env <KEY=VALUE>       Environment variable for commands (repeatable)
 
+MACOS ONLY
+    --strict-tmp            Make /tmp and the other system temp directories
+                            read-only; commands get only a private $TMPDIR.
+                            Breaks programs that write /tmp by name, `mktemp -t`
+                            and Apple's /usr/bin clang/cc shims
+
 LINUX ONLY
     --no-seccomp            Turn the syscall filter off
     --host-uid <UID>        When run as root, run commands as this host user
@@ -66,6 +72,7 @@ pub struct Config {
     pub max_output: Option<u64>,
     pub max_concurrent: usize,
     pub env: Vec<(String, String)>,
+    pub strict_tmp: bool,
     pub no_seccomp: bool,
     pub host_uid: Option<u32>,
     pub host_gid: Option<u32>,
@@ -134,6 +141,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
                     .ok_or_else(|| format!("--env needs KEY=VALUE, got `{kv}`"))?;
                 cfg.env.push((k.to_owned(), v.to_owned()));
             }
+            "--strict-tmp" => cfg.strict_tmp = true,
             "--no-seccomp" => cfg.no_seccomp = true,
             "--host-uid" => cfg.host_uid = Some(parse_num(&value("a uid")?, "--host-uid")?),
             "--host-gid" => cfg.host_gid = Some(parse_num(&value("a gid")?, "--host-gid")?),
@@ -235,6 +243,7 @@ impl Config {
             b = b.env(k, v);
         }
         b = self.linux_only(b)?;
+        b = self.macos_only(b)?;
         b.build().map_err(|e| e.to_string())
     }
 
@@ -266,6 +275,27 @@ impl Config {
         Ok(b)
     }
 
+    #[cfg(target_os = "macos")]
+    fn macos_only(&self, b: SandboxBuilder) -> Result<SandboxBuilder, String> {
+        Ok(if self.strict_tmp {
+            b.shared_tmp(false)
+        } else {
+            b
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn macos_only(&self, b: SandboxBuilder) -> Result<SandboxBuilder, String> {
+        if self.strict_tmp {
+            return Err(
+                "--strict-tmp is macOS only: elsewhere /tmp is already private to each \
+                        run where the kernel allows it (see docs/THREAT_MODEL.md)"
+                    .into(),
+            );
+        }
+        Ok(b)
+    }
+
     /// One line for the tool description: what the operator allowed.
     pub fn summary(&self) -> String {
         let network = if self.host_network {
@@ -275,9 +305,14 @@ impl Config {
         } else {
             format!("only {}", self.allow_network.join(", "))
         };
+        let temp = if self.strict_tmp {
+            " /tmp is read-only; use $TMPDIR for scratch files."
+        } else {
+            ""
+        };
         format!(
             "Workspace (working directory, writable): {}. Network: {network}. Time limit: {}s \
-             per call. Memory limit: {} MB.",
+             per call. Memory limit: {} MB.{temp}",
             self.workspace.display(),
             self.timeout,
             self.memory >> 20
@@ -368,6 +403,19 @@ mod tests {
         assert_eq!(c.env, [("K".to_string(), "V=W".to_string())]);
         assert_eq!(c.timeout, 2.5);
         assert_eq!(c.memory, 1 << 30);
+    }
+
+    #[test]
+    fn strict_tmp_is_off_unless_asked_for() {
+        assert!(!cfg(&["--workspace", "/w"]).strict_tmp);
+        let c = cfg(&["--workspace", "/w", "--strict-tmp"]);
+        assert!(c.strict_tmp);
+        assert!(c.summary().contains("/tmp is read-only"));
+        assert!(
+            !cfg(&["--workspace", "/w"])
+                .summary()
+                .contains("/tmp is read-only")
+        );
     }
 
     #[test]
