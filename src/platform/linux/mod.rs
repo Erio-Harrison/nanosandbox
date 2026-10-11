@@ -37,7 +37,7 @@ pub use namespace::UserNamespace;
 use prepare::{ExecBuffers, Pipes, prepare_cgroup, prepare_env, prepare_rlimits};
 use proxy_link::{ProxyLink, check_network};
 use seccomp::SyscallFilter;
-use wait::{Waited, wait_with_timeout};
+use wait::{ChildReads, Waited, wait_with_timeout};
 
 /// RawFd version of close
 fn close_raw(fd: RawFd) -> nix::Result<()> {
@@ -181,6 +181,8 @@ impl PlatformExecutor for LinuxExecutor {
         let stderr_write = pipes.stderr_write_fd.as_raw_fd();
         let ready_read = pipes.ready_read_fd.as_raw_fd();
         let ready_write = pipes.ready_write_fd.as_raw_fd();
+        let signal_read = pipes.signal_read_fd.as_raw_fd();
+        let signal_write = pipes.signal_write_fd.as_raw_fd();
         let stdin_read = pipes.stdin_read_fd.as_ref().map(AsRawFd::as_raw_fd);
         let stdin_write = pipes.stdin_write_fd.as_ref().map(AsRawFd::as_raw_fd);
 
@@ -309,6 +311,8 @@ impl PlatformExecutor for LinuxExecutor {
             exec_paths: exec_buffers.exec_paths,
             ready_write,
             ready_read,
+            signal_read,
+            signal_write,
             become_nobody,
             stdin_read,
             stdin_write,
@@ -358,6 +362,7 @@ impl PlatformExecutor for LinuxExecutor {
         // needing it repeated (and, before, missed) at each fallible step.
         // The child's ends are the child's now.
         drop(pipes.ready_read_fd);
+        drop(pipes.signal_write_fd);
         drop(pipes.stdout_write_fd);
         drop(pipes.stderr_write_fd);
         drop(pipes.stdin_read_fd);
@@ -427,7 +432,11 @@ impl PlatformExecutor for LinuxExecutor {
             output_truncated,
         } = wait_with_timeout(
             child_pid,
-            [pipes.stdout_read_fd, pipes.stderr_read_fd],
+            ChildReads {
+                stdout: pipes.stdout_read_fd,
+                stderr: pipes.stderr_read_fd,
+                signal: pipes.signal_read_fd,
+            },
             stdin_pipe,
             timeout,
             private_tmp.as_mut(),

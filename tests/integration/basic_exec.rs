@@ -111,18 +111,32 @@ fn test_home_is_the_private_temp_directory() {
     assert_eq!(lines[2], "writable");
 }
 
-/// A command killed by a signal reports 128 + signal, the same on every
-/// platform (macOS used to say -1).
+/// A command killed by a signal reports 128 + signal as its exit code and
+/// the signal itself, the same on every platform (macOS used to say -1, and
+/// Linux, with its init shim, left `signal` out). A program that only exits
+/// with that number isn't mistaken for one.
 #[test]
 #[cfg(unix)]
 fn test_killed_by_a_signal_reports_128_plus_the_signal() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
-    for (script, expected) in [("kill -TERM $$", 143), ("kill -KILL $$", 137)] {
+    for (script, code, signal) in [("kill -TERM $$", 143, 15), ("kill -KILL $$", 137, 9)] {
         let result = sandbox.run("sh", &["-c", script]).unwrap();
-        assert_eq!(result.exit_code, expected, "{script}: {result:?}");
+        assert_eq!(result.exit_code, code, "{script}: {result:?}");
+        assert_eq!(result.signal, Some(signal), "{script}: {result:?}");
         assert!(!result.success());
-        assert!(result.failure_reason().is_some());
+        assert_eq!(
+            result.failure_reason().as_deref(),
+            Some(format!("Killed by signal {signal}").as_str())
+        );
     }
+
+    let result = sandbox.run("sh", &["-c", "exit 143"]).unwrap();
+    assert_eq!(result.exit_code, 143);
+    assert_eq!(
+        result.signal, None,
+        "an exit status isn't a signal: {result:?}"
+    );
+    assert_eq!(result.failure_reason().as_deref(), Some("Exit code 143"));
 }
 
 #[test]

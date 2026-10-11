@@ -29,6 +29,11 @@ pub(super) struct Pipes {
     pub(super) stderr_write_fd: OwnedFd,
     pub(super) ready_read_fd: OwnedFd,
     pub(super) ready_write_fd: OwnedFd,
+    /// The init shim writes one byte here, the number of the signal that
+    /// killed the command, so the host can report it as `signal`: the shim
+    /// itself can only exit with a status, not die by that signal.
+    pub(super) signal_read_fd: OwnedFd,
+    pub(super) signal_write_fd: OwnedFd,
     pub(super) stdin_read_fd: Option<OwnedFd>,
     pub(super) stdin_write_fd: Option<OwnedFd>,
 }
@@ -52,6 +57,7 @@ impl Pipes {
         let (stdout_read_fd, stdout_write_fd) = pipe("stdout")?;
         let (stderr_read_fd, stderr_write_fd) = pipe("stderr")?;
         let (ready_read_fd, ready_write_fd) = pipe("sync")?;
+        let (signal_read_fd, signal_write_fd) = pipe("signal")?;
         let (stdin_read_fd, stdin_write_fd) = match stdin {
             Some(_) => {
                 let (r, w) = pipe("stdin")?;
@@ -86,6 +92,8 @@ impl Pipes {
             stderr_write_fd,
             ready_read_fd,
             ready_write_fd,
+            signal_read_fd,
+            signal_write_fd,
             stdin_read_fd,
             stdin_write_fd,
         })

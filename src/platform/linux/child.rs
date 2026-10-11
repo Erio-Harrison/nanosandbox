@@ -58,6 +58,8 @@ pub(super) struct ChildSetup {
 
     pub(super) ready_write: RawFd,
     pub(super) ready_read: RawFd,
+    pub(super) signal_read: RawFd,
+    pub(super) signal_write: RawFd,
     pub(super) become_nobody: Option<(u32, u32)>,
     pub(super) stdin_read: Option<RawFd>,
     pub(super) stdin_write: Option<RawFd>,
@@ -155,6 +157,7 @@ impl ChildSetup {
         let _ = close_raw(self.stderr_write);
         let _ = close_raw(self.stdout_read);
         let _ = close_raw(self.stderr_read);
+        let _ = close_raw(self.signal_read);
 
         // Setup hostname (UTS namespace). Error messages below are
         // fixed strings via raw write(), not eprintln!/format! -- see
@@ -313,8 +316,14 @@ impl ChildSetup {
             // real under concurrent runs: `cat`'s stdin pipe never
             // closed, because a sibling run's leaked write end kept it
             // open from outside the sandbox's own process tree entirely.
+            // The one fd it does need is the pipe it reports a signal death
+            // on; the command's own copy is close-on-exec.
+            let keep = self.signal_write as u32;
             unsafe {
-                libc::syscall(libc::SYS_close_range, 0u32, u32::MAX, 0i32);
+                if keep > 0 {
+                    libc::syscall(libc::SYS_close_range, 0u32, keep - 1, 0i32);
+                }
+                libc::syscall(libc::SYS_close_range, keep + 1, u32::MAX, 0i32);
             }
             CHILD_PID.store(forked as i32, Ordering::Relaxed);
             loop {
@@ -334,8 +343,16 @@ impl ChildSetup {
                         // for the same reason this fork exists -- the
                         // kernel would just drop it again. Same fallback
                         // `tini` uses: exit with 128+signal rather than
-                        // die by it, so the caller still learns which one.
-                        (128 + libc::WTERMSIG(status)) as isize
+                        // die by it. But 128+signal is also what a
+                        // program that merely `exit(143)`s looks like, so
+                        // the signal itself goes over the pipe too, for
+                        // the host to report as `signal`.
+                        let sig = libc::WTERMSIG(status);
+                        let byte = sig as u8;
+                        unsafe {
+                            libc::write(self.signal_write, &byte as *const u8 as *const _, 1);
+                        }
+                        (128 + sig) as isize
                     } else {
                         1
                     };

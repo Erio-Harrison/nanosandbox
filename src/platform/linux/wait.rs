@@ -27,6 +27,24 @@ pub(super) struct Waited {
     pub(super) output_truncated: bool,
 }
 
+/// The read ends of the pipes a run reports back on.
+pub(super) struct ChildReads {
+    pub(super) stdout: OwnedFd,
+    pub(super) stderr: OwnedFd,
+    /// See `reported_signal`.
+    pub(super) signal: OwnedFd,
+}
+
+/// The signal the init shim reported on `fd`, if it did: one byte, written
+/// just before it exited, so already there once the process is gone.
+fn reported_signal(fd: RawFd) -> Option<i32> {
+    let mut byte = [0u8; 1];
+    match read_raw(fd, &mut byte) {
+        Ok(1) if (1..=64).contains(&byte[0]) => Some(i32::from(byte[0])),
+        _ => None,
+    }
+}
+
 /// Reads what's available on `fd` into `out`, until it would block. False
 /// once the writers are all gone (EOF) or it fails.
 fn drain(fd: RawFd, out: &mut Captured) -> bool {
@@ -52,7 +70,7 @@ fn drain(fd: RawFd, out: &mut Captured) -> bool {
 /// a program printing 10 MB took 25 s, and ran out a 10 s time limit.
 pub(super) fn wait_with_timeout(
     pid: nix::unistd::Pid,
-    outputs: [OwnedFd; 2],
+    reads: ChildReads,
     mut stdin: Option<(OwnedFd, &[u8])>,
     timeout: Duration,
     mut private_tmp: Option<&mut PrivateTmp>,
@@ -60,6 +78,12 @@ pub(super) fn wait_with_timeout(
     cpu_limit: Option<(&CgroupManager, u64)>,
 ) -> Result<Waited> {
     let start = Instant::now();
+    let ChildReads {
+        stdout,
+        stderr,
+        signal: signal_pipe,
+    } = reads;
+    let outputs = [stdout, stderr];
     let mut captured = [Captured::new(max_output), Captured::new(max_output)];
     let mut open = [true, true];
     let mut killed_by_timeout = false;
@@ -83,6 +107,7 @@ pub(super) fn wait_with_timeout(
     };
     let fds = [outputs[0].as_raw_fd(), outputs[1].as_raw_fd()];
     fds.iter().for_each(|&fd| set_nonblocking(fd));
+    set_nonblocking(signal_pipe.as_raw_fd());
     if let Some((fd, _)) = &stdin {
         set_nonblocking(fd.as_raw_fd());
     }
@@ -166,7 +191,11 @@ pub(super) fn wait_with_timeout(
                 }
             }
             let (code, signal) = if exited {
-                (libc::WEXITSTATUS(status), None)
+                // Died to a signal inside the sandbox? The shim says so.
+                (
+                    libc::WEXITSTATUS(status),
+                    reported_signal(signal_pipe.as_raw_fd()),
+                )
             } else {
                 let sig = libc::WTERMSIG(status);
                 (128 + sig, Some(sig))

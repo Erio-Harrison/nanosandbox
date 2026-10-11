@@ -334,8 +334,9 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
   namespace, itself included, so a command run directly as PID 1 couldn't be
   signaled from inside the sandbox -- `kill -KILL $$` did nothing. The shim
   relays signals to the command and reaps orphans, like `tini`. When the
-  command is killed by a signal the shim exits with `128 + signal`, so
-  `ExecutionResult.signal` is `None` and `exit_code` carries it. Limits the
+  command is killed by a signal the shim exits with `128 + signal` and also
+  writes the signal's number to a pipe the host reads once the process is gone,
+  so `ExecutionResult.signal` is set just as if the command had died by it. Limits the
   host enforces kill from outside the namespace, and are unaffected.) Before, a sandbox outlived a crashed or killed
   host process, with nothing left to enforce its time limit. (macOS has no
   such mechanism; it uses a watchdog process instead -- see

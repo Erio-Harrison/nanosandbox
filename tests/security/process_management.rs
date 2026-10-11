@@ -183,10 +183,11 @@ fn test_sandboxed_command_is_pid_2_under_the_init_shim() {
 /// kept running afterward. Demoted to PID 2 under the shim, it gets the
 /// same signal semantics as any other process -- it's actually killed.
 ///
-/// `signal` itself still comes back `None`, not `Some(sig)`: the shim
-/// (still PID 1) can't reproduce a true signal-death on itself for the
-/// same reason it exists, so it reports 128+signal as a normal exit
-/// code instead, the same convention `tini`/`dumb-init` use.
+/// The shim (still PID 1) can't die by the signal on the command's behalf,
+/// for the same reason it exists, so it exits with 128+signal, the
+/// convention `tini` uses, and tells the host the signal itself over a
+/// pipe: `signal` is `Some` just as if the command had been killed
+/// directly.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_self_sigterm_now_works_like_anywhere_else() {
@@ -199,7 +200,7 @@ fn test_self_sigterm_now_works_like_anywhere_else() {
         .run("sh", &["-c", "kill -TERM $$; sleep 0.2; echo SURVIVED"])
         .unwrap();
     assert_eq!(result.exit_code, 128 + 15, "{result:?}"); // SIGTERM
-    assert_eq!(result.signal, None, "{result:?}");
+    assert_eq!(result.signal, Some(15), "{result:?}");
     assert!(!result.stdout.contains("SURVIVED"), "{result:?}");
 }
 
@@ -215,8 +216,24 @@ fn test_self_sigkill_now_works_like_anywhere_else() {
         .run("sh", &["-c", "kill -KILL $$; sleep 0.2; echo SURVIVED"])
         .unwrap();
     assert_eq!(result.exit_code, 128 + 9, "{result:?}"); // SIGKILL
-    assert_eq!(result.signal, None, "{result:?}");
+    assert_eq!(result.signal, Some(9), "{result:?}");
     assert!(!result.stdout.contains("SURVIVED"), "{result:?}");
+}
+
+/// Test: a program that merely *exits* with a signal-looking status isn't
+/// reported as killed by one. 143 from `exit` and 143 from SIGTERM look the
+/// same in the exit code; only `signal` tells them apart.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_exit_143_is_not_a_signal() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let result = sandbox.run("sh", &["-c", "exit 143"]).unwrap();
+    assert_eq!(result.exit_code, 143, "{result:?}");
+    assert_eq!(result.signal, None, "{result:?}");
 }
 
 /// Test: a normal (non-signal) exit code still comes through the shim

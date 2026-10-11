@@ -285,9 +285,8 @@ fn test_linux_cpu_time_limit_counts_the_whole_cgroup() {
 ///
 /// The kernel sends the SIGKILL straight to the command (PID 2, under the
 /// init shim -- see child.rs), not to anything wait.rs controls, so the
-/// shim is the one reporting it onward: 128+signal as a normal exit code,
-/// same as `sh -c "kill -9 $$"` would from inside the sandbox now. Not
-/// `Some(9)`: the shim can't reproduce a true signal-death on itself.
+/// shim is the one reporting it onward: exit code 128+9, and the signal
+/// itself over its pipe.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_cpu_time_limit_single_process_unaffected() {
@@ -305,7 +304,7 @@ fn test_linux_cpu_time_limit_single_process_unaffected() {
         )
         .unwrap();
     assert_eq!(result.exit_code, 128 + 9, "{result:?}"); // SIGKILL
-    assert_eq!(result.signal, None, "{result:?}");
+    assert_eq!(result.signal, Some(9), "{result:?}");
     assert!(!result.killed_by_cpu_limit, "{result:?}");
 }
 

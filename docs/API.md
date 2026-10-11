@@ -361,12 +361,10 @@ pub struct ExecutionResult {
 program. `failure_reason()` says why not, as text.
 
 When a signal kills the program, `exit_code` is `128 + signal` on every
-platform (143 for `SIGTERM`, 137 for `SIGKILL`), as a shell reports it. `signal`
-holds the number too where the platform can say: always on macOS, but on Linux
-only when the host did the killing (a limit such as `wall_time_limit`). A command
-killed inside the Linux sandbox runs as PID 2 under an init shim, which can't die
-by the signal on its behalf, so its `signal` is `None`. Go by `exit_code` and the
-`killed_by_*` flags rather than by `signal`.
+platform (143 for `SIGTERM`, 137 for `SIGKILL`), as a shell reports it, and
+`signal` holds the number itself. That's how to tell a program killed by
+`SIGTERM` from one that merely exited with 143: `signal` is `None` for the
+latter.
 
 ```rust
 let result = sandbox.run("python3", &["script.py"])?;

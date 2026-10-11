@@ -90,9 +90,10 @@ special treatment doesn't apply -- they were never affected.
 
 One visible consequence: the shim can't die *by* a signal on behalf of the
 command (the kernel would drop it), so when the command is killed by a
-signal, `ExecutionResult.exit_code` is `128 + signal` and
-`ExecutionResult.signal` is `None`. A kill by the host's own limits still
-reports `signal`.
+signal it exits with `128 + signal` and sends the signal's number to the host
+over a pipe. `ExecutionResult.exit_code` and `ExecutionResult.signal` then
+read the same as on macOS, and a program that merely exits with 143 isn't
+mistaken for one killed by `SIGTERM`.
 
 ### ptrace is allowed, deliberately
 
