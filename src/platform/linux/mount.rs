@@ -432,14 +432,19 @@ fn check_writable_by_sandbox(config: &SandboxConfig) -> Result<()> {
     let (uid, gid) = super::namespace::UserNamespace::new(None, None)
         .with_host_ids(config.host_uid, config.host_gid)
         .host_ids();
+    let chosen = config.host_uid.is_some() || config.host_gid.is_some();
     for m in &config.mounts {
         if m.permission == Permission::ReadWrite && !can_write(&m.source, uid, gid).unwrap_or(true)
         {
+            let who = if chosen {
+                format!("uid {uid}/gid {gid} (host_uid/host_gid)")
+            } else {
+                format!("uid {uid}/gid {gid} (nobody; host_uid/host_gid choose another user)")
+            };
             return Err(SandboxError::Config {
                 context: format!(
-                    "writable {}: the sandbox runs as uid {uid}/gid {gid} (nobody unless \
-                     host_uid/host_gid say otherwise), which can't write here. chmod it to \
-                     allow group or other write, change its owner, or set host_uid/host_gid \
+                    "writable {}: the sandbox runs as {who}, which can't write here. chmod it \
+                     to allow group or other write, change its owner, or set host_uid/host_gid \
                      to its owner",
                     m.source.display(),
                 ),

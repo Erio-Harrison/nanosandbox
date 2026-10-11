@@ -122,9 +122,10 @@ pub(super) fn prepare_cgroup(config: &SandboxConfig) -> Result<Option<CgroupMana
 
 /// The sandboxed program's environment. `clear_env(false)` (the default)
 /// starts from this process's own environment, with `config.env` on top;
-/// `clear_env(true)` starts empty. `TMPDIR` points at `private_tmp_path`
-/// if private_tmp is on, proxy env vars are added when `proxy_active`, and
-/// `PATH` gets a default if the caller didn't set one.
+/// `clear_env(true)` starts empty. `TMPDIR` and, if nothing else gave it
+/// one, `HOME` point at `private_tmp_path` if private_tmp is on, proxy env
+/// vars are added when `proxy_active`, and `PATH` gets a default if the
+/// caller didn't set one.
 pub(super) fn prepare_env(
     config: &SandboxConfig,
     proxy_active: bool,
@@ -138,13 +139,25 @@ pub(super) fn prepare_env(
     env.extend(config.env.clone());
 
     if config.private_tmp.is_some() {
-        let dir = private_tmp_path.unwrap_or(Path::new("/tmp"));
+        let dir = private_tmp_path
+            .unwrap_or(Path::new("/tmp"))
+            .to_string_lossy()
+            .into_owned();
         env.entry("TMPDIR".to_string())
-            .or_insert_with(|| dir.to_string_lossy().into_owned());
+            .or_insert_with(|| dir.clone());
+        // Without a HOME, npm, pip, git and the like look the user up in the
+        // password database: on macOS that finds the real home, which the
+        // sandbox can't write (npm fails with EPERM); on Linux the sandbox's
+        // uid has no entry at all (Node throws ENOENT). The private
+        // directory is somewhere they can keep caches for the run.
+        env.entry("HOME".to_string()).or_insert(dir);
     }
 
     if proxy_active {
-        env.extend(ProxiedNetwork::env_vars(SANDBOX_PROXY_PORT));
+        env.extend(ProxiedNetwork::env_vars_for(
+            SANDBOX_PROXY_PORT,
+            config.allow_private_destinations,
+        ));
     }
     if !env.contains_key("PATH") {
         env.insert(

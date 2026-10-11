@@ -323,10 +323,22 @@ impl PlatformExecutor for MacOSExecutor {
         {
             command.env("TMPDIR", tmp.path());
         }
+        // A HOME, in the private directory, unless there's one already (the
+        // caller's, or this process's with clear_env(false)): npm and pip look
+        // the user up otherwise and find a real home the sandbox can't write.
+        if let Some(tmp) = &private_tmp
+            && config.clear_env
+            && !config.env.contains_key("HOME")
+        {
+            command.env("HOME", tmp.path());
+        }
 
         // Set proxy environment variables if proxied network
         if let Some(port) = proxy_port {
-            command.envs(ProxiedNetwork::env_vars(port));
+            command.envs(ProxiedNetwork::env_vars_for(
+                port,
+                config.allow_private_destinations,
+            ));
         }
 
         // Setup stdin/stdout/stderr

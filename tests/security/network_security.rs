@@ -48,7 +48,8 @@ fn test_ip_bypass_blocked() {
     let script = format!(
         "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
          echo direct=$(curl -s -o /dev/null -w '%{{http_code}}' --noproxy '*' --connect-timeout 3 http://127.0.0.1:{port}/)
-         echo proxied=$(curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 http://127.0.0.1:{port}/)"
+         echo env=$(curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 http://127.0.0.1:{port}/)
+         echo proxied=$(curl -s -o /dev/null -w '%{{http_code}}' -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 http://127.0.0.1:{port}/)"
     );
     let result = sandbox.run("sh", &["-c", &script]).unwrap();
     let out = result.stdout.trim();
@@ -61,6 +62,13 @@ fn test_ip_bypass_blocked() {
         out.contains("direct=000"),
         "SECURITY: bypassing the proxy reached a host service: {out}"
     );
+    // Loopback is on NO_PROXY, so a program that just follows its environment
+    // goes direct, and finds nothing of the host's there.
+    assert!(
+        out.contains("env=000"),
+        "SECURITY: following the environment reached a host service: {out}"
+    );
+    // Sent through the proxy on purpose, it's refused.
     assert!(
         out.contains("proxied=403"),
         "proxy didn't refuse a non-whitelisted address: {out}"
@@ -370,8 +378,8 @@ fn test_private_destinations_refused_by_default() {
 
     let script = format!(
         "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
-         echo http=$(curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 3 http://localhost:{port}/)
-         echo connect=$(curl -s -o /dev/null -w '%{{http_connect}}' --connect-timeout 3 -p http://localhost:{port}/)"
+         echo http=$(curl -s -o /dev/null -w '%{{http_code}}' -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 http://localhost:{port}/)
+         echo connect=$(curl -s -o /dev/null -w '%{{http_connect}}' -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 -p http://localhost:{port}/)"
     );
     let run = |builder: nanosandbox::SandboxBuilder| {
         let sandbox = builder

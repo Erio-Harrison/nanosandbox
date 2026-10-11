@@ -179,6 +179,18 @@ That list is the 15 cases tried, not a guarantee: `swiftc`, `ld`,
 equivalent option, since there `/tmp`, `/var/tmp` and `/dev/shm` already get
 a private tmpfs per run where the kernel allows mounting.
 
+### Local servers
+
+A sandboxed program can neither bind a loopback port nor connect to one
+(`Operation not permitted`), the host's included. That's deliberate: the host
+shares its loopback with the sandbox, so allowing it would let the program
+reach the user's databases, dev servers and anything else listening on
+`127.0.0.1`. The proxy's own port is the only exception. The cost is that a
+program can't start a server and test it in the same run, and test suites that
+open a local socket fail. Linux has a network namespace of its own, so there
+loopback can be private to the sandbox (see
+[platform-linux.md](platform-linux.md#network-namespace)).
+
 ### Process Cleanup
 
 When a run ends, by exiting, a timeout or the memory limit, every process

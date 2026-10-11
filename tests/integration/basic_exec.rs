@@ -86,6 +86,57 @@ fn test_stdin_input() {
     }
 }
 
+/// HOME points at the run's private temp directory, so programs that keep
+/// caches and config under it (npm, pip, git, ...) have somewhere to write
+/// instead of looking the user up and finding a home they can't use.
+#[test]
+#[cfg(unix)]
+fn test_home_is_the_private_temp_directory() {
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "echo \"$HOME|$TMPDIR\"; cd && pwd; echo x > .cache-probe && echo writable",
+            ],
+        )
+        .unwrap();
+    assert!(result.success(), "{}", result.stderr);
+    let lines: Vec<&str> = result.stdout.lines().collect();
+    let (home, tmpdir) = lines[0].split_once('|').unwrap();
+    assert!(!home.is_empty());
+    assert_eq!(home, tmpdir);
+    assert_eq!(lines[1], home, "`cd` with no argument goes to HOME");
+    assert_eq!(lines[2], "writable");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_a_home_the_caller_sets_wins() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .env("HOME", "/somewhere/else")
+        .build()
+        .unwrap();
+    let result = sandbox.run("sh", &["-c", "echo $HOME"]).unwrap();
+    assert_eq!(result.stdout.trim(), "/somewhere/else");
+}
+
+#[test]
+#[cfg(unix)]
+fn test_no_home_without_a_private_temp_directory() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .no_private_tmp()
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run("sh", &["-c", "echo \"[${HOME-unset}]\""])
+        .unwrap();
+    assert_eq!(result.stdout.trim(), "[unset]");
+}
+
 #[test]
 fn test_environment_variables() {
     let sandbox = Sandbox::builder()

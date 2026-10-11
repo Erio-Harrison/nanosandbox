@@ -52,14 +52,57 @@ is refused.
 | `--host-network` | Unrestricted network. Use with care. | |
 | `--memory <SIZE>`, `--timeout <SECS>` | Per-command limits | 512M, 30 s |
 | `--cpu <N>`, `--max-pids <N>` | Linux only | pids: 128 on Linux |
-| `--max-output <SIZE>`, `--max-concurrent <N>` | Output cap; commands running at once | CPU count |
-| `--env <KEY=VALUE>` | Environment variable for commands (repeatable) | clean environment |
+| `--max-output <SIZE>` | Cap on each of stdout and stderr per command, so one call can't flood the model | 1M |
+| `--max-concurrent <N>` | Commands running at once | CPU count |
+| `--env <KEY=VALUE>` | Environment variable for commands (repeatable) | see below |
 | `--strict-tmp` | macOS only: make `/tmp` and the other system temp directories read-only; commands get a private `$TMPDIR`. Breaks `/tmp` by name, `mktemp -t` and `/usr/bin/clang`/`cc`; see [platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse) | off |
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
 
 Run `nanosandbox-mcp --help` for the full text. A limit this platform can't enforce (for example
 `--max-pids` on macOS) makes the server refuse to start, rather than run without it.
+
+## What a command's environment holds
+
+Not your whole environment: `PATH`, a `HOME`, `TMPDIR`, and whatever you pass with `--env`.
+
+- `PATH` is the server's own, so what your terminal finds, commands find. A client that starts the
+  server from a GUI often gives it a bare `PATH` (`/usr/bin:/bin`): then pass the real one with
+  `--env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin`. An explicit `--env PATH=` wins.
+- `HOME` is the command's private temp directory, writable and gone after the call. npm, pip and
+  git keep caches and config under `HOME`; without one they find your real home, which the sandbox
+  can't write, and fail. It also means nothing they cache survives to the next call.
+- Everything else (API keys included) is absent unless you pass it with `--env`.
+
+## Recipes
+
+What follows is what was tried, on macOS and Linux, not a promise for every setup.
+
+**Python**: `--allow-network pypi.org,files.pythonhosted.org`. Make the environment in the workspace
+(`python3 -m venv .venv`, then `.venv/bin/pip install ...`); `pip` goes through the proxy.
+
+**Node**: `--allow-network registry.npmjs.org`, and the right `PATH` for where `node` lives (see
+above). `npm install` works: its cache lands in the private `HOME`, so every call downloads again.
+
+**Git**: `--allow-network github.com` to clone over https. `git config --global` writes to the
+private `HOME` and is gone after the call, so if git asks who you are, give it
+`git -c user.name=... -c user.email=...` on the command.
+
+**Rust**: the toolchain lives in your home (`~/.cargo`, `~/.rustup`), which is hidden by default,
+so `cargo` fails with `Operation not permitted`. Add `--no-hide-home` and `~/.cargo/bin` to `PATH`
+(`--env PATH=$HOME/.cargo/bin:/usr/bin:/bin`, with `$HOME` filled in by your shell or client). That
+makes your home readable, apart from the credentials and shell history that stay unreadable
+regardless. Fetching dependencies also needs `--allow-network index.crates.io,static.crates.io`.
+
+**Starting a server and testing it in the same call** doesn't work on macOS (a program can't bind or
+connect to loopback there, by design) or on Linux without `--allow-network`. With it on Linux, a
+program's own `127.0.0.1` servers work and aren't sent through the proxy.
+
+**Ubuntu 23.10+ with AppArmor's `unprivileged_userns` restriction** (the default on 24.04) refuses
+`--allow-network` at startup, since a network namespace's loopback can't be brought up. That leaves
+`--host-network` (everything allowed, nothing filtered), or lifting the restriction for the
+binary: `kernel.apparmor_restrict_unprivileged_userns=0`, or an AppArmor profile that allows `userns`
+for `nanosandbox-mcp`. Until one of those, the allowlist isn't available there.
 
 ## The tool
 

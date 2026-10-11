@@ -190,6 +190,16 @@ the sandbox only sees that directory, which is the caller's to write to.
 
 ### Network Namespace
 
+Loopback is only brought up with `allow_network()`, where the proxy needs it
+(below). With `no_network()` the namespace is empty, loopback down included,
+so a program can't start a server and connect to it in the same run. With
+`allow_network()` loopback is up and private to the sandbox (it isn't the
+host's), so a program can: `NO_PROXY` names loopback, which keeps its own
+connections off the proxy. (Not with `allow_private_destinations()`: then
+loopback goes through the proxy, to the host's services, and the sandbox's own
+isn't reachable by name.) On a host where AppArmor denies the namespace its
+loopback, `allow_network()` is refused, and there's no loopback at all.
+
 `no_network()` gives the sandbox an empty network namespace. `allow_network()`
 gives it one too, with the domain-whitelisting proxy as its only way out:
 

@@ -33,11 +33,15 @@ LIMITS
     --timeout <SECS>        Wall-clock limit per command     [default: 30]
     --cpu <N>               CPU share, e.g. 1.5       (Linux only)
     --max-pids <N>          Process count             (Linux only) [default: 128]
-    --max-output <SIZE>     Cap on captured stdout/stderr
+    --max-output <SIZE>     Cap on each of stdout and stderr per command,
+                            so one call can't flood the model   [default: 1M]
     --max-concurrent <N>    Commands running at once         [default: CPU count]
 
 ENVIRONMENT
-    --env <KEY=VALUE>       Environment variable for commands (repeatable)
+    --env <KEY=VALUE>       Environment variable for commands (repeatable).
+                            Commands otherwise get this process's PATH (so
+                            what your terminal finds, they find), a HOME in
+                            their private temp directory, and nothing else
 
 MACOS ONLY
     --strict-tmp            Make /tmp and the other system temp directories
@@ -93,6 +97,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
         max_concurrent: std::thread::available_parallelism().map_or(2, |n| n.get()),
         // A fork bomb is the cheap way to hurt a host; macOS can't limit it.
         max_pids: cfg!(target_os = "linux").then_some(128),
+        // The library's default is 16 MB per stream, far more than a model
+        // can use; one noisy command shouldn't fill its context.
+        max_output: Some(1 << 20),
         ..Config::default()
     };
     let mut workspace = None;
@@ -241,6 +248,16 @@ impl Config {
         }
         for (k, v) in &self.env {
             b = b.env(k, v);
+        }
+        // Commands start with an empty environment. A PATH of the library's
+        // own default would leave out anything outside /usr/bin (Homebrew's
+        // node and python on Apple silicon); this process's is what the
+        // person who started it finds in their terminal. An explicit
+        // --env PATH=... wins.
+        if !self.env.iter().any(|(k, _)| k == "PATH")
+            && let Some(path) = std::env::var_os("PATH").and_then(|p| p.into_string().ok())
+        {
+            b = b.env("PATH", path);
         }
         b = self.linux_only(b)?;
         b = self.macos_only(b)?;
@@ -403,6 +420,15 @@ mod tests {
         assert_eq!(c.env, [("K".to_string(), "V=W".to_string())]);
         assert_eq!(c.timeout, 2.5);
         assert_eq!(c.memory, 1 << 30);
+    }
+
+    #[test]
+    fn output_is_capped_at_a_size_a_model_can_use() {
+        assert_eq!(cfg(&["--workspace", "/w"]).max_output, Some(1 << 20));
+        assert_eq!(
+            cfg(&["--workspace", "/w", "--max-output", "4M"]).max_output,
+            Some(4 << 20)
+        );
     }
 
     #[test]

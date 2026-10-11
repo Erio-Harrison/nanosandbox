@@ -239,8 +239,7 @@ fn test_proxied_network_setup() {
 
     // Each run's programs are pointed at that run's listener.
     let env_vars = ProxiedNetwork::env_vars(4321);
-    assert_eq!(env_vars.len(), 4);
-    for key in ["HTTP_PROXY", "HTTPS_PROXY"] {
+    for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
         assert!(
             env_vars
                 .iter()
@@ -295,4 +294,34 @@ fn test_proxy_env_vars_in_sandbox() {
         "HTTP_PROXY should be set: {}",
         result.stdout
     );
+
+    // ... but loopback isn't sent through it: by default the proxy only
+    // refuses it.
+    let result = sandbox
+        .run("sh", &["-c", "echo $NO_PROXY"])
+        .expect("Failed to run command");
+    assert!(
+        result.stdout.contains("127.0.0.1") && result.stdout.contains("localhost"),
+        "NO_PROXY should name loopback: {}",
+        result.stdout
+    );
+}
+
+/// With private destinations allowed, the host's local services are reached
+/// through the proxy, so loopback must not be on NO_PROXY.
+#[test]
+fn test_loopback_goes_through_the_proxy_when_private_destinations_are_allowed() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .allow_network(&["api.example.com"])
+        .allow_private_destinations()
+        .build()
+        .expect("Failed to build sandbox");
+    let result = sandbox
+        .run("sh", &["-c", "echo \"[${NO_PROXY-unset}]\""])
+        .expect("Failed to run command");
+    assert_eq!(result.stdout.trim(), "[unset]");
 }

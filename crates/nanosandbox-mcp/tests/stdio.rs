@@ -14,13 +14,17 @@ struct Client {
 
 impl Client {
     fn start(args: &[&str]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"));
+        command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        Self::spawn(command)
+    }
+
+    fn spawn(mut command: Command) -> Self {
+        let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, lines) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -352,6 +356,76 @@ fn it_refuses_strict_tmp_off_macos() {
     let (code, stderr) = refused(&["--workspace", ws.path().to_str().unwrap(), "--strict-tmp"]);
     assert_eq!(code, Some(2));
     assert!(stderr.contains("macOS only"), "{stderr}");
+}
+
+/// A directory holding one executable, `nsb-hello`, that prints its name.
+fn tool_dir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = workspace();
+    let tool = dir.path().join("nsb-hello");
+    std::fs::write(&tool, "#!/bin/sh\necho hello from nsb-hello\n").unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+fn client_with_path(ws: &std::path::Path, path: &str, extra: &[&str]) -> Client {
+    let mut args = vec!["--workspace", ws.to_str().unwrap(), "--no-hide-home"];
+    args.extend_from_slice(extra);
+    let mut c = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"));
+    c.args(&args)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    Client::spawn(c)
+}
+
+#[test]
+fn commands_find_what_the_servers_own_path_finds() {
+    let ws = workspace();
+    let tools = tool_dir();
+    let path = format!("{}:/usr/bin:/bin", tools.path().display());
+
+    let mut c = client_with_path(ws.path(), &path, &[]);
+    let out = c.run(1, "nsb-hello", &[]);
+    assert_eq!(out["stdout"], "hello from nsb-hello\n", "{out}");
+
+    // An explicit PATH for the commands wins over the server's own.
+    let mut c = client_with_path(ws.path(), &path, &["--env", "PATH=/usr/bin:/bin"]);
+    let r = c.request(
+        2,
+        "tools/call",
+        json!({"name":"run_command","arguments":{"command":"nsb-hello"}}),
+    );
+    assert_eq!(r["result"]["isError"], true, "{r}");
+}
+
+#[test]
+fn one_noisy_command_cannot_flood_the_model() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let out = c.run(1, "sh", &["-c", "yes x | head -c 5000000"]);
+    assert_eq!(out["output_truncated"], true, "{}", out["exit_code"]);
+    assert!(out["stdout"].as_str().unwrap().len() <= 1 << 20);
+
+    // Raised on request.
+    let mut c = Client::in_workspace(ws.path(), &["--max-output", "8M"]);
+    let out = c.run(1, "sh", &["-c", "yes x | head -c 5000000"]);
+    assert_eq!(out["output_truncated"], false);
+    assert_eq!(out["stdout"].as_str().unwrap().len(), 5_000_000);
+}
+
+#[test]
+fn commands_get_a_home_they_can_write() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let out = c.run(
+        1,
+        "sh",
+        &["-c", "cd && echo ok > .npmrc-probe && echo $HOME"],
+    );
+    assert_eq!(out["exit_code"], 0, "{out}");
+    assert!(!out["stdout"].as_str().unwrap().trim().is_empty());
 }
 
 #[test]

@@ -294,8 +294,19 @@ pub fn clear_env(self, clear: bool) -> Self
 ```
 
 By default the program starts with only what `env` sets (plus a default
-`PATH`, `TMPDIR` and the proxy variables). `clear_env(false)` starts from
-this process's environment instead.
+`PATH`, the proxy variables, and `TMPDIR` and `HOME` when `private_tmp` is on).
+`clear_env(false)` starts from this process's environment instead.
+
+`HOME` is the run's private temp directory, so programs that keep caches and
+config under it (npm, pip, git, ...) have somewhere to write that disappears
+with the run. Without one they look the user up in the password database: on
+macOS that finds the real home, which the sandbox can't write (npm fails with
+`EPERM`); on Linux the sandbox's uid has no entry at all (Node throws
+`ENOENT`). A `HOME` from `env`, or inherited with `clear_env(false)`, wins.
+In proxied mode `NO_PROXY` names loopback, so a program's own local servers
+aren't sent through the proxy (which would only refuse them as private
+addresses). With `allow_private_destinations()` it's left unset: loopback then
+goes through the proxy, to the host's own services.
 
 ### Linux only: Identity and Syscall Filter
 

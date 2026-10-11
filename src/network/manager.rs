@@ -140,6 +140,25 @@ impl ProxiedNetwork {
             .collect()
     }
 
+    /// [`env_vars`](Self::env_vars), plus `NO_PROXY` for loopback unless
+    /// `allow_private_destinations` is on. By default the proxy refuses a
+    /// private address, so a program that talks to a server of its own on
+    /// `127.0.0.1` through it only ever gets a 403; direct, it reaches its
+    /// own. With private destinations allowed, loopback goes through the
+    /// proxy on purpose: that's how a sandbox reaches the host's local
+    /// services, so it must not be bypassed.
+    pub fn env_vars_for(port: u16, allow_private_destinations: bool) -> Vec<(String, String)> {
+        let mut vars = Self::env_vars(port);
+        if !allow_private_destinations {
+            vars.extend(
+                ["NO_PROXY", "no_proxy"]
+                    .into_iter()
+                    .map(|key| (key.to_string(), "localhost,127.0.0.1,::1".to_string())),
+            );
+        }
+        vars
+    }
+
     /// Shutdown the proxy
     pub fn shutdown(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
@@ -173,6 +192,24 @@ mod tests {
                     .any(|(k, v)| k == key && v == "http://127.0.0.1:3128")
             );
         }
+    }
+
+    #[test]
+    fn test_loopback_bypasses_the_proxy_unless_private_destinations_are_allowed() {
+        let vars = ProxiedNetwork::env_vars_for(3128, false);
+        assert_eq!(vars.len(), 6);
+        for key in ["NO_PROXY", "no_proxy"] {
+            let (_, v) = vars.iter().find(|(k, _)| k == key).unwrap();
+            for host in ["localhost", "127.0.0.1", "::1"] {
+                assert!(v.split(',').any(|h| h == host), "{key}={v}");
+            }
+        }
+
+        // Allowed on purpose: loopback is how the host's own services are
+        // reached, through the proxy.
+        let vars = ProxiedNetwork::env_vars_for(3128, true);
+        assert_eq!(vars.len(), 4);
+        assert!(!vars.iter().any(|(k, _)| k.eq_ignore_ascii_case("no_proxy")));
     }
 
     /// A run's listener is served until its attachment finishes, and only
