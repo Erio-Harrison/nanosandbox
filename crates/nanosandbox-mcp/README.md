@@ -7,10 +7,13 @@ offers one tool, `run_command`.
 ## Install
 
 ```bash
-cargo install nanosandbox-mcp
+npx -y nanosandbox-mcp --help        # npm, nothing to install first
+uvx nanosandbox-mcp --help           # PyPI, via uv
+cargo install nanosandbox-mcp        # crates.io, builds from source
 ```
 
-Linux and macOS. Windows isn't supported yet: the sandbox there is a resource limiter, not a
+Prebuilt binaries cover macOS (Apple silicon and Intel) and Linux (x86_64 and aarch64, glibc 2.17+).
+Linux and macOS only. Windows isn't supported yet: the sandbox there is a resource limiter, not a
 security boundary.
 
 ## Use
@@ -21,12 +24,15 @@ Add it to an MCP client's configuration (Claude Desktop, Cursor, Zed, ...):
 {
   "mcpServers": {
     "sandbox": {
-      "command": "nanosandbox-mcp",
-      "args": ["--workspace", "/path/to/project"]
+      "command": "npx",
+      "args": ["-y", "nanosandbox-mcp", "--workspace", "/path/to/project"]
     }
   }
 }
 ```
+
+(With `uvx`: `"command": "uvx", "args": ["nanosandbox-mcp", "--workspace", ...]`. With a
+`cargo install`ed binary: `"command": "nanosandbox-mcp"`.)
 
 The agent can now run programs, with their files limited to that workspace and no network.
 

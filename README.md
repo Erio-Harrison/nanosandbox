@@ -85,6 +85,19 @@ console.log(result.stdout);
 
 Install with: `npm install nanosandbox`. Source and build instructions: [crates/nanosandbox-node](crates/nanosandbox-node).
 
+### MCP Server
+
+`nanosandbox-mcp` lets an MCP client (Claude Desktop, Cursor, Zed, ...) run commands in a
+sandbox through one `run_command` tool. You fix what the sandbox may touch when you launch it;
+the model only chooses what to run.
+
+```json
+{ "mcpServers": { "sandbox": { "command": "npx", "args": ["-y", "nanosandbox-mcp", "--workspace", "/path/to/project"] } } }
+```
+
+Also `uvx nanosandbox-mcp` and `cargo install nanosandbox-mcp`; Linux and macOS. See
+[crates/nanosandbox-mcp](crates/nanosandbox-mcp).
+
 ## Network Control
 
 Block all network access:
