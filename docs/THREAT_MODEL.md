@@ -151,7 +151,7 @@ can't. See [platform-macos.md](platform-macos.md)'s own comparison table.
 | Claim | Mechanism | Verified by |
 |---|---|---|
 | Can't read credentials/`deny_read`/hidden-home paths | SBPL `file-read-data` denial | `tests/security/sbpl_rules.rs`, `tests/security/read_rules.rs` |
-| Can't write outside granted paths | SBPL `file-write*` denial, default-deny | `tests/security/sbpl_rules.rs: test_read_only_filesystem` |
+| Can't write outside granted paths, except the temp directories | SBPL `file-write*` denial, default-deny. `/tmp`, `/private/tmp`, `/private/var/tmp` and `/private/var/folders` are writable by default and are the host's own, shared with every sandbox and the host: what a program writes there by name stays. `private_tmp` gives each run its own directory through `$TMPDIR` (not a mount, so it can't hide `/tmp`) | `tests/security/sbpl_rules.rs: test_read_only_filesystem` |
 | Can't reach the network outside `allow_network` | SBPL denies all network except the loopback proxy port | `tests/security/sbpl_rules.rs: test_no_network_blocks_connections` |
 | Eventually killed for exceeding memory | polled `proc_pid_rusage` over the run's process tree, checked every 2-10ms | `tests/security/resource_enforcement.rs: test_macos_memory_limit_enforced` |
 | Outlives neither the run's timeout nor the host process | watchdog process holding a pipe the host's death closes | `tests/security/process_management.rs`, `docs/platform-macos.md` Process Lifetime |
@@ -163,6 +163,9 @@ equivalent):**
   processes on the system (not signal or ptrace them without its own
   permissions allowing it -- SBPL still denies `process-fork`/mach lookups
   it doesn't grant -- but it can *see* them, unlike Linux).
+- No private `/tmp`: there are no mount namespaces to give each run its own, so a program
+  that writes to `/tmp` (or `/var/folders`) by name reaches the host's. Linux, where mounting
+  is possible, gives `/tmp`, `/var/tmp` and `/dev/shm` a private tmpfs per run.
 - No hard memory/CPU/process-count limit. `max_pids` is refused by `build()`
   (`SandboxError::Unsupported`) rather than silently accepted and ignored,
   but memory enforcement is a poll loop with a window (a short

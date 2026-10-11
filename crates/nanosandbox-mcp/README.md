@@ -97,5 +97,7 @@ before relying on it, including the platform differences: macOS is structurally 
 
 Running as root on Linux, commands run as `nobody` unless `--host-uid`/`--host-gid` say otherwise,
 and the workspace must be writable by that user; the server says so at startup if it isn't.
+On macOS, `/tmp` and the other temp directories are the host's own: commands can write there and
+what they write stays; writes anywhere else outside the workspace are denied.
 On Ubuntu 23.10+ under AppArmor's `unprivileged_userns` restriction, `--allow-network` is refused
 at startup, and `/var/tmp` and `/dev/shm` are the host's shared paths.
