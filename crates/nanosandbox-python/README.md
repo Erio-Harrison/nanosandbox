@@ -39,6 +39,19 @@ for t in threads:
 
 One `Sandbox` can be shared across threads.
 
+## Temp directories (macOS)
+
+On macOS `/tmp` and the other system temp directories are the host's own, and writable. To make
+them read-only and leave only the run's private `$TMPDIR`:
+
+```python
+sandbox = Sandbox.builder().working_dir("/tmp").shared_tmp(False).build()
+```
+
+This breaks programs that write `/tmp` by name, `mktemp -t` and Apple's `/usr/bin/clang`/`cc`
+shims; see [docs/platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse).
+macOS only; the method doesn't exist elsewhere.
+
 ## Running as root (Linux)
 
 When the calling process is root, commands run as `nobody`, so a directory you pass to `writable()`

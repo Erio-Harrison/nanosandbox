@@ -31,6 +31,12 @@ const piped = await sandbox.runWithInputAsync("cat", [], Buffer.from("hi"));
 The thread pool has 4 threads by default (`UV_THREADPOOL_SIZE`), so more
 concurrent runs than that queue behind each other.
 
+On macOS, `/tmp` and the other system temp directories are the host's own and writable.
+`.sharedTmp(false)` makes them read-only, leaving only the run's private `$TMPDIR`; it breaks
+programs that write `/tmp` by name, `mktemp -t` and Apple's `/usr/bin/clang`/`cc` shims (see
+[docs/platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse)).
+macOS only.
+
 See the [main README](https://github.com/Erio-Harrison/nanosandbox#readme) for the full API.
 
 ## Building from source

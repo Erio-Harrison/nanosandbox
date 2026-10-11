@@ -200,6 +200,13 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.host_gid(gid)))
     }
 
+    /// macOS only: whether /tmp and the other system temp directories stay
+    /// writable (the host's own). `False` leaves only the private `$TMPDIR`.
+    #[cfg(target_os = "macos")]
+    fn shared_tmp(&mut self, shared: bool) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.shared_tmp(shared)))
+    }
+
     // ===== Environment =====
 
     fn env(&mut self, key: String, value: String) -> PyResult<Self> {

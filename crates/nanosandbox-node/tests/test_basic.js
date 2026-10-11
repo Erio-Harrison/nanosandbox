@@ -33,3 +33,14 @@ test('builder reuse after consume throws', () => {
   b.memoryLimit(10 * 1024 * 1024);
   assert.throws(() => b.workingDir('/tmp'));
 });
+
+test('sharedTmp(false) makes the hosts /tmp read-only on macOS', { skip: process.platform !== 'darwin' }, () => {
+  const fs = require('node:fs');
+  const probe = `/tmp/nsb-node-strict-${process.pid}`;
+  const sandbox = Sandbox.builder().workingDir('/tmp').sharedTmp(false).build();
+  const result = sandbox.run('sh', ['-c', `echo hi > ${probe}; echo "tmp:$?"; echo hi > "$TMPDIR/p"; echo "private:$?"`]);
+  const leaked = fs.existsSync(probe);
+  if (leaked) fs.unlinkSync(probe);
+  assert.ok(!leaked);
+  assert.ok(result.stdout.includes('tmp:1') && result.stdout.includes('private:0'), result.stdout);
+});

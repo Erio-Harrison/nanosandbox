@@ -264,6 +264,19 @@ impl SandboxBuilder {
     }
 }
 
+/// macOS-only `SandboxBuilder` methods; a separate block for the same reason
+/// as the Linux-only one above.
+#[cfg(target_os = "macos")]
+#[napi]
+impl SandboxBuilder {
+    /// Whether /tmp and the other system temp directories stay writable (the
+    /// host's own); `false` leaves only the private `$TMPDIR`. See the Rust docs.
+    #[napi]
+    pub fn shared_tmp(&mut self, shared: bool) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.shared_tmp(shared)))
+    }
+}
+
 /// See `nanosandbox::Sandbox`.
 #[napi]
 pub struct Sandbox {

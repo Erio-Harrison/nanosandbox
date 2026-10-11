@@ -80,6 +80,24 @@ def test_other_threads_keep_running_during_a_run():
     assert len(ticks) >= 5, f"only {len(ticks)} ticks while the run was in flight"
 
 
+def test_shared_tmp_false_makes_the_hosts_tmp_read_only_on_macos():
+    import os
+    import sys
+
+    import pytest
+
+    if sys.platform != "darwin":
+        pytest.skip("macOS only")
+    probe = f"/tmp/nsb-py-strict-{os.getpid()}"
+    sandbox = Sandbox.builder().working_dir("/tmp").shared_tmp(False).build()
+    result = sandbox.run("sh", ["-c", f'echo hi > {probe}; echo "tmp:$?"; echo hi > "$TMPDIR/p"; echo "private:$?"'])
+    leaked = os.path.exists(probe)
+    if leaked:
+        os.remove(probe)
+    assert not leaked
+    assert "tmp:1" in result.stdout and "private:0" in result.stdout, result.stdout
+
+
 def test_host_ids_exist_on_linux_and_need_root():
     import os
     import sys
