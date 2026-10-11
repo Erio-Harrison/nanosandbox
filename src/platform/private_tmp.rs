@@ -123,7 +123,7 @@ fn take_lease(dir: &Path) -> std::io::Result<Option<File>> {
 }
 
 /// `Ok(false)` when another open file description holds the lock.
-fn try_flock(file: &File) -> std::io::Result<bool> {
+pub(crate) fn try_flock(file: &File) -> std::io::Result<bool> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(true);
     }
@@ -183,7 +183,13 @@ fn temp_roots() -> Vec<PathBuf> {
 pub(crate) fn clean_stale() -> usize {
     temp_roots()
         .iter()
-        .map(|r| sweep_stale(r, STALE_AFTER))
+        .map(|r| {
+            #[cfg(target_os = "macos")]
+            let markers = sweep_markers(r, STALE_AFTER);
+            #[cfg(not(target_os = "macos"))]
+            let markers = 0;
+            sweep_stale(r, STALE_AFTER) + markers
+        })
         .sum()
 }
 
@@ -240,6 +246,70 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
         }
         // Doesn't follow symlinks the program may have left in it.
         if std::fs::remove_dir_all(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Removes the run marker files (macOS; see macos/run_marker.rs) that killed
+/// runs left under `parent`, by the same rules as `sweep_stale`: the `-in`
+/// file of each pair holds the lock, and the pair goes if it can be taken.
+/// A lone `-out` is removed once old enough.
+#[cfg(target_os = "macos")]
+fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    const MARKER: &str = "nanosandbox-run-";
+    let me = unsafe { libc::geteuid() };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name
+            .strip_prefix(MARKER)
+            .and_then(|n| n.strip_suffix("-in").or_else(|| n.strip_suffix("-out")))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let old = meta
+            .modified()
+            .ok()
+            .and_then(|m| SystemTime::now().duration_since(m).ok())
+            .is_some_and(|age| age >= min_age);
+        if !meta.is_file() || meta.uid() != me || !old {
+            continue;
+        }
+        let in_path = parent.join(format!("{MARKER}{stem}-in"));
+        let out_path = parent.join(format!("{MARKER}{stem}-out"));
+        if name.ends_with("-out") && in_path.exists() {
+            continue; // judged with its pair, via the `-in` entry
+        }
+        if name.ends_with("-in") {
+            let Ok(file) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&in_path)
+            else {
+                continue;
+            };
+            match file.metadata() {
+                Ok(m) if (m.dev(), m.ino()) == (meta.dev(), meta.ino()) => {}
+                _ => continue,
+            }
+            if !matches!(try_flock(&file), Ok(true)) {
+                continue;
+            }
+            if std::fs::remove_file(&in_path).is_ok() {
+                removed += 1;
+            }
+        }
+        if std::fs::remove_file(&out_path).is_ok() {
             removed += 1;
         }
     }
@@ -361,6 +431,33 @@ mod tests {
         );
         #[cfg(not(target_os = "macos"))]
         assert!(canon.contains(&std::fs::canonicalize("/tmp").unwrap()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn leftover_run_markers_go_unless_held() {
+        let root = tempfile::tempdir().unwrap();
+        let age = |p: &Path| {
+            let old = SystemTime::now() - Duration::from_secs(3600);
+            File::open(p).unwrap().set_modified(old).unwrap();
+        };
+        for stem in ["nanosandbox-run-1-0", "nanosandbox-run-1-1"] {
+            for suffix in ["in", "out"] {
+                let p = root.path().join(format!("{stem}-{suffix}"));
+                File::create(&p).unwrap();
+                age(&p);
+            }
+        }
+        let held = File::open(root.path().join("nanosandbox-run-1-1-in")).unwrap();
+        assert!(try_flock(&held).unwrap());
+        assert_eq!(sweep_markers(root.path(), Duration::from_secs(120)), 2);
+        assert!(!root.path().join("nanosandbox-run-1-0-in").exists());
+        assert!(!root.path().join("nanosandbox-run-1-0-out").exists());
+        assert!(
+            root.path().join("nanosandbox-run-1-1-in").exists()
+                && root.path().join("nanosandbox-run-1-1-out").exists(),
+            "SAFETY: a held run's markers were removed"
+        );
     }
 
     #[test]

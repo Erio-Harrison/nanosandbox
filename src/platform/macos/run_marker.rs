@@ -43,6 +43,10 @@ pub(super) struct RunMarker {
     /// Allowed to the run, as a control.
     allowed: PathBuf,
     allowed_c: CString,
+    /// Locked for the run's life, so that a sweep (see private_tmp.rs) can
+    /// tell these files from ones a killed host left. `None` where the file
+    /// system can't lock; a sweep then can't either, and leaves them.
+    _lease: Option<std::fs::File>,
 }
 
 impl RunMarker {
@@ -56,9 +60,9 @@ impl RunMarker {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             );
             let dir = std::env::temp_dir();
-            let create = |suffix: &str| -> std::io::Result<(PathBuf, CString)> {
+            let create = |suffix: &str| -> std::io::Result<(PathBuf, CString, std::fs::File)> {
                 let path = dir.join(format!("{name}-{suffix}"));
-                std::fs::OpenOptions::new()
+                let file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&path)?;
@@ -66,11 +70,14 @@ impl RunMarker {
                 let path = path.canonicalize()?;
                 let c = CString::new(path.as_os_str().as_encoded_bytes())
                     .map_err(std::io::Error::other)?;
-                Ok((path, c))
+                Ok((path, c, file))
             };
             match create("in") {
-                Ok((denied, denied_c)) => {
-                    let (allowed, allowed_c) = match create("out") {
+                Ok((denied, denied_c, file)) => {
+                    let lease = crate::platform::private_tmp::try_flock(&file)
+                        .is_ok_and(|locked| locked)
+                        .then_some(file);
+                    let (allowed, allowed_c, _) = match create("out") {
                         Ok(created) => created,
                         Err(e) => {
                             let _ = std::fs::remove_file(&denied);
@@ -82,6 +89,7 @@ impl RunMarker {
                         denied_c,
                         allowed,
                         allowed_c,
+                        _lease: lease,
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

@@ -144,7 +144,8 @@ process dies however it dies. Whichever process next creates a directory
 (at most every 5 minutes) removes the ones in `$TMPDIR` that are named
 `nanosandbox-tmp-*`, are real directories of its own uid, are over 2 minutes
 old, and whose lock it can take. A directory a live agent holds is never
-touched, so several agents on one machine don't affect each other. A process
+touched, so several agents on one machine don't affect each other. The two marker files each run keeps
+(`nanosandbox-run-*`) are swept the same way. A process
 ID is never used for this: it can be reused, or belong to another namespace.
 It looks in `$TMPDIR`, and on Linux in `/tmp`. To do it now, call
 `nanosandbox::clean_stale_tmp()` or run `nanosandbox-mcp --clean-tmp`. File
