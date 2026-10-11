@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.0
+
+### Breaking
+
+- Linux: when the sandboxed command is killed by a signal, `ExecutionResult.exit_code` is now
+  `128 + signal` and `signal` is `None` (it used to be `Some`). Kills by the host's own limits
+  (`wall_time_limit`, ...) still set `signal`. This follows from the command now running as PID 2
+  under a small init shim; see Security.
+- Linux: `build()` refuses, for a root caller, a `writable`/`bind(ReadWrite)` source that `nobody`
+  can't write to (with or without a `rootfs`), instead of failing at run time with `EACCES`. Set
+  `host_uid`/`host_gid` to run as the source's owner.
+- `is_platform_supported()` now requires, on Linux, Landlock and a seccomp filter for the
+  architecture, and no longer requires cgroup v2. It answers whether the default config builds.
+- Linux: `socket(AF_UNIX, ...)` is denied by the syscall filter. Programs that create Unix sockets
+  (`multiprocessing.Manager`, `syslog()`) now fail; `socketpair()` and other families are unaffected.
+
+### Security
+
+- Linux: the command runs as PID 2 under an init shim that forwards signals and reaps orphans.
+  As PID 1 it couldn't be signaled from inside its own sandbox (`kill -KILL $$` did nothing).
+- Linux: `/var/tmp` and `/dev/shm` get a private tmpfs per run where mounting is possible, instead
+  of being the host's shared paths. Still shared under AppArmor's `unprivileged_userns` restriction.
+- Linux: closes connections to host services over Unix sockets (`docker.sock`, the systemd bus,
+  `ssh-agent`).
+- Linux: fixed an fd leak between concurrent runs that could leave a run's stdin never reaching EOF.
+
+### Added
+
+- `nanosandbox-mcp`: an MCP server (stdio) with one `run_command` tool, on npm, PyPI and
+  crates.io. Limits are fixed at launch, not chosen by the model.
+- Linux: `host_uid()`/`host_gid()` (also in the Python and Node bindings) for a root caller.
+- Node: `runAsync()` and `runWithInputAsync()` return a Promise and leave the event loop free;
+  `run()` and `runWithInput()` still block it for the whole command.
+
+### Fixed
+
+- Python: `run()` and `run_with_input()` release the GIL while the sandbox runs.
+- Linux: cgroup v2 is only required for configs that set a cgroup-backed limit.
+
 ## 0.2.0
 
 The published `0.1.0` was cut from this project's first commit, before

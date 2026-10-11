@@ -274,7 +274,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "nix",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox-mcp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "nanosandbox",
  "serde_json",
