@@ -149,7 +149,7 @@ fn sweep_if_due() {
     let _ = std::thread::Builder::new()
         .name("nanosandbox-tmp-sweep".into())
         .spawn(|| {
-            let removed = sweep_stale(&std::env::temp_dir(), STALE_AFTER);
+            let removed = clean_stale();
             if removed > 0 {
                 tracing::debug!(
                     removed,
@@ -157,6 +157,47 @@ fn sweep_if_due() {
                 );
             }
         });
+}
+
+/// The temp directories a run may have been using: this process's, and the
+/// system's default, since `TMPDIR` may have been set differently when a dead
+/// run started.
+fn temp_roots() -> Vec<PathBuf> {
+    let mut roots = vec![std::env::temp_dir()];
+    #[cfg(target_os = "macos")]
+    {
+        let mut buf = [0u8; libc::PATH_MAX as usize];
+        let n = unsafe {
+            libc::confstr(
+                libc::_CS_DARWIN_USER_TEMP_DIR,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        if n > 1 && n <= buf.len() {
+            let path = String::from_utf8_lossy(&buf[..n - 1]).into_owned();
+            roots.push(PathBuf::from(path));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    roots.push(PathBuf::from("/tmp"));
+    let mut seen = Vec::new();
+    roots.retain(|r| {
+        let key = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+        let new = !seen.contains(&key);
+        seen.push(key);
+        new
+    });
+    roots
+}
+
+/// Sweeps every temp directory a run may have used; returns how many
+/// directories it removed. See `sweep_stale` for what it leaves alone.
+pub(crate) fn clean_stale() -> usize {
+    temp_roots()
+        .iter()
+        .map(|r| sweep_stale(r, STALE_AFTER))
+        .sum()
 }
 
 /// Removes the private directories under `parent` whose owner is gone, and
@@ -312,6 +353,27 @@ mod tests {
         drop(lease);
         assert_eq!(sweep_until(parent.path(), 1), 1);
         assert!(!live.exists());
+    }
+
+    #[test]
+    fn the_roots_swept_include_the_system_default_once() {
+        let roots = temp_roots();
+        let canon: Vec<_> = roots
+            .iter()
+            .map(|r| std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()))
+            .collect();
+        for (i, c) in canon.iter().enumerate() {
+            assert!(!canon[i + 1..].contains(c), "{c:?} listed twice");
+        }
+        assert!(roots.contains(&std::env::temp_dir()));
+        #[cfg(target_os = "macos")]
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.to_string_lossy().contains("/var/folders/"))
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(canon.contains(&std::fs::canonicalize("/tmp").unwrap()));
     }
 
     #[test]

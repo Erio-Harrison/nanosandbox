@@ -17,6 +17,14 @@ fn main() {
             println!("nanosandbox-mcp {}", env!("CARGO_PKG_VERSION"));
             return;
         }
+        Ok(config::Parsed::CleanTmp) => {
+            #[cfg(unix)]
+            println!(
+                "removed {} leftover temp directories",
+                nanosandbox::clean_stale_tmp()
+            );
+            return;
+        }
         Err(e) => die(&e),
     };
     if cfg!(windows) {

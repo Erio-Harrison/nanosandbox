@@ -42,6 +42,15 @@ pub use error::{Result, SandboxError};
 pub use result::ExecutionResult;
 pub use sandbox::Sandbox;
 
+/// Removes the private temp directories that killed runs left behind, from
+/// this process's temp directory and the system's default. Only this user's,
+/// only ones nothing holds. Runs on its own as new runs start; this is for a
+/// host that wants it done now, e.g. on exit. Returns how many were removed.
+#[cfg(unix)]
+pub fn clean_stale_tmp() -> usize {
+    platform::private_tmp::clean_stale()
+}
+
 /// 1 KB in bytes
 pub const KB: u64 = 1024;
 /// 1 MB in bytes

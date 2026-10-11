@@ -64,6 +64,9 @@ LINUX ONLY
 
 OTHER
     --log-io                Also log stdin/stdout/stderr bodies to stderr
+    --clean-tmp             Remove private temp directories that killed
+                            servers left behind, then exit. Uses $TMPDIR and
+                            the system default; ones still in use are kept
     -h, --help              Print this help
     -V, --version           Print the version
 ";
@@ -97,6 +100,7 @@ pub enum Parsed {
     Run(Box<Config>),
     Help,
     Version,
+    CleanTmp,
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
@@ -128,6 +132,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
         match flag.as_str() {
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
+            "--clean-tmp" => return Ok(Parsed::CleanTmp),
             "--workspace" => workspace = Some(PathBuf::from(value("a directory")?)),
             "--read-only" => cfg.read_only.push(PathBuf::from(value("a path")?)),
             "--writable" => cfg.writable.push(PathBuf::from(value("a path")?)),
@@ -500,6 +505,7 @@ mod tests {
     #[test]
     fn the_download_cache_is_on_unless_turned_off() {
         assert!(!cfg(&["--workspace", "/w"]).no_cache);
+        assert!(matches!(parse(&["--clean-tmp"]).unwrap(), Parsed::CleanTmp));
         assert!(cfg(&["--workspace", "/w", "--no-cache"]).no_cache);
     }
 

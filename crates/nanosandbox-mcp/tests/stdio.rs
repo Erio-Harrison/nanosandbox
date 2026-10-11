@@ -603,3 +603,37 @@ fn help_and_version() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("nanosandbox-mcp "));
 }
+
+/// `--clean-tmp` removes what nothing holds, in whatever TMPDIR it's given,
+/// and leaves what a live process holds.
+#[test]
+fn clean_tmp_removes_unheld_directories_and_keeps_held_ones() {
+    use std::os::fd::AsRawFd;
+    let root = tempfile::tempdir().unwrap();
+    let age = |p: &std::path::Path| {
+        let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::File::open(p).unwrap().set_modified(old).unwrap();
+    };
+    let dead = root.path().join("nanosandbox-tmp-1-0");
+    let live = root.path().join("nanosandbox-tmp-1-1");
+    let other = root.path().join("not-ours");
+    for d in [&dead, &live, &other] {
+        std::fs::create_dir(d).unwrap();
+        age(d);
+    }
+    let held = std::fs::File::open(&live).unwrap();
+    assert_eq!(
+        unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))
+        .arg("--clean-tmp")
+        .env("TMPDIR", root.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!dead.exists(), "an unheld directory should be removed");
+    assert!(live.exists(), "SAFETY: a held directory was removed");
+    assert!(other.exists(), "a directory not ours was removed");
+    drop(held);
+}
