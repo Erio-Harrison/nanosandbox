@@ -682,19 +682,27 @@ time.sleep(0.5)'"#;
     );
 }
 
-/// `--read-only` adds access; inside the workspace it would change nothing,
-/// so the server says so instead of starting as if it had.
+/// `--read-only` on a path inside the workspace makes it read-only again:
+/// the file can't be changed, replaced or moved off (nor its directory),
+/// while the rest of the workspace is still writable. On Linux this needs
+/// mounting, which the default AppArmor restriction denies.
 #[cfg(target_os = "macos")]
 #[test]
-fn it_refuses_a_read_only_path_inside_the_workspace() {
+fn a_read_only_path_inside_the_workspace_stays_read_only() {
     let ws = workspace();
-    std::fs::create_dir(ws.path().join(".git")).unwrap();
-    let (code, err) = refused(&[
-        "--workspace",
-        ws.path().to_str().unwrap(),
-        "--read-only",
-        ws.path().join(".git").to_str().unwrap(),
-    ]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("would stay writable"), "{err}");
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join(".dc")).unwrap();
+    let file = root.join(".dc/settings.json");
+    std::fs::write(&file, "SAFE").unwrap();
+    let mut c = Client::in_workspace(&root, &["--read-only", file.to_str().unwrap()]);
+    let attacks = "echo EVIL > .dc/settings.json; rm -f .dc/settings.json; \
+        mv .dc .dc.bak; mv .dc/settings.json .dc/x; echo ok > newfile.txt; echo done";
+    let out = c.run(1, "sh", &["-c", attacks]);
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), "done", "{out}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SAFE");
+    assert!(!root.join(".dc.bak").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("newfile.txt")).unwrap(),
+        "ok\n"
+    );
 }

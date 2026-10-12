@@ -152,6 +152,11 @@ It looks in `$TMPDIR`, and on Linux in `/tmp`. To do it now, call
 systems that can't lock (some NFS mounts) are never swept, and another user's
 directories are left to that user.
 
+`read_only` inside a writable path (the workspace) is a deny rule for
+writing, added after the allow: the path can't be written, replaced or
+renamed, and the directories above it, up to the writable one, can't be
+removed or renamed, since a symlink put there would stand in for them.
+
 A program that writes to `/tmp` by name gets the host's `/tmp`. By default
 that stays writable, because making it read-only breaks some programs (below).
 

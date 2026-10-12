@@ -15,6 +15,9 @@ mod private_tmp;
 #[path = "security/read_rules.rs"]
 mod read_rules;
 
+#[path = "security/read_only_inside_writable.rs"]
+mod read_only_inside_writable;
+
 #[cfg(target_os = "linux")]
 #[path = "security/syscall_filter.rs"]
 mod syscall_filter;

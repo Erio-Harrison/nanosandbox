@@ -72,3 +72,11 @@ pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
     }
     false
 }
+
+/// World-writable, so the sandbox's user can write where it's allowed to and
+/// the test can then tell that what it was denied really was.
+#[allow(dead_code)]
+pub fn chmod_open(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777)).unwrap();
+}

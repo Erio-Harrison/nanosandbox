@@ -139,6 +139,10 @@ Every sandbox gets its own mount namespace. In the child, after `clone()`:
    are bound: a `bind()` to another path, a path inside a tmpfs (created in
    it first, since the tmpfs starts empty), and a `read_only` path inside a
    writable area, where Landlock can't take writing away again.
+   For that last one, each directory between it and the writable area is
+   bound onto itself too: a mount point can't be renamed or removed, so
+   `mv dir dir.bak; mkdir dir` can't swap the read-only path out from under
+   the sandbox.
    `build()` refuses a bind target that doesn't exist outside a tmpfs, and a
    `working_dir` inside a tmpfs that nothing is bound to.
 6. Mount a fresh `/proc`, so the sandbox only sees its own PID namespace.

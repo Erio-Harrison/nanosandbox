@@ -111,6 +111,48 @@ impl MacOSExecutor {
         }
         sections.push(write_rules);
 
+        // A read_only path inside a writable root takes writing away again,
+        // as on Linux (where it's a read-only mount). The later deny wins.
+        // Moving a parent directory away would take the path with it, so
+        // the directories between it and the root can't be removed or
+        // renamed either; a symlink put in their place would otherwise
+        // stand in for them.
+        let mut narrowed = String::from("; read_only inside a writable root\n");
+        let mut n = 0;
+        for m in config
+            .mounts
+            .iter()
+            .filter(|m| m.permission == Permission::ReadOnly)
+        {
+            let path = canonical_path(&m.target);
+            let Some(root) = roots
+                .iter()
+                .filter(|r| path != **r && path.starts_with(r))
+                .max_by_key(|r| r.components().count())
+            else {
+                continue;
+            };
+            let key = format!("READ_ONLY_{n}");
+            narrowed.push_str(&format!("(deny file-write* (subpath (param \"{key}\")))\n"));
+            params.push((key, path.to_string_lossy().into_owned()));
+            n += 1;
+            for ancestor in path
+                .ancestors()
+                .skip(1)
+                .take_while(|a| *a != root.as_path())
+            {
+                let key = format!("READ_ONLY_{n}");
+                narrowed.push_str(&format!(
+                    "(deny file-write-unlink (literal (param \"{key}\")))\n"
+                ));
+                params.push((key, ancestor.to_string_lossy().into_owned()));
+                n += 1;
+            }
+        }
+        if n > 0 {
+            sections.push(narrowed);
+        }
+
         // Credentials, deny_read and hide_home: not their contents. Metadata
         // stays readable, as on Linux, where names stay visible. Paths the
         // config names inside them come back after: for the same operation,

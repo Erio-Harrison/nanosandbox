@@ -46,7 +46,7 @@ is refused.
 | Option | Meaning | Default |
 |---|---|---|
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
-| `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). They add access: a `--read-only` path inside the workspace or another writable path is refused on macOS, since it would stay writable | |
+| `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). A `--read-only` path inside the workspace is read-only again, so `.git/hooks` or a settings file there can't be changed by a command (on Linux this needs mounting, refused where AppArmor denies it) | |
 | `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory | home hidden |
 | `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` works | network off |
 | `--host-network` | Unrestricted network. Use with care. | |

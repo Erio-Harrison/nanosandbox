@@ -108,6 +108,37 @@ impl MountPlan {
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
             .collect();
 
+        // A read-only mount inside a writable area makes the path itself
+        // unwritable, but not the directories above it: `mv dir dir.bak`
+        // moves it away, and a new `dir` takes its place, writable. A mount
+        // point can't be renamed or removed, so each directory up to the
+        // writable area is mounted onto itself too.
+        let mut pins: Vec<Mount> = Vec::new();
+        if rootfs.is_none() {
+            for m in binds
+                .iter()
+                .filter(|m| m.permission == Permission::ReadOnly)
+            {
+                let Some(area) = super::landlock::writable_areas(config)
+                    .filter(|area| *area != m.target.as_path() && m.target.starts_with(area))
+                    .max_by_key(|area| area.components().count())
+                else {
+                    continue;
+                };
+                for dir in m.target.ancestors().skip(1).take_while(|d| *d != area) {
+                    let taken = binds.iter().any(|b| b.target == dir)
+                        || pins.iter().any(|p| p.target == dir);
+                    if !taken {
+                        pins.push(Mount {
+                            source: dir.to_path_buf(),
+                            target: dir.to_path_buf(),
+                            permission: Permission::ReadWrite,
+                        });
+                    }
+                }
+            }
+        }
+
         // One combined order, shallowest target first: a mount has to be in
         // place before anything mounts under it, whichever kind either one
         // is. Grouping "all tmpfs, then all binds" instead used to shadow a
@@ -121,6 +152,7 @@ impl MountPlan {
             .iter()
             .map(|(p, s)| Item::Tmpfs(p, *s))
             .chain(binds.iter().map(|&m| Item::Bind(m)))
+            .chain(pins.iter().map(Item::Bind))
             .collect();
         items.sort_by_key(|item| {
             match item {

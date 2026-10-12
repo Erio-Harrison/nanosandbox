@@ -169,8 +169,7 @@ fn test_presets() {
     if common::skip_without_userns_privileges() {
         return;
     }
-    let temp =
-        tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp dir");
+    let temp = common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     let path = temp.path();
 
     // Just verify presets build without error

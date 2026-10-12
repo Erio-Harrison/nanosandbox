@@ -128,9 +128,13 @@ root, the sandbox runs as `nobody`, so a `writable` path must be writable by
 uid 65534 (see [platform-linux.md](platform-linux.md#running-as-root)), or
 the host user `host_uid`/`host_gid` name.
 
-These add access; neither narrows the other. A `read_only` path inside a
-`writable` one (the workspace, say) would stay writable, so on macOS `build()`
-refuses it. Protecting something inside a writable directory isn't expressible.
+A `read_only` path inside a `writable` one (the workspace, say) is read-only
+again: it can't be changed, replaced or moved, and neither can the directories
+above it, up to the writable one. The rest stays writable. That's how to keep
+the project's own settings, or `.git/hooks`, out of reach of the commands the
+sandbox runs. On macOS it's a deny rule. On Linux it's a read-only mount, so
+it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`
+restriction denies that, rather than leave the path writable.
 
 ```rust
 builder

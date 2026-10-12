@@ -164,6 +164,12 @@ impl SandboxBuilder {
 
     /// Let the sandbox read `path`, a host file or directory, at the same
     /// path.
+    ///
+    /// Inside a path made [`writable`](Self::writable) it takes writing away
+    /// again: the path can't be changed, replaced or moved, and nor can the
+    /// directories above it, up to the writable one. On Linux that's a
+    /// read-only mount, so `build()` refuses it where mounting isn't
+    /// possible (AppArmor's `unprivileged_userns` restriction).
     pub fn read_only(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         self.config.mounts.push(Mount {
@@ -493,42 +499,6 @@ impl SandboxBuilder {
             }
         }
 
-        // read_only() and writable() add grants; one can't narrow the other.
-        // Where they're Seatbelt rules, a read_only path inside a writable
-        // one just stays writable, so say so instead of letting it look done.
-        #[cfg(target_os = "macos")]
-        {
-            let real = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-            let writable: Vec<(&Path, PathBuf)> = self
-                .config
-                .mounts
-                .iter()
-                .filter(|m| m.permission == Permission::ReadWrite)
-                .map(|m| (m.target.as_path(), real(&m.target)))
-                .collect();
-            for m in self
-                .config
-                .mounts
-                .iter()
-                .filter(|m| m.permission == Permission::ReadOnly)
-            {
-                let ro = real(&m.target);
-                if let Some((outer, _)) =
-                    writable.iter().find(|(_, w)| ro != *w && ro.starts_with(w))
-                {
-                    return Err(SandboxError::Config {
-                        context: format!(
-                            "read_only({}) is inside writable({}) and would stay writable: \
-                             read_only grants read access, it doesn't make a writable path read-only",
-                            m.target.display(),
-                            outer.display()
-                        ),
-                        source: None,
-                    });
-                }
-            }
-        }
-
         if let Some((path, _)) = self
             .config
             .tmpfs_mounts
@@ -699,29 +669,5 @@ mod tests {
     fn test_seccomp() {
         assert!(SandboxBuilder::new().config.seccomp);
         assert!(!SandboxBuilder::new().seccomp(false).config.seccomp);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_read_only_inside_writable_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let inner = dir.path().join("hooks");
-        std::fs::create_dir(&inner).unwrap();
-        let err = SandboxBuilder::new()
-            .writable(dir.path())
-            .read_only(&inner)
-            .build()
-            .err()
-            .expect("should be refused");
-        assert!(err.to_string().contains("would stay writable"), "{err}");
-        // The other way round, and unrelated paths, are fine.
-        let other = tempfile::tempdir().unwrap();
-        assert!(
-            SandboxBuilder::new()
-                .read_only(dir.path())
-                .writable(other.path())
-                .build()
-                .is_ok()
-        );
     }
 }
