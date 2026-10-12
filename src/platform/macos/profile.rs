@@ -113,10 +113,11 @@ impl MacOSExecutor {
 
         // A read_only path inside a writable root takes writing away again,
         // as on Linux (where it's a read-only mount). The later deny wins.
-        // Moving a parent directory away would take the path with it, so
-        // the directories between it and the root can't be removed or
-        // renamed either; a symlink put in their place would otherwise
-        // stand in for them.
+        // Moving a directory above it away would take the path with it, and
+        // a symlink put in that one's place would stand in for it, so none
+        // of them can be removed or renamed: not only those inside the
+        // writable root but those above it, which may be writable too (a
+        // workspace under /tmp).
         let mut narrowed = String::from("; read_only inside a writable root\n");
         let mut n = 0;
         for m in config
@@ -125,22 +126,14 @@ impl MacOSExecutor {
             .filter(|m| m.permission == Permission::ReadOnly)
         {
             let path = canonical_path(&m.target);
-            let Some(root) = roots
-                .iter()
-                .filter(|r| path != **r && path.starts_with(r))
-                .max_by_key(|r| r.components().count())
-            else {
+            if !roots.iter().any(|r| path != *r && path.starts_with(r)) {
                 continue;
-            };
+            }
             let key = format!("READ_ONLY_{n}");
             narrowed.push_str(&format!("(deny file-write* (subpath (param \"{key}\")))\n"));
             params.push((key, path.to_string_lossy().into_owned()));
             n += 1;
-            for ancestor in path
-                .ancestors()
-                .skip(1)
-                .take_while(|a| *a != root.as_path())
-            {
+            for ancestor in path.ancestors().skip(1) {
                 let key = format!("READ_ONLY_{n}");
                 narrowed.push_str(&format!(
                     "(deny file-write-unlink (literal (param \"{key}\")))\n"

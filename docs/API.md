@@ -132,7 +132,9 @@ A `read_only` path inside a `writable` one (the workspace, say) is read-only
 again: it can't be changed, replaced or moved, and neither can the directories
 above it, up to the writable one. The rest stays writable. That's how to keep
 the project's own settings, or `.git/hooks`, out of reach of the commands the
-sandbox runs. On macOS it's a deny rule. On Linux it's a read-only mount, so
+sandbox runs. For git, protect `.git/config` as well: its `core.hooksPath` (or
+`core.fsmonitor`) runs code from anywhere. Commits, branches and stashes still
+work with both read-only; `git config` and `git remote add` don't. On macOS it's a deny rule. On Linux it's a read-only mount, so
 it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`
 restriction denies that, rather than leave the path writable.
 

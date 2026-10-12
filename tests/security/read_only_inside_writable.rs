@@ -111,3 +111,52 @@ fn test_read_only_inside_writable_is_refused_where_it_cannot_be_enforced() {
         "{err}"
     );
 }
+
+/// The workspace itself may sit in a writable directory (macOS's shared
+/// /tmp, say): then it can be moved away and a fake put in its place, with
+/// a symlink for `.dc` pointing at a file the sandbox may write.
+#[test]
+fn test_the_workspace_itself_cannot_be_swapped_out() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let outer = workspace();
+    let outer_root = outer.path().canonicalize().unwrap();
+    if crate::common::skip_if_unreachable_by_nobody(&outer_root) {
+        return;
+    }
+    let ws = outer_root.join("ws");
+    std::fs::create_dir_all(ws.join(".dc")).unwrap();
+    std::fs::write(ws.join(".dc/settings.json"), "SAFE").unwrap();
+    crate::common::chmod_open(&ws);
+    crate::common::chmod_open(&ws.join(".dc"));
+    let evil = outer_root.join("evil");
+    std::fs::create_dir(&evil).unwrap();
+    std::fs::write(evil.join("settings.json"), "EVIL").unwrap();
+    crate::common::chmod_open(&evil);
+
+    let sandbox = Sandbox::builder()
+        .working_dir(&ws)
+        .writable(&outer_root)
+        .writable(&ws)
+        .read_only(ws.join(".dc/settings.json"))
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let (w, e) = (ws.display(), evil.display());
+    for attack in [
+        format!("mv {w} {w}.bak; mkdir {w}; ln -s {e} {w}/.dc"),
+        format!("mv {w} {w}.bak && mkdir -p {w}/.dc && echo EVIL > {w}/.dc/settings.json"),
+        format!("cd /; rm -rf {w}"),
+    ] {
+        let _ = sh(&sandbox, &attack);
+    }
+    assert_eq!(
+        std::fs::read_to_string(ws.join(".dc/settings.json"))
+            .as_deref()
+            .ok(),
+        Some("SAFE"),
+        "the workspace was swapped out"
+    );
+    assert!(!outer_root.join("ws.bak").exists());
+}

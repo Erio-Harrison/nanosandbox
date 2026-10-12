@@ -110,22 +110,30 @@ impl MountPlan {
 
         // A read-only mount inside a writable area makes the path itself
         // unwritable, but not the directories above it: `mv dir dir.bak`
-        // moves it away, and a new `dir` takes its place, writable. A mount
-        // point can't be renamed or removed, so each directory up to the
-        // writable area is mounted onto itself too.
+        // moves it away, and a new `dir` (or a symlink) takes its place,
+        // writable. A mount point can't be renamed or removed, so each
+        // directory above it that the sandbox could move is mounted onto
+        // itself too: all of those inside any writable area, the area's own
+        // directory included, since that may sit in another writable one.
         let mut pins: Vec<Mount> = Vec::new();
         if rootfs.is_none() {
+            let areas: Vec<PathBuf> = super::landlock::writable_areas(config)
+                .map(Path::to_path_buf)
+                .collect();
             for m in binds
                 .iter()
                 .filter(|m| m.permission == Permission::ReadOnly)
             {
-                let Some(area) = super::landlock::writable_areas(config)
-                    .filter(|area| *area != m.target.as_path() && m.target.starts_with(area))
-                    .max_by_key(|area| area.components().count())
-                else {
+                if !areas
+                    .iter()
+                    .any(|a| a.as_path() != m.target && m.target.starts_with(a))
+                {
                     continue;
-                };
-                for dir in m.target.ancestors().skip(1).take_while(|d| *d != area) {
+                }
+                for dir in m.target.ancestors().skip(1) {
+                    if dir == Path::new("/") || !areas.iter().any(|a| dir.starts_with(a)) {
+                        break;
+                    }
                     let taken = binds.iter().any(|b| b.target == dir)
                         || pins.iter().any(|p| p.target == dir);
                     if !taken {
