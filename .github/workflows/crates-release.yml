@@ -56,10 +56,13 @@ jobs:
             exit 1
           fi
           # It's built against the core crate as published, so its requirement
-          # has to name the core's current major.minor.
-          wanted="nanosandbox = { version = \"$(echo "$core" | cut -d. -f1,2)\""
-          if ! grep -qF "$wanted" crates/nanosandbox-mcp/Cargo.toml; then
-            echo "::error::crates/nanosandbox-mcp/Cargo.toml should depend on $wanted (core is $core)"
+          # has to name the core's current major.minor, as "0.3" or "0.3.2":
+          # the second when it needs something the first release of that
+          # minor doesn't have.
+          majmin=$(echo "$core" | cut -d. -f1,2)
+          wanted="nanosandbox = { version = \"$majmin\" or \"$core\" "
+          if ! grep -qE "nanosandbox = \{ version = \"${majmin//./\\.}(\\.[0-9]+)?\"" crates/nanosandbox-mcp/Cargo.toml; then
+            echo "::error::crates/nanosandbox-mcp/Cargo.toml should depend on $wanted(core is $core)"
             exit 1
           fi
           status() { curl -s -o /dev/null -w '%{http_code}' -A nanosandbox-ci "https://crates.io/api/v1/crates/$1/$2"; }
