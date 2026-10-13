@@ -1053,5 +1053,8 @@ fn a_command_cannot_touch_the_servers_stdin() {
     );
     assert_eq!(out["stdout"].as_str().unwrap().trim(), "devnull", "{out}");
     let again = c.run(2, "echo", &["alive"]);
-    assert_eq!(again["stdout"], "alive\n", "the server died after a command touched its stdin");
+    assert_eq!(
+        again["stdout"], "alive\n",
+        "the server died after a command touched its stdin"
+    );
 }
