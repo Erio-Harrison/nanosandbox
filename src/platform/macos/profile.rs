@@ -115,6 +115,23 @@ impl MacOSExecutor {
             ));
             params.push((key, root.to_string_lossy().into_owned()));
         }
+        // After the roots (one of which, the user's temp directory, holds
+        // every run's private directory): the later rule wins, so other
+        // runs' directories go, and this run's own comes back.
+        if let Some(own) = private_tmp {
+            write_rules.push_str("(deny file-write* (subpath (param \"PRIVATE_TMPS\")))\n");
+            params.push((
+                "PRIVATE_TMPS".into(),
+                crate::platform::private_tmp::container_location()
+                    .to_string_lossy()
+                    .into_owned(),
+            ));
+            write_rules.push_str("(allow file-write* (subpath (param \"PRIVATE_TMP_OWN_W\")))\n");
+            params.push((
+                "PRIVATE_TMP_OWN_W".into(),
+                canonical_path(own).to_string_lossy().into_owned(),
+            ));
+        }
         sections.push(write_rules);
 
         // The writable roots the configuration names, and every directory
@@ -205,6 +222,15 @@ impl MacOSExecutor {
                     "(allow file-read-data (subpath (param \"{key}\")))\n"
                 ));
                 params.push((key, path.to_string_lossy().into_owned()));
+            }
+            // This run's own private directory, inside the denied container.
+            if let Some(own) = private_tmp {
+                read_rules
+                    .push_str("(allow file-read-data (subpath (param \"PRIVATE_TMP_OWN\")))\n");
+                params.push((
+                    "PRIVATE_TMP_OWN".into(),
+                    canonical_path(own).to_string_lossy().into_owned(),
+                ));
             }
             sections.push(read_rules);
         }

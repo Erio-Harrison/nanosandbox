@@ -399,7 +399,9 @@ fn test_sandbox_dies_with_its_host_process() {
 /// out of reach of every run's command: not just its own pair, since the
 /// temp directory they used to sit in is writable by default, so one
 /// sandbox could strip a concurrent one's. Nor can the directory, or the
-/// temp directory above it, be moved aside.
+/// temp directory above it, be moved aside. A marker-like file of "another
+/// run" is planted from the host, so that concurrent tests adding and
+/// removing their own markers don't bear on it.
 #[cfg(target_os = "macos")]
 #[test]
 fn test_a_command_cannot_touch_any_runs_markers() {
@@ -408,29 +410,36 @@ fn test_a_command_cannot_touch_any_runs_markers() {
         .canonicalize()
         .unwrap()
         .join("nanosandbox-markers");
+    std::fs::create_dir_all(&markers).unwrap();
+    let other = markers.join(format!("nanosandbox-run-{}-77-in", std::process::id()));
+    std::fs::write(&other, "").unwrap();
+    let planted = markers.join(format!("nanosandbox-run-{}-78-in", std::process::id()));
     let script = format!(
-        "d='{d}'; before=$(ls \"$d\" | wc -l); \
-         rm -f \"$d\"/* 2>/dev/null; rm -rf \"$d\" 2>/dev/null; mv \"$d\" \"$d.x\" 2>/dev/null; \
-         echo x > \"$d/nanosandbox-run-1-1-in\" 2>/dev/null; \
-         mv \"$(dirname \"$d\")\" \"$(dirname \"$d\").x\" 2>/dev/null; \
-         after=$(ls \"$d\" | wc -l); echo \"$before $after\"",
-        d = markers.display()
+        "d='{d}'; o='{o}'; p='{p}'; \
+         rm -f \"$o\" 2>/dev/null; echo rm=$?; mv \"$o\" \"$o.x\" 2>/dev/null; echo mv=$?; \
+         echo x > \"$o\" 2>/dev/null; echo write=$?; echo x > \"$p\" 2>/dev/null; echo plant=$?; \
+         rm -rf \"$d\" 2>/dev/null; mv \"$d\" \"$d.x\" 2>/dev/null; echo mvdir=$?; \
+         mv \"$(dirname \"$d\")\" \"$(dirname \"$d\").x\" 2>/dev/null; echo mvtmp=$?",
+        d = markers.display(),
+        o = other.display(),
+        p = planted.display()
     );
     let out = sandbox.run("sh", &["-c", &script]).unwrap();
-    let nums: Vec<usize> = out
-        .stdout
-        .split_whitespace()
-        .map(|n| n.parse().unwrap())
-        .collect();
-    assert_eq!(nums.len(), 2, "{out:?}");
+    let still_there =
+        other.exists() && std::fs::metadata(&other).map(|m| m.len()).unwrap_or(1) == 0;
+    let moved = other.with_extension("x").exists();
+    let planted_exists = planted.exists();
+    let _ = std::fs::remove_file(&other);
+    let _ = std::fs::remove_file(other.with_extension("x"));
+    let _ = std::fs::remove_file(&planted);
     assert!(
-        nums[0] >= 2,
-        "the run's own markers should be there: {out:?}"
+        still_there && !moved,
+        "another run's marker was removed, moved or written: {out:?}"
     );
-    assert_eq!(
-        nums[0], nums[1],
-        "a command removed or added marker files: {out:?}"
-    );
+    assert!(!planted_exists, "a marker file was planted: {out:?}");
+    for ok in ["rm=0", "mv=0", "write=0", "plant=0", "mvdir=0", "mvtmp=0"] {
+        assert!(!out.stdout.contains(ok), "{ok}: {out:?}");
+    }
     assert!(markers.is_dir() && !markers.with_extension("x").exists());
     assert!(
         std::env::temp_dir().canonicalize().is_ok(),

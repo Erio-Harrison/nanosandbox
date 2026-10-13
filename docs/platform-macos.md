@@ -129,8 +129,12 @@ lock.
 macOS has no tmpfs and no mount namespace, so there's no giving one process
 its own directory at a path, and no `tmpfs()`, `bind()` or `rootfs()`.
 
-`private_tmp(size)`, on by default, is a fresh directory per run, readable only by
-the calling user, with `TMPDIR` pointing to it (unless `env` sets `TMPDIR`).
+`private_tmp(size)`, on by default, is a fresh directory per run under
+`$TMPDIR/nanosandbox-tmp/`, readable only by the calling user, with `TMPDIR`
+pointing to it (unless `env` sets `TMPDIR`). No run's command can read, write,
+remove or rename another run's directory there (the profile denies the whole
+container, then allows the run's own), so two agents on one machine can't see
+each other's temp files.
 Programs that use `TMPDIR` get what the tmpfs promises: private to the run,
 removed afterwards, and limited to `size`. The size is measured every 250ms
 while the program runs, and the program is killed if it's over

@@ -79,3 +79,102 @@ fn test_no_private_tmp() {
     let result = sandbox.run("sh", &["-c", "echo \"[$TMPDIR]\""]).unwrap();
     assert_eq!(result.stdout.trim(), "[]");
 }
+
+/// Two runs on one machine: one can't read, list into, write, remove or
+/// rename the other's private directory, which (where it isn't a tmpfs)
+/// used to sit in the temp directory, writable by every sandbox.
+#[test]
+fn test_a_run_cannot_reach_another_runs_private_tmp() {
+    use std::sync::mpsc;
+    let a = sandbox(16 * MB);
+    let (tx, rx) = mpsc::channel();
+    let victim = std::thread::spawn(move || {
+        // Writes a secret, says where it is, keeps running so its directory
+        // stays, then checks the secret is as it was.
+        let out = a
+            .run(
+                "sh",
+                &[
+                    "-c",
+                    "echo secret > \"$TMPDIR/s.txt\"; echo \"$TMPDIR\" > /dev/stderr; \
+                     i=0; while [ $i -lt 60 ] && [ ! -e \"$TMPDIR/go\" ]; do sleep 0.1; i=$((i+1)); done; \
+                     cat \"$TMPDIR/s.txt\"; ls \"$TMPDIR\" | sort | tr '\\n' ' '",
+                ],
+            )
+            .unwrap();
+        let _ = tx.send(());
+        out
+    });
+    // The victim's $TMPDIR, read from the host side: its directory appears
+    // under the container.
+    let container = {
+        let t = std::env::temp_dir();
+        let t = t.canonicalize().unwrap_or(t);
+        if cfg!(target_os = "macos") {
+            t.join("nanosandbox-tmp")
+        } else if let Some(r) = std::env::var_os("XDG_RUNTIME_DIR") {
+            std::path::PathBuf::from(r).join("nanosandbox-tmp")
+        } else {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+                .join(".cache")
+                .join("nanosandbox-tmp")
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let a_dir = loop {
+        let found = std::fs::read_dir(&container).ok().and_then(|d| {
+            d.flatten()
+                .map(|e| e.path())
+                .find(|p| p.join("s.txt").exists())
+        });
+        if let Some(p) = found {
+            break p;
+        }
+        if std::time::Instant::now() > deadline {
+            // A tmpfs (Linux with mounting): nothing of it is on the host,
+            // and another sandbox can't see it at all.
+            let _ = std::fs::write(container.join("go"), "");
+            eprintln!("skipping: the private directory is not a directory on the host");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let b = sandbox(16 * MB);
+    let d = a_dir.display();
+    let out = b
+        .run(
+            "sh",
+            &[
+                "-c",
+                &format!(
+                    "cat {d}/s.txt 2>&1; echo cat=$?; ls {d} 2>&1 | head -3; echo ls=$?; \
+                     echo EVIL > {d}/s.txt 2>&1; echo write=$?; echo x > {d}/planted 2>&1; echo plant=$?; \
+                     rm -rf {d} 2>&1; echo rm=$?; mv {d} {d}.x 2>&1; echo mv=$?; \
+                     echo ok > \"$TMPDIR/mine\"; echo own=$?"
+                ),
+            ],
+        )
+        .unwrap();
+    let _ = std::fs::write(a_dir.join("go"), "");
+    let _ = rx.recv_timeout(Duration::from_secs(10));
+    let a_out = victim.join().unwrap();
+    assert!(
+        !out.stdout.contains("secret"),
+        "read another run's file: {out:?}"
+    );
+    for ok in ["write=0", "plant=0", "rm=0", "mv=0"] {
+        assert!(!out.stdout.contains(ok), "{ok}: {out:?}");
+    }
+    assert!(
+        out.stdout.contains("own=0"),
+        "its own directory must work: {out:?}"
+    );
+    assert!(
+        a_out.stdout.starts_with("secret\n"),
+        "the victim's file was changed: {a_out:?}"
+    );
+    assert!(
+        !a_out.stdout.contains("planted"),
+        "a file was planted in the victim's dir: {a_out:?}"
+    );
+}

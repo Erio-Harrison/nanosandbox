@@ -64,7 +64,7 @@ impl PrivateTmp {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             );
-            let dir = std::env::temp_dir().join(name);
+            let dir = container_dir()?.join(name);
             match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
                 Ok(()) => {
                     let lease = match take_lease(&dir) {
@@ -159,6 +159,47 @@ fn sweep_if_due() {
         });
 }
 
+/// Where every run's private directory is made: a directory of its own,
+/// which no run's rules let a command read or write, except its own
+/// directory in it. In the temp directory itself, writable by default, one
+/// sandbox could read or delete a concurrent run's `$TMPDIR`. On macOS it's
+/// under the user's own temp directory. On Linux it has to be outside `/tmp`,
+/// which Landlock grants whole and can't take a part back from: the user's
+/// runtime directory, else `~/.cache`; with neither (a uid with no home) it
+/// falls back to `/tmp`, where another run of the same user can reach it.
+/// Only matters where the private directory isn't a tmpfs (macOS, and Linux
+/// under AppArmor's userns restriction). Made 0700.
+pub(crate) fn container_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = container_location();
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+
+/// Where `container_dir` is, whether or not it exists yet.
+pub(crate) fn container_location() -> PathBuf {
+    let temp = std::env::temp_dir();
+    let temp = temp.canonicalize().unwrap_or(temp);
+    #[cfg(target_os = "macos")]
+    {
+        temp.join("nanosandbox-tmp")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        if let Some(run) = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute() && d.is_dir())
+        {
+            return run.join("nanosandbox-tmp");
+        }
+        if let Some(home) = super::read_rules::home_dir().filter(|h| h.is_absolute()) {
+            return home.join(".cache").join("nanosandbox-tmp");
+        }
+        temp.join(format!("nanosandbox-tmp-{}", unsafe { libc::geteuid() }))
+    }
+}
+
 /// The temp directories a run may have been using: this process's, and on
 /// Linux `/tmp` too, since `TMPDIR` may have been different when a dead run
 /// started. Not macOS's per-user default: `confstr(_CS_DARWIN_USER_TEMP_DIR)`,
@@ -187,7 +228,15 @@ pub(crate) fn clean_stale() -> usize {
         .unwrap_or(0);
     #[cfg(not(target_os = "macos"))]
     let markers = 0;
-    temp_roots()
+    // Private directories sat in the temp directory itself before 0.3.4:
+    // the roots are still swept for those.
+    let own = container_location();
+    let here = if own.is_dir() {
+        sweep_stale(&own, STALE_AFTER)
+    } else {
+        0
+    };
+    here + temp_roots()
         .iter()
         .map(|r| {
             // Marker files sat in the temp directory itself before 0.3.3.

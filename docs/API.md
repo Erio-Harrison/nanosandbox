@@ -173,6 +173,11 @@ limited to `size_bytes`. **On by default**, at `DEFAULT_PRIVATE_TMP_SIZE`
   the program (`ExecutionResult::killed_by_tmp_limit`). See
   [platform-macos.md](platform-macos.md#tmpfs).
 
+Where it is a directory rather than a tmpfs (macOS, and Linux under AppArmor's
+`unprivileged_userns` restriction), it lives in a container directory that no
+run's command can read or write except for its own directory in it: one run
+can't see or touch another's temp files.
+
 #### What can't be read: `deny_read` / `hide_home`
 
 ```rust

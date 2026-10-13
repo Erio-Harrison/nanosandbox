@@ -458,8 +458,13 @@ root nor running under its own AppArmor profile. For such a caller:
   `writable` elsewhere are only Landlock rules, so they work.
 - `private_tmp` is a private directory per run instead of a tmpfs, with
   `TMPDIR` pointing to it, as on macOS (see
-  [platform-macos.md](platform-macos.md#tmpfs)). Programs that write to
-  `/tmp` by name get the host's `/tmp`.
+  [platform-macos.md](platform-macos.md#tmpfs)). It lives under
+  `$XDG_RUNTIME_DIR/nanosandbox-tmp/`, or `~/.cache/nanosandbox-tmp/`:
+  outside `/tmp`, which Landlock grants whole, so that no other run's command
+  can read or write it (the container is on the deny-read list, and only the
+  run's own directory is granted). With neither directory (a uid with no
+  home) it falls back to `/tmp`, where another run of the same user can reach
+  it. Programs that write to `/tmp` by name get the host's `/tmp`.
   Directories left by a killed host are swept the same way.
 - `build()` refuses `allow_network(...)` too: loopback can't be brought up in
   the sandbox's network namespace (`CAP_NET_ADMIN` is denied), and falling

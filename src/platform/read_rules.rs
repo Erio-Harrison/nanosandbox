@@ -98,6 +98,9 @@ pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
         }
     }
     denied.extend(config.deny_read.iter().cloned());
+    // Other runs' private temp directories; a run's own comes back by its
+    // own rule (see platform/private_tmp.rs).
+    denied.push(super::private_tmp::container_location());
     let mut denied: Vec<PathBuf> = denied
         .iter()
         .filter_map(|p| std::fs::canonicalize(p).ok())

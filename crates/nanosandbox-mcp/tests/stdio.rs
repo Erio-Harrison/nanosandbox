@@ -518,7 +518,10 @@ fn a_download_bigger_than_the_private_temp_directory_fits_in_the_cache() {
 #[test]
 fn a_dead_servers_leftover_directory_is_swept_and_a_live_ones_is_not() {
     let temp = std::env::temp_dir();
-    let dir_of = |c: &Client| temp.join(format!("nanosandbox-tmp-{}-0", c.child.id()));
+    let dir_of = |c: &Client| {
+        temp.join("nanosandbox-tmp")
+            .join(format!("nanosandbox-tmp-{}-0", c.child.id()))
+    };
     let wait_for = |what: &str, cond: &dyn Fn() -> bool| {
         for _ in 0..200 {
             if cond() {
@@ -1100,7 +1103,12 @@ fn a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep() {
     let entries = std::fs::read_dir(&temp)
         .unwrap()
         .flatten()
-        .chain(std::fs::read_dir(&markers).unwrap().flatten());
+        .chain(std::fs::read_dir(&markers).unwrap().flatten())
+        .chain(
+            std::fs::read_dir(temp.join("nanosandbox-tmp"))
+                .unwrap()
+                .flatten(),
+        );
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with(&format!("nanosandbox-run-{pid}-"))
