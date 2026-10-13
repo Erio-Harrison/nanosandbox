@@ -302,6 +302,32 @@ fn cpu_and_pids(builder: SandboxBuilder, cpus: f64, pids: u32) -> SandboxBuilder
 mod tests {
     use super::*;
 
+    /// A relative path names the directory as of build; the host's working
+    /// directory changing later must not change which one. `pin` itself, not
+    /// `build`: as root, build() refuses a writable directory that `nobody`
+    /// can't write, which this checkout is.
+    #[test]
+    #[cfg(unix)]
+    fn test_relative_paths_are_made_absolute_at_build() {
+        let mut config = Sandbox::builder()
+            .working_dir(".")
+            .writable(".")
+            .deny_read("nope")
+            .into_config();
+        config.pin();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(config.working_dir, cwd);
+        assert!(
+            config
+                .mounts
+                .iter()
+                .all(|m| m.source == cwd && m.target == cwd)
+        );
+        assert_eq!(config.deny_read, [cwd.join("nope")]);
+        assert!(!config.pinned.is_empty());
+        assert!(config.pinned.iter().all(|(given, _)| given.is_absolute()));
+    }
+
     #[test]
     fn test_sandbox_id_generation() {
         let id1 = generate_sandbox_id();

@@ -152,6 +152,13 @@ It looks in `$TMPDIR`, and on Linux in `/tmp`. To do it now, call
 systems that can't lock (some NFS mounts) are never swept, and another user's
 directories are left to that user.
 
+A writable directory, and every directory above it up to `/`, can't be
+removed or renamed (`file-write-unlink` denied by name). A command could
+otherwise delete or move the workspace and put a symlink in its place, and the
+next run, resolving the path through the link, would make the link's target
+writable. The profile is made from where each path led when the sandbox was
+built, and a run is refused if a path leads elsewhere by then.
+
 `read_only` inside a writable path (the workspace) is a deny rule for
 writing, added after the allow: the path can't be written, replaced or
 renamed, and the directories above it, up to the writable one, can't be

@@ -115,6 +115,26 @@ impl SandboxConfig {
     /// [`check_pinned`]: SandboxConfig::check_pinned
     #[cfg(unix)]
     pub(crate) fn pin(&mut self) {
+        // A relative path names a directory as of now: made absolute, so
+        // that the host changing its working directory later doesn't make
+        // it name another one (and fail the check below).
+        if let Ok(cwd) = std::env::current_dir() {
+            let absolute = |p: &mut PathBuf| {
+                if p.is_relative() {
+                    *p = cwd.join(&*p);
+                }
+            };
+            for m in &mut self.mounts {
+                if m.source == m.target {
+                    absolute(&mut m.source);
+                    m.target = m.source.clone();
+                }
+            }
+            absolute(&mut self.working_dir);
+            for p in &mut self.deny_read {
+                absolute(p);
+            }
+        }
         let named = self
             .mounts
             .iter()

@@ -192,6 +192,18 @@ parent and applied in the child just before `exec`.
 (Linux 5.13+, with `landlock` in `/sys/kernel/security/lsm`). With a rootfs
 the sandbox only sees that directory, which is the caller's to write to.
 
+A writable directory the caller named is given to Landlock as a descriptor
+opened in the host before each run, not as a path the child opens: the host
+checks, through `/proc/self/fd`, that it is still the place the path led to
+when the sandbox was built, and refuses the run if not. A command could
+otherwise (where the directory's parent is writable, and mounting isn't
+possible) move the workspace aside, put a symlink in its place, and have the
+next run grant the link's target. Whether it is a directory is decided in the
+host too: `fstat` on an inherited descriptor can be refused in the child under
+AppArmor. The system's own writable directories (`/tmp`, `/var/tmp`,
+`/dev/shm`) and tmpfs mounts are still opened by path in the child, since a
+fresh tmpfs may be mounted over them there.
+
 ### Network Namespace
 
 Loopback is only brought up with `allow_network()`, where the proxy needs it

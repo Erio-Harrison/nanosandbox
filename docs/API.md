@@ -138,6 +138,17 @@ work with both read-only; `git config` and `git remote add` don't. On macOS it's
 it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`
 restriction denies that, rather than leave the path writable.
 
+The paths these name are resolved when the sandbox is built, and that is what
+the rules are made from on every run; a relative path is made absolute then.
+If one of them later leads somewhere else (it was moved, or replaced by a
+symlink), `run` refuses with a `Config` error saying so, until the sandbox is
+built again. Without that, a command could swap the writable directory, or a
+directory above it, for a symlink to somewhere it may not write, and the next
+run would grant that place. For the same reason a command can't remove or
+rename a writable directory itself, or a directory above it: `rm -rf` of
+everything inside it works, `rm -rf` of the directory doesn't. (On Linux
+without mounting, the swap itself can't be stopped; the next run is refused.)
+
 ```rust
 builder
     .read_only("/data/input")
@@ -186,7 +197,8 @@ whole home directory instead, except what `read_only`, `writable` or
 pub fn working_dir(self, path: impl Into<PathBuf>) -> Self
 ```
 
-The directory the program starts in. It grants no access by itself.
+The directory the program starts in. It grants no access by itself. A
+relative path is made absolute when the sandbox is built.
 
 #### Linux only: `bind`, `tmpfs`, `rootfs`
 
