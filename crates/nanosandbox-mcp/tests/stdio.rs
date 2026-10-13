@@ -1058,3 +1058,74 @@ fn a_command_cannot_touch_the_servers_stdin() {
         "the server died after a command touched its stdin"
     );
 }
+
+/// A command that left the process group (setsid) outlives its server being
+/// killed: the watchdog kills the group, not it. The next server's sweep of
+/// the dead server's marker files kills it first.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep() {
+    let ws = workspace();
+    let mut dead = Client::in_workspace(ws.path(), &[]);
+    let pid = dead.child.id();
+    // The call must still be running when the server dies: a call that ends
+    // kills what it started, escaped or not. So the parent waits.
+    dead.send(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"python3","args":["-c",
+        "import os, time\nif os.fork() == 0:\n os.setsid()\n os.execvp('sleep', ['sleep', '31998'])\ntime.sleep(60)"]}}}));
+    let alive = || {
+        Command::new("pgrep")
+            .args(["-f", "[s]leep 31998"])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(alive(), "the sleeper never started");
+    dead.child.kill().unwrap();
+    dead.child.wait().unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        alive(),
+        "the sleeper died with its server (then there is nothing to sweep)"
+    );
+
+    // Make the dead server's leftovers old enough to be swept.
+    let temp = std::env::temp_dir();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3600);
+    let mut aged = 0;
+    let markers = temp.join("nanosandbox-markers");
+    let entries = std::fs::read_dir(&temp)
+        .unwrap()
+        .flatten()
+        .chain(std::fs::read_dir(&markers).unwrap().flatten());
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!("nanosandbox-run-{pid}-"))
+            || name.starts_with(&format!("nanosandbox-tmp-{pid}-"))
+        {
+            std::fs::File::open(entry.path())
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            aged += 1;
+        }
+    }
+    assert!(
+        aged >= 2,
+        "no marker files of the dead server found in {}",
+        temp.display()
+    );
+
+    let mut next = Client::in_workspace(ws.path(), &[]);
+    next.run(1, "echo", &["sweep"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let still = alive();
+    let _ = Command::new("pkill").args(["-f", "[s]leep 31998"]).status();
+    assert!(!still, "the escaped sleeper outlived the sweep");
+}

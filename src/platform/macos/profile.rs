@@ -209,9 +209,27 @@ impl MacOSExecutor {
             sections.push(read_rules);
         }
 
-        // Marks this run's processes for kill_run; see run_marker.rs.
+        // Marks this run's processes for kill_run; see run_marker.rs. No
+        // run's command may write in the markers directory, every run's
+        // markers included (a command could otherwise strip a concurrent
+        // run's), nor rename or remove it or anything above it (that would
+        // take them along: `mv "$TMPDIR" x`).
         if let Some(marker) = marker {
             let mut rules = String::from("; this run's marker\n");
+            if let Ok(dir) = super::run_marker::markers_dir() {
+                rules.push_str("(deny file-write* (subpath (param \"MARKERS_DIR\")))\n");
+                params.push(("MARKERS_DIR".into(), dir.to_string_lossy().into_owned()));
+                for (i, ancestor) in dir.ancestors().enumerate() {
+                    if ancestor == Path::new("/") {
+                        break;
+                    }
+                    let key = format!("MARKERS_ABOVE_{i}");
+                    rules.push_str(&format!(
+                        "(deny file-write-unlink (literal (param \"{key}\")))\n"
+                    ));
+                    params.push((key, ancestor.to_string_lossy().into_owned()));
+                }
+            }
             for (i, (rule, path)) in marker.rules().into_iter().enumerate() {
                 let key = format!("RUN_MARKER_{i}");
                 rules.push_str(&rule.replace("{}", &key));

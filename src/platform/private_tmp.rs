@@ -181,16 +181,24 @@ fn temp_roots() -> Vec<PathBuf> {
 /// Sweeps every temp directory a run may have used; returns how many
 /// directories it removed. See `sweep_stale` for what it leaves alone.
 pub(crate) fn clean_stale() -> usize {
+    #[cfg(target_os = "macos")]
+    let markers = super::macos::run_marker::markers_dir()
+        .map(|d| sweep_markers(&d, STALE_AFTER))
+        .unwrap_or(0);
+    #[cfg(not(target_os = "macos"))]
+    let markers = 0;
     temp_roots()
         .iter()
         .map(|r| {
+            // Marker files sat in the temp directory itself before 0.3.3.
             #[cfg(target_os = "macos")]
-            let markers = sweep_markers(r, STALE_AFTER);
+            let old_markers = sweep_markers(r, STALE_AFTER);
             #[cfg(not(target_os = "macos"))]
-            let markers = 0;
-            sweep_stale(r, STALE_AFTER) + markers
+            let old_markers = 0;
+            sweep_stale(r, STALE_AFTER) + old_markers
         })
-        .sum()
+        .sum::<usize>()
+        + markers
 }
 
 /// Removes the private directories under `parent` whose owner is gone, and
@@ -253,7 +261,8 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
 }
 
 /// Removes the run marker files (macOS; see macos/run_marker.rs) that killed
-/// runs left under `parent`, by the same rules as `sweep_stale`: the `-in`
+/// runs left under `parent`, by the same rules as `sweep_stale`, first
+/// killing what the run left running (`kill_orphans`): the `-in`
 /// file of each pair holds the lock, and the pair goes if it can be taken.
 /// A lone `-out` is removed once old enough.
 #[cfg(target_os = "macos")]
@@ -304,6 +313,13 @@ fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
             }
             if !matches!(try_flock(&file), Ok(true)) {
                 continue;
+            }
+            // The host is gone. What it left running that escaped its
+            // process group is only findable by these two files: end it
+            // before they go.
+            let killed = super::macos::run_marker::kill_orphans(&in_path, &out_path);
+            if killed > 0 {
+                tracing::debug!(killed, "killed processes a dead run left behind");
             }
             if std::fs::remove_file(&in_path).is_ok() {
                 removed += 1;

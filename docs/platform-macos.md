@@ -145,7 +145,13 @@ process dies however it dies. Whichever process next creates a directory
 `nanosandbox-tmp-*`, are real directories of its own uid, are over 2 minutes
 old, and whose lock it can take. A directory a live agent holds is never
 touched, so several agents on one machine don't affect each other. The two marker files each run keeps
-(`nanosandbox-run-*`) are swept the same way. A process
+(`nanosandbox-run-*`, in `$TMPDIR/nanosandbox-markers/`) are swept the same
+way, and the sweep first kills what the dead run left running: a process
+that left the run's process group outlives the watchdog's kill of the group,
+and the markers are the only way to tell it apart. No run's command may write
+in that directory (one sandbox could otherwise strip a concurrent run's
+markers, and that run's end-of-run kill would find none of its processes), nor
+rename or remove it or any directory above it. A process
 ID is never used for this: it can be reused, or belong to another namespace.
 It looks in `$TMPDIR`, and on Linux in `/tmp`. To do it now, call
 `nanosandbox::clean_stale_tmp()` or run `nanosandbox-mcp --clean-tmp`. File

@@ -27,7 +27,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 mod profile;
-mod run_marker;
+pub(crate) mod run_marker;
 use run_marker::RunMarker;
 mod wait;
 mod watchdog;

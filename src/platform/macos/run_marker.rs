@@ -35,6 +35,24 @@ const SANDBOX_FILTER_PATH: libc::c_int = 1;
 const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
 const PROC_UID_ONLY: u32 = 4;
 
+/// Where every run's marker files live: a directory of its own under the
+/// user's temp directory, which no run's profile lets a command write
+/// (see profile.rs). In the temp directory itself, writable by default, a
+/// command could delete *another* run's markers, and that run's end-of-run
+/// kill, or the sweep of a dead run's, would then find none of its
+/// processes. Confirmed for real: `rm -f $TMPDIR/../nanosandbox-run-*-out`
+/// from one sandbox stripped a concurrent one. Made here, mode 0700.
+pub(crate) fn markers_dir() -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("nanosandbox-markers");
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    Ok(dir)
+}
+
 /// The run's marker files, removed when dropped.
 pub(super) struct RunMarker {
     /// Denied to the run.
@@ -59,7 +77,7 @@ impl RunMarker {
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             );
-            let dir = std::env::temp_dir();
+            let dir = markers_dir()?;
             let create = |suffix: &str| -> std::io::Result<(PathBuf, CString, std::fs::File)> {
                 let path = dir.join(format!("{name}-{suffix}"));
                 let file = std::fs::OpenOptions::new()
@@ -128,32 +146,72 @@ impl RunMarker {
         }
     }
 
-    /// Whether `pid` is denied the one file and allowed the other.
-    fn marked(&self, pid: libc::pid_t) -> bool {
-        Self::check(pid, &self.denied_c) == 1 && Self::check(pid, &self.allowed_c) == 0
-    }
-
     /// This user's processes that are in the run's sandbox. Empty if the
     /// check can't be trusted: if a marker file is gone, or this process
     /// (which has no such sandbox) doesn't come out allowed both.
     pub(super) fn members(&self) -> Vec<libc::pid_t> {
-        let me = std::process::id() as libc::pid_t;
-        let intact = self.denied.exists() && self.allowed.exists();
-        if !intact || Self::check(me, &self.denied_c) != 0 || Self::check(me, &self.allowed_c) != 0
-        {
-            return Vec::new();
-        }
-        let uid = unsafe { libc::geteuid() };
-        super::MacOSExecutor::list_pids(PROC_UID_ONLY, uid)
-            .into_iter()
-            .filter(|&pid| pid != me)
-            .filter(|&pid| {
-                let sandboxed =
-                    unsafe { sandbox_check(pid, std::ptr::null(), SANDBOX_FILTER_NONE) } == 1;
-                sandboxed && self.marked(pid)
-            })
-            .collect()
+        members_marked_by(&self.denied, &self.denied_c, &self.allowed, &self.allowed_c)
     }
+}
+
+/// The processes `members` finds for a marker pair at these paths.
+fn members_marked_by(
+    denied: &Path,
+    denied_c: &CString,
+    allowed: &Path,
+    allowed_c: &CString,
+) -> Vec<libc::pid_t> {
+    let me = std::process::id() as libc::pid_t;
+    let intact = denied.exists() && allowed.exists();
+    if !intact || RunMarker::check(me, denied_c) != 0 || RunMarker::check(me, allowed_c) != 0 {
+        return Vec::new();
+    }
+    let uid = unsafe { libc::geteuid() };
+    super::MacOSExecutor::list_pids(PROC_UID_ONLY, uid)
+        .into_iter()
+        .filter(|&pid| pid != me)
+        .filter(|&pid| {
+            let sandboxed =
+                unsafe { sandbox_check(pid, std::ptr::null(), SANDBOX_FILTER_NONE) } == 1;
+            sandboxed
+                && RunMarker::check(pid, denied_c) == 1
+                && RunMarker::check(pid, allowed_c) == 0
+        })
+        .collect()
+}
+
+/// Kills what is left of a run whose host is gone, found by the marker pair
+/// it left at `denied`/`allowed`: a process that left the run's process
+/// group (setsid, a double fork) outlives the watchdog's kill of the group,
+/// and nothing else would ever end it. For the sweep of a dead host's
+/// markers (see private_tmp.rs), before it removes them, since they are the
+/// only way to tell those processes apart. Returns how many were killed.
+/// Nothing is killed unless both files are there and this process comes
+/// out allowed both, as `members` requires.
+pub(crate) fn kill_orphans(denied: &Path, allowed: &Path) -> usize {
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (denied, allowed) = (canon(denied), canon(allowed));
+    let Ok(denied_c) = CString::new(denied.as_os_str().as_encoded_bytes()) else {
+        return 0;
+    };
+    let Ok(allowed_c) = CString::new(allowed.as_os_str().as_encoded_bytes()) else {
+        return 0;
+    };
+    let mut killed = std::collections::HashSet::new();
+    for _ in 0..50 {
+        let members = members_marked_by(&denied, &denied_c, &allowed, &allowed_c);
+        if members.is_empty() {
+            break;
+        }
+        for pid in members {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            killed.insert(pid);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    killed.len()
 }
 
 impl Drop for RunMarker {
@@ -210,6 +268,32 @@ mod tests {
             0,
             "the allowed marker was written"
         );
+    }
+
+    /// A run whose host is gone, with a process still in its sandbox: the
+    /// marker pair finds it, and `kill_orphans` ends it.
+    #[test]
+    fn test_kill_orphans_ends_what_a_dead_runs_markers_still_mark() {
+        let marker = RunMarker::create().unwrap();
+        let mut run = sandboxed(Some(&marker), "sleep 300");
+        let mut other = sandboxed(None, "sleep 300");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(run.try_wait().unwrap().is_none(), "the run died on its own");
+
+        let killed = kill_orphans(&marker.denied, &marker.allowed);
+        assert!(killed >= 1, "killed {killed}");
+        let status = run.wait().unwrap();
+        assert!(!status.success(), "{status:?}");
+        // A sandboxed process of another run isn't touched.
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "another run's process was killed"
+        );
+        let _ = other.kill();
+        let _ = other.wait();
+        // With a marker gone, nothing can be told apart: nothing is killed.
+        std::fs::remove_file(&marker.allowed).unwrap();
+        assert_eq!(kill_orphans(&marker.denied, &marker.allowed), 0);
     }
 
     /// Only checks; sends no signals except to its own children, through

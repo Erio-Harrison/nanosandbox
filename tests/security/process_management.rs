@@ -394,3 +394,46 @@ fn test_sandbox_dies_with_its_host_process() {
     }
     assert!(!running(), "the sandbox outlived its host process");
 }
+
+/// Every run's marker files (how its processes are found and killed) are
+/// out of reach of every run's command: not just its own pair, since the
+/// temp directory they used to sit in is writable by default, so one
+/// sandbox could strip a concurrent one's. Nor can the directory, or the
+/// temp directory above it, be moved aside.
+#[cfg(target_os = "macos")]
+#[test]
+fn test_a_command_cannot_touch_any_runs_markers() {
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let markers = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join("nanosandbox-markers");
+    let script = format!(
+        "d='{d}'; before=$(ls \"$d\" | wc -l); \
+         rm -f \"$d\"/* 2>/dev/null; rm -rf \"$d\" 2>/dev/null; mv \"$d\" \"$d.x\" 2>/dev/null; \
+         echo x > \"$d/nanosandbox-run-1-1-in\" 2>/dev/null; \
+         mv \"$(dirname \"$d\")\" \"$(dirname \"$d\").x\" 2>/dev/null; \
+         after=$(ls \"$d\" | wc -l); echo \"$before $after\"",
+        d = markers.display()
+    );
+    let out = sandbox.run("sh", &["-c", &script]).unwrap();
+    let nums: Vec<usize> = out
+        .stdout
+        .split_whitespace()
+        .map(|n| n.parse().unwrap())
+        .collect();
+    assert_eq!(nums.len(), 2, "{out:?}");
+    assert!(
+        nums[0] >= 2,
+        "the run's own markers should be there: {out:?}"
+    );
+    assert_eq!(
+        nums[0], nums[1],
+        "a command removed or added marker files: {out:?}"
+    );
+    assert!(markers.is_dir() && !markers.with_extension("x").exists());
+    assert!(
+        std::env::temp_dir().canonicalize().is_ok(),
+        "the temp directory was moved"
+    );
+}
