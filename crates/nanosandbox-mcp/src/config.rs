@@ -63,21 +63,27 @@ LINUX ONLY
     --host-gid <GID>        instead of nobody
 
 AUDIT
-    --audit-dir <DIR>       Keep a record in DIR: one file per server run, and a
-                            ledger. Each command is recorded before it runs (and
-                            doesn't run if that fails) and again when it ends:
-                            the command, the policy, how it ended; never stdin,
-                            output or env values, and likely secrets in arguments
-                            are replaced. Lines are chained by hash. DIR must be
-                            somewhere commands can't write, and they can't read it
-    --audit-verify <DIR>    Check the chains and the ledger, report sessions that
-                            were never sealed, exit nonzero if anything was changed
-    --audit-cleanup <DIR>   Remove old sessions (never automatic). Needs one of:
+    --audit-dir <DIR>       Keep a record in DIR: one file per server run. Each
+                            command is recorded before it runs (and doesn't run
+                            if that fails) and again when it ends: the command,
+                            the policy, how it ended; never stdin, output or env
+                            values, and likely secrets in arguments are replaced.
+                            Lines are chained by hash. DIR must be somewhere
+                            commands can't write, and they can't read it
+    --audit-keep-days <N>   Starting a server removes sessions last written more
+                            than N days ago     [default: 30; forever: no limit]
+    --audit-max-size <S>    ...and the oldest until DIR holds no more than S
+                                                [default: 1G; unlimited: no limit]
+    --audit-verify <PATH>   Check the chains of DIR, or of one session file, report
+                            sessions that were never sealed, and exit nonzero if
+                            anything was changed
+    --audit-cleanup <DIR>   Remove old sessions now. Needs one of:
         --keep <N>              keep the N newest
         --older-than <DAYS>     only those older than this
         --max-total-size <S>    oldest first, until DIR is under S
         --dry-run               only say what would go
-                            Running sessions, and any that don't verify, stay
+                            Several have to hold together. Running sessions, and
+                            any that don't verify, stay
 
 OTHER
     --log-io                Also log stdin/stdout/stderr bodies to stderr
@@ -111,6 +117,7 @@ pub struct Config {
     pub host_gid: Option<u32>,
     pub log_io: bool,
     pub audit_dir: Option<PathBuf>,
+    pub audit_retention: crate::audit::Retention,
 }
 
 #[derive(Debug)]
@@ -120,7 +127,7 @@ pub enum Parsed {
     Version,
     CleanTmp,
     AuditVerify(PathBuf),
-    AuditCleanup(PathBuf, crate::audit::CleanupPlan),
+    AuditCleanup(PathBuf, crate::audit::Plan),
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
@@ -137,7 +144,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     };
     let mut workspace = None;
     let mut cleanup_dir: Option<PathBuf> = None;
-    let mut cleanup = crate::audit::CleanupPlan::default();
+    let mut cleanup = crate::audit::Plan::default();
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         // `--flag=value` and `--flag value` both work.
@@ -156,9 +163,25 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
             "-V" | "--version" => return Ok(Parsed::Version),
             "--clean-tmp" => return Ok(Parsed::CleanTmp),
             "--audit-verify" => {
-                return Ok(Parsed::AuditVerify(PathBuf::from(value("a directory")?)));
+                return Ok(Parsed::AuditVerify(PathBuf::from(value(
+                    "a directory or file",
+                )?)));
             }
             "--audit-dir" => cfg.audit_dir = Some(PathBuf::from(value("a directory")?)),
+            "--audit-keep-days" => {
+                let v = value("a number of days, or forever")?;
+                cfg.audit_retention.keep_days = match v.as_str() {
+                    "forever" | "0" => None,
+                    _ => Some(parse_num(&v, "--audit-keep-days")?),
+                };
+            }
+            "--audit-max-size" => {
+                let v = value("a size, or unlimited")?;
+                cfg.audit_retention.max_bytes = match v.as_str() {
+                    "unlimited" | "0" => None,
+                    _ => Some(parse_size(&v)?),
+                };
+            }
             "--audit-cleanup" => cleanup_dir = Some(PathBuf::from(value("a directory")?)),
             "--keep" => cleanup.keep = Some(parse_num(&value("a number")?, "--keep")?),
             "--older-than" => {
@@ -206,6 +229,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
         }
     }
     if let Some(dir) = cleanup_dir {
+        cleanup.verify_first = true;
         return Ok(Parsed::AuditCleanup(dir, cleanup));
     }
     if cleanup.keep.is_some()
@@ -315,7 +339,7 @@ impl Config {
                 ));
             }
         }
-        let session = crate::audit::Session::open(&dir)?;
+        let session = crate::audit::Session::open(&dir, &self.audit_retention)?;
         Ok((dir, std::sync::Arc::new(session)))
     }
 
@@ -626,6 +650,32 @@ mod tests {
             cfg(&["--workspace", "/w", "--audit-dir", "/a/log"]).audit_dir,
             Some(PathBuf::from("/a/log"))
         );
+        let default = cfg(&["--workspace", "/w"]).audit_retention;
+        assert_eq!(default.keep_days, Some(30));
+        assert_eq!(default.max_bytes, Some(1 << 30));
+        let c = cfg(&[
+            "--workspace",
+            "/w",
+            "--audit-keep-days",
+            "7",
+            "--audit-max-size",
+            "200M",
+        ]);
+        assert_eq!(c.audit_retention.keep_days, Some(7));
+        assert_eq!(c.audit_retention.max_bytes, Some(200 << 20));
+        let c = cfg(&[
+            "--workspace",
+            "/w",
+            "--audit-keep-days",
+            "forever",
+            "--audit-max-size",
+            "unlimited",
+        ]);
+        assert_eq!(
+            (c.audit_retention.keep_days, c.audit_retention.max_bytes),
+            (None, None)
+        );
+        assert!(parse(&["--workspace", "/w", "--keep", "3"]).is_err());
         assert!(cfg(&["--workspace", "/w", "--no-cache"]).no_cache);
     }
 

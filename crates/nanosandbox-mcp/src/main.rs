@@ -26,8 +26,8 @@ fn main() {
             );
             return;
         }
-        Ok(config::Parsed::AuditVerify(dir)) => {
-            let report = audit::verify(&dir);
+        Ok(config::Parsed::AuditVerify(path)) => {
+            let report = audit::verify(&path);
             for e in &report.errors {
                 eprintln!("nanosandbox-mcp: {e}");
             }
@@ -35,26 +35,32 @@ fn main() {
                 std::process::exit(1);
             }
             println!(
-                "ok: {} sessions ({} sealed), {} commands, ledger head {}",
-                report.sessions, report.sealed, report.runs, report.ledger_head
+                "ok: {} sessions ({} sealed), {} commands",
+                report.sessions, report.sealed, report.runs
             );
-            for n in &report.notes {
+            for n in report.notes.iter().take(10) {
                 println!("note: {n}");
+            }
+            if report.notes.len() > 10 {
+                println!("note: ... and {} more", report.notes.len() - 10);
             }
             return;
         }
         Ok(config::Parsed::AuditCleanup(dir, plan)) => {
-            match audit::cleanup(&dir, &plan) {
-                Ok(removed) => {
+            match audit::prune(&dir, &plan) {
+                Ok(p) => {
                     let verb = if plan.dry_run {
                         "would remove"
                     } else {
                         "removed"
                     };
-                    for r in &removed {
+                    for r in &p.removed {
                         println!("{verb} {} ({} bytes)", r.session, r.bytes);
                     }
-                    println!("{verb} {} sessions", removed.len());
+                    for u in &p.unverified {
+                        println!("kept {u}: it does not verify (see --audit-verify)");
+                    }
+                    println!("{verb} {} sessions", p.removed.len());
                 }
                 Err(e) => die(&e),
             }
@@ -71,6 +77,13 @@ fn main() {
     // enforce (see nanosandbox's `build()`).
     let (sandbox, audit) = cfg.build().unwrap_or_else(|e| die(&e));
 
+    if let Some(dir) = &cfg.audit_dir {
+        eprintln!(
+            "nanosandbox-mcp: audit: recording to {} ({})",
+            dir.display(),
+            cfg.audit_retention.describe()
+        );
+    }
     eprintln!(
         "nanosandbox-mcp {} ready on {}: {}",
         env!("CARGO_PKG_VERSION"),

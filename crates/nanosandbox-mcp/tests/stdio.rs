@@ -769,14 +769,7 @@ fn the_audit_dir_records_each_command_and_keeps_what_is_private_out() {
     let read = c.run(
         3,
         "sh",
-        &[
-            "-c",
-            &format!(
-                "cat {}/session-* {}/ledger.jsonl",
-                dir.path().display(),
-                dir.path().display()
-            ),
-        ],
+        &["-c", &format!("cat {}/session-*", dir.path().display())],
     );
     assert_ne!(read["exit_code"], 0, "a command read the record: {read}");
     assert!(
@@ -853,31 +846,6 @@ fn a_changed_audit_file_fails_verification() {
     let (code, _, err) = verify_dir(dir.path());
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("changed"), "{err}");
-}
-
-/// A broken ledger stops a new server: it would be adding to a record it
-/// can't vouch for.
-#[test]
-fn a_changed_ledger_blocks_a_new_server() {
-    let ws = workspace();
-    let dir = audit_dir();
-    {
-        let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
-        c.run(1, "echo", &["a"]);
-        drop(c.child.stdin.take());
-        c.child.wait().unwrap();
-    }
-    let ledger = dir.path().join("ledger.jsonl");
-    let text = std::fs::read_to_string(&ledger).unwrap();
-    std::fs::write(&ledger, text.replacen("open", "opem", 1)).unwrap();
-    let (code, err) = refused(&[
-        "--workspace",
-        ws.path().to_str().unwrap(),
-        "--audit-dir",
-        dir.path().to_str().unwrap(),
-    ]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("ledger.jsonl"), "{err}");
 }
 
 /// Where commands can write, they could rewrite their own record.
@@ -958,4 +926,57 @@ fn audit_cleanup_removes_old_sessions_on_request_and_leaves_the_record_sound() {
     let (code, stdout, err) = verify_dir(dir.path());
     assert_eq!(code, Some(0), "{err}");
     assert!(stdout.starts_with("ok: 1 sessions"), "{stdout}");
+}
+
+/// Starting a server removes the sessions past the retention, by default 30
+/// days, and `--audit-keep-days` changes that. A running one is left alone.
+#[test]
+fn a_new_server_removes_sessions_past_the_retention() {
+    let ws = workspace();
+    let dir = audit_dir();
+    let d = dir.path().to_str().unwrap();
+    let made = |ws: &std::path::Path| {
+        let mut c = Client::in_workspace(ws, &["--audit-dir", d]);
+        c.run(1, "echo", &["x"]);
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    made(ws.path());
+    made(ws.path());
+    let files = session_files(dir.path());
+    assert_eq!(files.len(), 2);
+    let aged = |path: &std::path::Path, days: u64| {
+        let when = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    };
+    aged(&files[0], 40);
+    aged(&files[1], 10);
+
+    // With no limit on age, nothing goes.
+    let mut c = Client::in_workspace(
+        ws.path(),
+        &["--audit-dir", d, "--audit-keep-days", "forever"],
+    );
+    c.run(1, "echo", &["y"]);
+    drop(c.child.stdin.take());
+    c.child.wait().unwrap();
+    assert_eq!(session_files(dir.path()).len(), 3);
+
+    // The default is 30 days: the 40-day-old one goes, the 10-day-old stays.
+    let mut c = Client::in_workspace(ws.path(), &["--audit-dir", d]);
+    c.run(1, "echo", &["z"]);
+    let left = session_files(dir.path());
+    assert!(!left.contains(&files[0]), "{left:?}");
+    assert!(left.contains(&files[1]), "{left:?}");
+    drop(c.child.stdin.take());
+    c.child.wait().unwrap();
+    let (code, stdout, err) = verify_dir(dir.path());
+    assert_eq!(code, Some(0), "{err}");
+    assert!(stdout.starts_with("ok: 3 sessions"), "{stdout}");
 }

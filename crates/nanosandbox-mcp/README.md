@@ -60,8 +60,10 @@ is refused.
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
 | `--audit-dir <DIR>` | Record every command in DIR, hash-chained, see [Audit record](#audit-record) | off |
-| `--audit-verify <DIR>` | Check the record and exit | |
-| `--audit-cleanup <DIR>` | Remove old sessions on request: `--keep N`, `--older-than DAYS`, `--max-total-size SIZE`, `--dry-run` | |
+| `--audit-keep-days <N>` | With `--audit-dir`: starting a server removes sessions last written more than N days ago (`forever`: no limit) | 30 |
+| `--audit-max-size <SIZE>` | ...and the oldest until the directory holds no more than SIZE (`unlimited`: no limit) | 1G |
+| `--audit-verify <PATH>` | Check the chains of a directory, or of one session file, and exit | |
+| `--audit-cleanup <DIR>` | Remove old sessions now: `--keep N`, `--older-than DAYS`, `--max-total-size SIZE`, `--dry-run` | |
 | `--clean-tmp` | Remove temp files that killed servers left behind, then exit | |
 
 Run `nanosandbox-mcp --help` for the full text. A limit this platform can't enforce (for example
@@ -141,12 +143,12 @@ Stdin and output are only logged with `--log-io`, since they can contain secrets
 
 ## Audit record
 
-`--audit-dir <DIR>` keeps a record of what the server ran, one file per server run
-(`session-<time>-<pid>.jsonl`) and a small `ledger.jsonl` listing the sessions. For each call:
+`--audit-dir <DIR>` keeps a record of what the server ran: one file per server run,
+`session-<time>-<pid>-<n>.jsonl`, one JSON line per event. For each call:
 
 - a `run_start`, written **before** the command runs: the command and arguments, the policy it runs
   under (network, readable and writable paths, limits, environment variable *names*). If it can't be
-  written, **the command doesn't run**.
+  written, **the command doesn't run**, and none do until the server is restarted.
 - a `run_end` after: exit code, signal, which limit hit, output sizes, blocked hosts.
 
 Not stdin, output or environment values, which can hold secrets. In the arguments, what looks like a
@@ -155,26 +157,35 @@ secret-sounding name) is replaced by `<redacted>`. That's a pattern match, not a
 secrets out of arguments.
 
 Each line holds the SHA-256 of itself and of the line before, so changing, removing or reordering
-one breaks the chain from there on. The ledger notes when a session opens, and when it closes (with
-its length and last hash), so a session file that vanishes, or is cut short after it was sealed, is
-seen. A clean shutdown seals the session; a server that was killed leaves it *unsealed*, and a
-command that was running then shows as started and never ended.
+one breaks the chain from there on. A clean shutdown seals the session; a server that was killed
+leaves it *unsealed*, and a command that was running then shows as started and never ended. Servers
+don't share a file, so any number can record into one directory.
 
 ```
 $ nanosandbox-mcp --audit-verify ~/.local/state/nanosandbox-audit
-ok: 14 sessions (13 sealed), 412 commands, ledger head 51a9d6db...
-note: session-1791...-4242-0.jsonl: unsealed: the server died or was killed (3 commands started, 1 with no end)
+ok: 14 sessions (13 sealed), 412 commands
+note: session-1791...-4242-0.jsonl: unsealed: the server died or was killed ... (3 commands started, 1 with no end)
 ```
 
-What it doesn't show: lines cut off an unsealed session, the ledger's own tail cut off, or the whole
-directory replaced by a new chain. Keep the ledger's `head` somewhere else (another host, a signed
-commit) to close that. Several servers can share one directory. If the record can't be written, no
-more commands run.
+The files are plain JSON lines, so `jq` reads them, for example the commands that failed:
+
+```
+jq -r 'select(.record.kind=="run_end" and .record.end.outcome.exit_code != 0)' DIR/session-*.jsonl
+```
+
+What it doesn't show: a session cut short or deleted by someone with access to the files (a cut-short
+one just reads as unsealed), or a chain replaced by a new one. Keep a session's last hash somewhere
+else if that matters.
 
 The directory has to be somewhere commands can't write (not the workspace, a `--writable` path or
 `/tmp`), or the server refuses to start. Commands can't read it either.
 
-**Nothing is deleted automatically.** The record grows until you remove sessions:
+**It doesn't grow without end.** Starting a server removes sessions last written more than
+`--audit-keep-days` ago (30 by default), then the oldest until the directory is under
+`--audit-max-size` (1G by default), and says so on stderr. It doesn't touch the session it is
+starting, one still running, or one written to in the last few minutes, and it doesn't read any
+session, so starting is as fast with a year of history as with none. Set either to `forever` or
+`unlimited` to turn that limit off. To remove sessions yourself:
 
 ```
 nanosandbox-mcp --audit-cleanup DIR --keep 50              # the 50 newest stay
@@ -183,9 +194,8 @@ nanosandbox-mcp --audit-cleanup DIR --max-total-size 500M  # oldest first, until
 nanosandbox-mcp --audit-cleanup DIR --keep 50 --dry-run    # say what would go
 ```
 
-Given more than one, all hold. A session still running, or one that doesn't verify, is never
-removed. A removal is written to the ledger with the session's length and last hash. Starting a
-server reads only the ledger, however long the history.
+Given more than one, all hold; given none, nothing is removed. A session that doesn't verify is
+left, since it may be the evidence of tampering.
 
 ## Protocol
 

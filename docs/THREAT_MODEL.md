@@ -214,20 +214,21 @@ The start is recorded first, and a run whose start can't be recorded doesn't
 happen, so a command is never executed unrecorded; one that began and never
 ended is the trace of a host that died mid-run. With `nanosandbox-mcp
 --audit-dir` the events go to files, one per server run, each line chained to
-the one before by SHA-256, with a ledger that notes when sessions open, close
-and are removed. That makes the record *tamper-evident against the commands it
-records*: it must be somewhere they can't write, and the server refuses a
-place they could, and denies them reading it.
+the one before by SHA-256. That makes the record *tamper-evident against the
+commands it records*: it must be somewhere they can't write, and the server
+refuses a place they could, and denies them reading it.
 
-It is not tamper-proof against whoever runs the server. They can cut lines off
-the end of a session that was never sealed, cut the ledger's tail, or start a
-new chain, and none of that shows; for that, keep the ledger's last hash
-elsewhere. It records what ran and under which policy, not what the command
-did inside the files it was allowed to write. Secret-looking arguments are
-redacted by pattern, so a secret in an unusual form can get through.
+It is not tamper-proof against whoever runs the server, or has the files.
+They can cut lines off the end of a session, remove a whole session, or start
+a new chain, and a cut-short session just reads as one that was never sealed;
+for more than that, keep a session's last hash elsewhere. It records what ran
+and under which policy, not what the command did inside the files it was
+allowed to write. Secret-looking arguments are redacted by pattern, so a
+secret in an unusual form can get through.
 
-Nothing is deleted except by `--audit-cleanup`, which never touches a running
-session or one that fails to verify.
+Old sessions are removed: by default on starting a server, past 30 days or
+1 GB, and on request by `--audit-cleanup`. Neither touches a running session,
+and `--audit-cleanup` leaves one that fails to verify.
 
 ## What nanosandbox does not protect against, on any platform
 
