@@ -27,6 +27,7 @@
 //! println!("{}", result.stdout);
 //! ```
 
+pub mod audit;
 mod builder;
 pub mod error;
 pub mod network;

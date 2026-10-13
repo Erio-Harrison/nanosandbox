@@ -706,3 +706,133 @@ fn a_read_only_path_inside_the_workspace_stays_read_only() {
         "ok\n"
     );
 }
+
+fn audit_dir() -> tempfile::TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
+fn verify_log(path: &std::path::Path) -> (Option<i32>, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))
+        .args(["--audit-verify", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// Each run is a line; the chain verifies; nothing private is in it; the
+/// commands themselves can't read it.
+#[test]
+fn the_audit_log_records_each_run_and_keeps_what_is_private_out() {
+    let ws = workspace();
+    let dir = audit_dir();
+    let log = dir.path().join("audit.jsonl");
+    let mut c = Client::in_workspace(
+        ws.path(),
+        &[
+            "--audit-log",
+            log.to_str().unwrap(),
+            // The home directory is hidden by default, which would hide the
+            // log too: with it visible, only the log's own protection stops
+            // a read.
+            "--no-hide-home",
+            "--env",
+            "API_KEY=value-that-must-not-leak",
+        ],
+    );
+    let out = c.run(1, "sh", &["-c", "echo first; exit 4"]);
+    assert_eq!(out["exit_code"], 4);
+    let out = c.run(2, "echo", &["second"]);
+    assert_eq!(out["exit_code"], 0);
+    let read = c.run(3, "cat", &[log.to_str().unwrap()]);
+    assert_ne!(read["exit_code"], 0, "a command read the audit log: {read}");
+    assert!(
+        !read["stdout"].as_str().unwrap().contains("first"),
+        "{read}"
+    );
+
+    let (code, stdout, err) = verify_log(&log);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(stdout.starts_with("ok: 3 records"), "{stdout}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("\"exit_code\":4"), "{text}");
+    assert!(text.contains("echo first; exit 4"), "{text}");
+    assert!(text.contains("API_KEY"), "the name is kept: {text}");
+    assert!(!text.contains("value-that-must-not-leak"), "{text}");
+    assert!(
+        !text.contains("\"stdout\""),
+        "no output in a record: {text}"
+    );
+}
+
+#[test]
+fn a_changed_audit_log_fails_verification_and_blocks_a_restart() {
+    let ws = workspace();
+    let dir = audit_dir();
+    let log = dir.path().join("audit.jsonl");
+    {
+        let mut c = Client::in_workspace(ws.path(), &["--audit-log", log.to_str().unwrap()]);
+        c.run(1, "echo", &["a"]);
+        c.run(2, "echo", &["b"]);
+    }
+    assert_eq!(verify_log(&log).0, Some(0));
+    let text = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(&log, text.replacen("\"b\"", "\"c\"", 1)).unwrap();
+    let (code, _, err) = verify_log(&log);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("line 2"), "{err}");
+
+    let (code, err) = refused(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--audit-log",
+        log.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("line 2"), "{err}");
+}
+
+/// Where commands can write, they could rewrite their own record.
+#[test]
+fn the_audit_log_is_refused_where_commands_can_write() {
+    let ws = workspace();
+    let inside = ws.path().join("audit.jsonl");
+    let (code, err) = refused(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--audit-log",
+        inside.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("where commands can write"), "{err}");
+
+    let (code, err) = refused(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--audit-log",
+        "/tmp/nsb-audit-should-not-exist.jsonl",
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(!std::path::Path::new("/tmp/nsb-audit-should-not-exist.jsonl").exists());
+}
+
+#[test]
+fn two_servers_cannot_share_one_audit_log() {
+    let ws = workspace();
+    let dir = audit_dir();
+    let log = dir.path().join("audit.jsonl");
+    let _first = Client::in_workspace(ws.path(), &["--audit-log", log.to_str().unwrap()]);
+    std::thread::sleep(Duration::from_millis(300));
+    let ws2 = workspace();
+    let (code, err) = refused(&[
+        "--workspace",
+        ws2.path().to_str().unwrap(),
+        "--audit-log",
+        log.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(2), "{err}");
+    assert!(err.contains("in use by another server"), "{err}");
+}

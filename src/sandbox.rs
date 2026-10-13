@@ -131,8 +131,13 @@ impl Sandbox {
         args: &[&str],
         stdin: Option<&[u8]>,
     ) -> Result<ExecutionResult> {
-        self.executor
-            .execute(&self.config, cmd, args, stdin, self.proxy.as_ref())
+        let result = self
+            .executor
+            .execute(&self.config, cmd, args, stdin, self.proxy.as_ref());
+        if let Some(hook) = &self.config.audit {
+            crate::audit::record(hook, &self.id, &self.config, cmd, args, stdin, &result);
+        }
+        result
     }
 
     /// Get the sandbox ID

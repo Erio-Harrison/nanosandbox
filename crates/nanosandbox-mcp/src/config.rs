@@ -62,6 +62,15 @@ LINUX ONLY
     --host-uid <UID>        When run as root, run commands as this host user
     --host-gid <GID>        instead of nobody
 
+AUDIT
+    --audit-log <FILE>      Append one line per run: the command, the policy it ran
+                            under, how it ended; never stdin, output or env
+                            values. Each line is chained to the one before by a
+                            hash. The file must be somewhere commands can't write,
+                            and they can't read it
+    --audit-verify <FILE>   Check that chain, print its record count and last
+                            hash, then exit (nonzero if it's broken)
+
 OTHER
     --log-io                Also log stdin/stdout/stderr bodies to stderr
     --clean-tmp             Remove private temp directories that killed
@@ -93,6 +102,7 @@ pub struct Config {
     pub host_uid: Option<u32>,
     pub host_gid: Option<u32>,
     pub log_io: bool,
+    pub audit_log: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -101,6 +111,7 @@ pub enum Parsed {
     Help,
     Version,
     CleanTmp,
+    AuditVerify(PathBuf),
 }
 
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, String> {
@@ -133,6 +144,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
             "-h" | "--help" => return Ok(Parsed::Help),
             "-V" | "--version" => return Ok(Parsed::Version),
             "--clean-tmp" => return Ok(Parsed::CleanTmp),
+            "--audit-verify" => {
+                return Ok(Parsed::AuditVerify(PathBuf::from(value("a file")?)));
+            }
+            "--audit-log" => cfg.audit_log = Some(PathBuf::from(value("a file")?)),
             "--workspace" => workspace = Some(PathBuf::from(value("a directory")?)),
             "--read-only" => cfg.read_only.push(PathBuf::from(value("a path")?)),
             "--writable" => cfg.writable.push(PathBuf::from(value("a path")?)),
@@ -217,6 +232,56 @@ fn parse_size(s: &str) -> Result<u64, String> {
 }
 
 impl Config {
+    /// Opens `--audit-log`, refusing a place the commands could write: they
+    /// could then rewrite their own record.
+    fn open_audit_log(
+        &self,
+        path: &Path,
+        workspace: &Path,
+    ) -> Result<std::sync::Arc<crate::audit::ChainedLog>, String> {
+        let log_path = match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) => {
+                let dir = if dir.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    dir
+                };
+                dir.canonicalize()
+                    .map_err(|e| format!("--audit-log {}: {e}", path.display()))?
+                    .join(name)
+            }
+            _ => return Err(format!("--audit-log {} is not a file path", path.display())),
+        };
+        let shared_temp = [
+            "/tmp",
+            "/private/tmp",
+            "/var/tmp",
+            "/private/var/tmp",
+            "/dev/shm",
+            "/var/folders",
+            "/private/var/folders",
+        ]
+        .map(PathBuf::from);
+        let roots = std::iter::once(workspace.to_path_buf())
+            .chain(self.writable.iter().filter_map(|p| p.canonicalize().ok()))
+            .chain(shared_temp)
+            .chain(std::iter::once(std::env::temp_dir()));
+        for root in roots {
+            let root = root.canonicalize().unwrap_or(root);
+            if log_path.starts_with(&root) {
+                return Err(format!(
+                    "--audit-log {} is inside {}, where commands can write: they could change \
+                     their own record. Put it somewhere else",
+                    path.display(),
+                    root.display()
+                ));
+            }
+        }
+        Ok(std::sync::Arc::new(crate::audit::ChainedLog::open(
+            &log_path,
+        )?))
+    }
+
     pub fn build(&self) -> Result<Sandbox, String> {
         let workspace = self
             .workspace
@@ -229,6 +294,10 @@ impl Config {
                     self.workspace.display()
                 )
             })?;
+        let audit = match &self.audit_log {
+            Some(path) => Some((path, self.open_audit_log(path, &workspace)?)),
+            None => None,
+        };
         let mut b: SandboxBuilder = Sandbox::builder()
             .working_dir(&workspace)
             .writable(&workspace)
@@ -260,6 +329,10 @@ impl Config {
         }
         if let Some(n) = self.max_output {
             b = b.max_output(n);
+        }
+        if let Some((path, log)) = audit {
+            // Commands can't read what they ran or were allowed to do.
+            b = b.deny_read(path).audit(log);
         }
         for (k, v) in &self.env {
             b = b.env(k, v);
@@ -506,6 +579,13 @@ mod tests {
     fn the_download_cache_is_on_unless_turned_off() {
         assert!(!cfg(&["--workspace", "/w"]).no_cache);
         assert!(matches!(parse(&["--clean-tmp"]).unwrap(), Parsed::CleanTmp));
+        assert!(
+            matches!(parse(&["--audit-verify", "/x"]).unwrap(), Parsed::AuditVerify(p) if p == Path::new("/x"))
+        );
+        assert_eq!(
+            cfg(&["--workspace", "/w", "--audit-log", "/a/log"]).audit_log,
+            Some(PathBuf::from("/a/log"))
+        );
         assert!(cfg(&["--workspace", "/w", "--no-cache"]).no_cache);
     }
 

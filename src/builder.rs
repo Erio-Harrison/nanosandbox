@@ -92,6 +92,9 @@ pub(crate) struct SandboxConfig {
     pub(crate) env: HashMap<String, String>,
     pub(crate) clear_env: bool,
     pub(crate) hostname: String,
+
+    /// [`SandboxBuilder::audit`].
+    pub(crate) audit: Option<crate::audit::AuditHook>,
 }
 
 impl Default for SandboxConfig {
@@ -127,6 +130,7 @@ impl Default for SandboxConfig {
             env: HashMap::new(),
             clear_env: true,
             hostname: "sandbox".into(),
+            audit: None,
         }
     }
 }
@@ -234,6 +238,14 @@ impl SandboxBuilder {
     #[cfg(target_os = "macos")]
     pub fn shared_tmp(mut self, shared: bool) -> Self {
         self.config.shared_tmp = shared;
+        self
+    }
+
+    /// Hand one [`AuditEvent`](crate::audit::AuditEvent) to `sink` after each
+    /// run: what ran, under which policy, how it ended. No data from the run
+    /// itself is in it; see [`audit`](crate::audit).
+    pub fn audit(mut self, sink: std::sync::Arc<dyn crate::audit::AuditSink>) -> Self {
+        self.config.audit = Some(crate::audit::AuditHook(sink));
         self
     }
 

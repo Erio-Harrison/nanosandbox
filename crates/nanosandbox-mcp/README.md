@@ -59,6 +59,9 @@ is refused.
 | `--strict-tmp` | macOS only: make `/tmp` and the other system temp directories read-only; commands get a private `$TMPDIR`. Breaks `/tmp` by name, `mktemp -t` and `/usr/bin/clang`/`cc`; see [platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse) | off |
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
+| `--audit-log <FILE>` | Append one line per run to a hash-chained log, see [Audit log](#audit-log) | off |
+| `--audit-verify <FILE>` | Check that log's chain and exit | |
+| `--clean-tmp` | Remove temp files that killed servers left behind, then exit | |
 
 Run `nanosandbox-mcp --help` for the full text. A limit this platform can't enforce (for example
 `--max-pids` on macOS) makes the server refuse to start, rather than run without it.
@@ -134,6 +137,28 @@ command runs until it ends or hits the time limit.
 
 One line per call goes to stderr (command, exit code, duration, which limit hit, blocked hosts).
 Stdin and output are only logged with `--log-io`, since they can contain secrets.
+
+## Audit log
+
+`--audit-log <FILE>` appends one line per call: the command and arguments, the policy it ran under
+(network, readable and writable paths, limits, environment variable *names*), and how it ended (exit
+code, signal, which limit hit, output sizes, blocked hosts). Not stdin, output or environment values,
+which can hold secrets. Arguments are kept as given, so keep secrets out of them.
+
+Each line holds the SHA-256 of itself and of the line before, so changing, removing or reordering a
+line breaks the chain from there on:
+
+```
+nanosandbox-mcp --audit-verify audit.jsonl
+ok: 412 records, head 51a9d6db...
+```
+
+What it doesn't show: lines cut off the end, or the file replaced by a new chain. Keep the `head`
+somewhere else (another host, a signed commit) to close that. The server won't start on a broken
+log, and one server holds the file at a time.
+
+The file has to be somewhere commands can't write (not the workspace, a `--writable` path or `/tmp`),
+or the server refuses to start. Commands can't read it either.
 
 ## Protocol
 

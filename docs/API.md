@@ -295,6 +295,23 @@ Keep at most `bytes` of stdout, and as much of stderr: by default
 Past the limit it's still read, so the program runs on, but dropped, and
 `ExecutionResult::output_truncated` is set.
 
+### Audit
+
+```rust
+pub fn audit(self, sink: Arc<dyn AuditSink>) -> Self
+```
+
+After each `run`, hand one `AuditEvent` to `sink`, on the thread that ran it:
+the command and arguments, the policy (network, paths, limits, environment
+variable names), and the outcome (exit code, signal, limits hit, output
+sizes, blocked hosts, or the error if it never ran). No data from the run is in
+it: not stdin, not output, not environment values. Events are `Serialize`, with
+integer fields only. The sink may be called from several threads, and a panic
+in it loses that event, not the result.
+
+Keeping the events, and keeping them tamper-evident, is the sink's job.
+`nanosandbox-mcp --audit-log` writes a hash chain.
+
 ### Environment
 
 ```rust

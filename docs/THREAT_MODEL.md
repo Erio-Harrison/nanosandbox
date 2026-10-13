@@ -207,6 +207,19 @@ account can, and reach the network freely. Do not run untrusted code
 through nanosandbox on Windows and expect filesystem or network
 containment -- there isn't any.
 
+## The audit trail
+
+`SandboxBuilder::audit` hands a sink one event per run. With
+`nanosandbox-mcp --audit-log` the events go to a file, each line chained to
+the one before by SHA-256. That makes the file *tamper-evident against the
+commands it records*: it must be somewhere they can't write, and the server
+refuses a path they could, and denies them reading it.
+
+It is not tamper-proof against whoever runs the server. They can cut lines off
+the end or start a new chain, and neither shows; that needs the last hash kept
+elsewhere. It records what ran and under which policy, not what the command
+did inside the files it was allowed to write.
+
 ## What nanosandbox does not protect against, on any platform
 
 - **A kernel vulnerability in the isolation mechanism itself.** Namespace,

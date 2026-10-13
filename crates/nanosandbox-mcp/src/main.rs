@@ -1,3 +1,4 @@
+mod audit;
 mod config;
 mod protocol;
 
@@ -23,6 +24,16 @@ fn main() {
                 "removed {} leftover temp directories",
                 nanosandbox::clean_stale_tmp()
             );
+            return;
+        }
+        Ok(config::Parsed::AuditVerify(path)) => {
+            match audit::verify(&path) {
+                Ok(v) => println!("ok: {} records, head {}", v.records, v.head),
+                Err(e) => {
+                    eprintln!("nanosandbox-mcp: {e}");
+                    std::process::exit(1);
+                }
+            }
             return;
         }
         Err(e) => die(&e),
