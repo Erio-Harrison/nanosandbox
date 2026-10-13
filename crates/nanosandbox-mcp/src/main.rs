@@ -98,7 +98,14 @@ fn main() {
         cfg.log_io,
     ));
     for line in std::io::stdin().lock().lines() {
-        let Ok(line) = line else { break };
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                // End of input is Ok(None), not an error: say what this was.
+                eprintln!("nanosandbox-mcp: could not read stdin: {e}; exiting");
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }

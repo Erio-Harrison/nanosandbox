@@ -342,3 +342,30 @@ fn test_sigpipe_default() {
 // tests/integration/error_handling.rs, which asserts the actual public
 // contract (Err(SandboxError::CommandNotFound), not Ok() with exit 127 --
 // that was itself the bug this file's version of the test used to assert).
+
+/// With no stdin given, the command gets /dev/null, not this process's own
+/// stdin: it could otherwise read it, and a flag it set on it (node puts
+/// its stdin in non-blocking mode) would apply to this process's reads too,
+/// since they share the open file description.
+#[test]
+#[cfg(unix)]
+fn test_the_command_does_not_get_the_hosts_stdin() {
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let out = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "python3 -c \"import os; a = os.fstat(0); b = os.stat('/dev/null'); \
+                 print('devnull' if a.st_rdev and a.st_rdev == b.st_rdev else 'not')\"; \
+                 python3 -c 'import fcntl, os; fcntl.fcntl(0, fcntl.F_SETFL, os.O_NONBLOCK)'",
+            ],
+        )
+        .unwrap();
+    assert_eq!(out.stdout.trim(), "devnull", "{out:?}");
+    let flags = unsafe { libc::fcntl(0, libc::F_GETFL) };
+    assert!(
+        flags < 0 || flags & libc::O_NONBLOCK == 0,
+        "the host's stdin was put in non-blocking mode"
+    );
+}

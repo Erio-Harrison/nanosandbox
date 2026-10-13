@@ -129,13 +129,27 @@ impl ChildSetup {
             return 1;
         }
 
-        // Setup stdin
+        // Setup stdin. With none given, /dev/null: not this process's own
+        // stdin, which the command would otherwise inherit and could read
+        // (an MCP server's is its client's request stream), and whose open
+        // file description it shares, so an O_NONBLOCK it sets there (node
+        // does, on its stdin) made the host's own reads fail with EAGAIN.
+        // Confirmed for real: an `npm install` that timed out took the
+        // server down with it.
         if let Some(stdin_fd) = self.stdin_read {
             if unsafe { libc::dup2(stdin_fd, libc::STDIN_FILENO) } < 0 {
                 let _ = write_raw(2, b"Failed to redirect stdin\n");
                 return 1;
             }
             let _ = close_raw(stdin_fd);
+        } else {
+            let null =
+                unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            if null < 0 || unsafe { libc::dup2(null, libc::STDIN_FILENO) } < 0 {
+                let _ = write_raw(2, b"Failed to redirect stdin\n");
+                return 1;
+            }
+            let _ = close_raw(null);
         }
         // clone() inherited our copy of the write end too. It's
         // close-on-exec, but close it now anyway: we never write to it.

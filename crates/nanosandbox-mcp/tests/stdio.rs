@@ -1032,3 +1032,26 @@ fn a_command_cannot_reach_the_audit_dir_by_swapping_its_workspace_for_a_symlink(
         assert!(stdout.starts_with("ok: 1 sessions"), "{stdout}");
     }
 }
+
+/// What an `npm install` that hit the time limit did to the server on
+/// Linux: node sets O_NONBLOCK on its stdin, which was the server's own, so
+/// the server's next read failed and it exited. The command gets /dev/null.
+#[test]
+fn a_command_cannot_touch_the_servers_stdin() {
+    let ws = workspace();
+    let mut c = Client::in_workspace(ws.path(), &[]);
+    let out = c.run(
+        1,
+        "sh",
+        &[
+            "-c",
+            "python3 -c \"import os; a = os.fstat(0); b = os.stat('/dev/null'); \
+             print('devnull' if a.st_rdev and a.st_rdev == b.st_rdev else 'not')\"; \
+             python3 -c 'import fcntl, os; fcntl.fcntl(0, fcntl.F_SETFL, os.O_NONBLOCK)'; \
+             head -c 10 /dev/stdin",
+        ],
+    );
+    assert_eq!(out["stdout"].as_str().unwrap().trim(), "devnull", "{out}");
+    let again = c.run(2, "echo", &["alive"]);
+    assert_eq!(again["stdout"], "alive\n", "the server died after a command touched its stdin");
+}
