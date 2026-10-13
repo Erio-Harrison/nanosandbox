@@ -93,8 +93,14 @@ impl MacOSExecutor {
                     .map(|m| m.source.clone()),
             )
             .chain(private_tmp.map(Path::to_path_buf));
+        // From where the paths led when the sandbox was built, not from where
+        // they lead now: a command could have swapped one for a symlink.
+        let resolve = |path: &Path| match config.pinned_path(path) {
+            Some(real) => real.to_path_buf(),
+            None => canonical_path(path),
+        };
         for path in candidates {
-            let root = canonical_path(&path);
+            let root = resolve(&path);
             if !roots.contains(&root) {
                 roots.push(root);
             }
@@ -111,6 +117,36 @@ impl MacOSExecutor {
         }
         sections.push(write_rules);
 
+        // The writable roots the configuration names, and every directory
+        // above them, can't be removed or renamed. A root is inside its own
+        // `subpath` rule, so without this a command could delete the
+        // workspace, or move it aside, even where nothing above it is
+        // writable, and put in its place a symlink to somewhere it can't
+        // write.
+        let mut fixed: Vec<PathBuf> = Vec::new();
+        for m in config
+            .mounts
+            .iter()
+            .filter(|m| m.permission == Permission::ReadWrite)
+        {
+            for dir in resolve(&m.source).ancestors() {
+                if dir != Path::new("/") && !fixed.iter().any(|f| f == dir) {
+                    fixed.push(dir.to_path_buf());
+                }
+            }
+        }
+        if !fixed.is_empty() {
+            let mut rules = String::from("; the writable roots stay where they are\n");
+            for (i, dir) in fixed.iter().enumerate() {
+                let key = format!("FIXED_ROOT_{i}");
+                rules.push_str(&format!(
+                    "(deny file-write-unlink (literal (param \"{key}\")))\n"
+                ));
+                params.push((key, dir.to_string_lossy().into_owned()));
+            }
+            sections.push(rules);
+        }
+
         // A read_only path inside a writable root takes writing away again,
         // as on Linux (where it's a read-only mount). The later deny wins.
         // Moving a directory above it away would take the path with it, and
@@ -125,7 +161,7 @@ impl MacOSExecutor {
             .iter()
             .filter(|m| m.permission == Permission::ReadOnly)
         {
-            let path = canonical_path(&m.target);
+            let path = resolve(&m.target);
             if !roots.iter().any(|r| path != *r && path.starts_with(r)) {
                 continue;
             }

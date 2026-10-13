@@ -18,6 +18,9 @@ mod read_rules;
 #[path = "security/read_only_inside_writable.rs"]
 mod read_only_inside_writable;
 
+#[path = "security/workspace_swap.rs"]
+mod workspace_swap;
+
 #[cfg(target_os = "linux")]
 #[path = "security/syscall_filter.rs"]
 mod syscall_filter;

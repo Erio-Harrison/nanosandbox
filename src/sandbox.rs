@@ -62,11 +62,15 @@ impl Sandbox {
 
     /// Create a sandbox from a builder
     pub(crate) fn from_builder(builder: SandboxBuilder) -> Result<Self> {
-        let config = builder.into_config();
+        let mut config = builder.into_config();
         let executor = get_executor();
 
         // Validate platform support for this configuration
         executor.check_support(&config)?;
+
+        // Where the paths it names lead, fixed now: see `SandboxConfig::pin`.
+        #[cfg(unix)]
+        config.pin();
 
         // Start the proxy once, after platform support is confirmed, so it is
         // not spun up only to be discarded by a check_support() failure.
@@ -134,6 +138,8 @@ impl Sandbox {
         args: &[&str],
         stdin: Option<&[u8]>,
     ) -> Result<ExecutionResult> {
+        #[cfg(unix)]
+        self.config.check_pinned()?;
         let run = self.runs.fetch_add(1, Ordering::SeqCst);
         if let Some(hook) = &self.config.audit {
             crate::audit::begin(hook, &self.id, run, &self.config, cmd, args, stdin)?;

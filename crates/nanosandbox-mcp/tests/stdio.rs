@@ -980,3 +980,55 @@ fn a_new_server_removes_sessions_past_the_retention() {
     assert_eq!(code, Some(0), "{err}");
     assert!(stdout.starts_with("ok: 3 sessions"), "{stdout}");
 }
+
+/// How an agent got into the audit directory: delete its own workspace, put
+/// a symlink to the directory in its place, and write through the path on the
+/// next call. Once with the workspace in a directory commands can't write,
+/// once in one they can.
+#[test]
+fn a_command_cannot_reach_the_audit_dir_by_swapping_its_workspace_for_a_symlink() {
+    for writable_parent in [false, true] {
+        let outer = audit_dir();
+        let root = outer.path().canonicalize().unwrap();
+        let parent = root.join("parent");
+        let ws = parent.join("ws");
+        let dir = root.join("audit");
+        std::fs::create_dir_all(&ws).unwrap();
+        let parent_arg = parent.to_str().unwrap().to_string();
+        let mut args = vec!["--audit-dir", dir.to_str().unwrap(), "--no-hide-home"];
+        if writable_parent {
+            args.extend(["--writable", &parent_arg]);
+        }
+        let mut c = Client::in_workspace(&ws, &args);
+        let d = dir.display();
+        let w = ws.display();
+        c.run(
+            1,
+            "sh",
+            &["-c", &format!("rm -rf {w}; mv {w} {w}.bak; ln -s {d} {w}")],
+        );
+        c.run(
+            2,
+            "sh",
+            &[
+                "-c",
+                &format!("echo FORGED > {w}/session-forged.jsonl; rm -f {w}/session-*.jsonl"),
+            ],
+        );
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
+        let names: Vec<_> = session_files(&dir)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "writable_parent={writable_parent}: {names:?}"
+        );
+        assert!(!names[0].contains("forged"), "{names:?}");
+        let (code, stdout, err) = verify_dir(&dir);
+        assert_eq!(code, Some(0), "writable_parent={writable_parent}: {err}");
+        assert!(stdout.starts_with("ok: 1 sessions"), "{stdout}");
+    }
+}

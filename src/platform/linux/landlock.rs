@@ -115,8 +115,71 @@ pub(crate) fn check(config: &SandboxConfig) -> Result<()> {
 /// only applies them.
 pub(crate) struct WriteRules {
     handled: u64,
-    /// (path, rights to grant beneath it)
-    paths: Vec<(CString, u64)>,
+    /// (where, rights to grant beneath it)
+    paths: Vec<(Target, u64)>,
+}
+
+/// Where a rule is attached.
+enum Target {
+    /// Opened by the child, by path.
+    Path(CString),
+    /// Opened here, in the parent, and checked to be where the sandbox was
+    /// built to put it. The rule goes on what this holds, so nothing done to
+    /// the path after it was checked can move it. Whether it is a directory
+    /// is found here too: the child can't ask, since `fstat` on a descriptor
+    /// it inherited can be refused there (AppArmor re-checks it).
+    Fd(std::os::fd::OwnedFd, bool),
+}
+
+/// Opens `given`, and refuses it unless it is the place `real` that it led
+/// to when the sandbox was built. A writable directory, or one above it,
+/// that a command swapped for a symlink would otherwise be followed, and the
+/// place it led to granted as the writable one. Checking the descriptor,
+/// not the path, leaves no gap between the check and the rule.
+fn open_checked(given: &Path, real: &Path) -> Result<(std::os::fd::OwnedFd, bool)> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let c = CString::new(given.as_os_str().as_bytes()).map_err(|e| SandboxError::Config {
+        context: format!("path contains NUL: {}", given.display()),
+        source: Some(Box::new(e)),
+    })?;
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(SandboxError::Config {
+            context: format!(
+                "{} is no longer there ({}); not running",
+                given.display(),
+                std::io::Error::last_os_error()
+            ),
+            source: None,
+        });
+    }
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+    match std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd())) {
+        Ok(now) if now == real => {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let is_dir = unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0
+                && st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+            Ok((fd, is_dir))
+        }
+        Ok(now) => Err(SandboxError::Config {
+            context: format!(
+                "{} led to {} when the sandbox was built and now leads to {}: it, or a \
+                 directory above it, was replaced. Not running; build the sandbox (or restart \
+                 the server) again to use the new one",
+                given.display(),
+                real.display(),
+                now.display()
+            ),
+            source: None,
+        }),
+        Err(e) => Err(SandboxError::Config {
+            context: format!(
+                "could not check where {} leads ({e}); not running",
+                given.display()
+            ),
+            source: None,
+        }),
+    }
 }
 
 impl WriteRules {
@@ -162,16 +225,33 @@ impl WriteRules {
                 source: Some(Box::new(e)),
             })
         };
-        let mut paths = vec![(c"/dev".to_owned(), handled & FILE_RIGHTS)];
+        let mut paths = vec![(Target::Path(c"/dev".to_owned()), handled & FILE_RIGHTS)];
+        // A directory the caller named is held by descriptor, checked here.
+        // Not the system's own (/tmp, /var/tmp, /dev/shm) or a tmpfs: the
+        // child may mount a fresh one over them, and the rule has to go on
+        // what it sees there, which is only known once it has.
+        let named = |area: &Path| {
+            config.mounts.iter().any(|m| {
+                m.permission == Permission::ReadWrite && m.source == m.target && m.target == area
+            }) && !DEFAULT_WRITABLE.iter().any(|d| Path::new(d) == area)
+                && !config.tmpfs_mounts.iter().any(|(t, _)| t == area)
+        };
         for area in writable_areas(config).chain(private_tmp) {
-            paths.push((path(area)?, handled));
+            let target = match config.pinned_path(area) {
+                Some(real) if named(area) => {
+                    let (fd, is_dir) = open_checked(area, real)?;
+                    Target::Fd(fd, is_dir)
+                }
+                _ => Target::Path(path(area)?),
+            };
+            paths.push((target, handled));
         }
         if read != 0 {
             let readable = read_rules::allowed_roots(&denied)
                 .into_iter()
                 .chain(read_rules::granted(config, &denied));
             for p in readable {
-                paths.push((path(&p)?, read));
+                paths.push((Target::Path(path(&p)?), read));
             }
         }
         Ok(Some(Self { handled, paths }))
@@ -193,27 +273,41 @@ impl WriteRules {
             if ruleset < 0 {
                 return Err("create ruleset");
             }
-            for (path, rights) in &self.paths {
-                let fd = libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
-                if fd < 0 {
-                    // /var/tmp or /dev/shm may not exist on this system, and
-                    // what this process can't reach it can't use anyway.
-                    if matches!(*libc::__errno_location(), libc::ENOENT | libc::EACCES) {
-                        continue;
+            for (target, rights) in &self.paths {
+                let (fd, ours, known_dir) = match target {
+                    Target::Fd(fd, is_dir) => {
+                        (std::os::fd::AsRawFd::as_raw_fd(fd), false, Some(*is_dir))
                     }
-                    libc::close(ruleset);
-                    return Err("open a writable path");
-                }
-                let mut st: libc::stat = std::mem::zeroed();
-                let is_dir =
-                    libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFDIR;
+                    Target::Path(path) => {
+                        let fd = libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
+                        if fd < 0 {
+                            // /var/tmp or /dev/shm may not exist on this system, and
+                            // what this process can't reach it can't use anyway.
+                            if matches!(*libc::__errno_location(), libc::ENOENT | libc::EACCES) {
+                                continue;
+                            }
+                            libc::close(ruleset);
+                            return Err("open a writable path");
+                        }
+                        (fd, true, None)
+                    }
+                };
+                let is_dir = match known_dir {
+                    Some(is_dir) => is_dir,
+                    None => {
+                        let mut st: libc::stat = std::mem::zeroed();
+                        libc::fstat(fd, &mut st) == 0 && st.st_mode & libc::S_IFMT == libc::S_IFDIR
+                    }
+                };
                 let allowed = if is_dir {
                     *rights
                 } else {
                     rights & FILE_RIGHTS
                 };
                 if allowed == 0 {
-                    libc::close(fd);
+                    if ours {
+                        libc::close(fd);
+                    }
                     continue;
                 }
                 let rule = PathBeneathAttr {
@@ -227,7 +321,9 @@ impl WriteRules {
                     &rule as *const PathBeneathAttr,
                     0u32,
                 );
-                libc::close(fd);
+                if ours {
+                    libc::close(fd);
+                }
                 if added != 0 {
                     libc::close(ruleset);
                     return Err("add a rule");

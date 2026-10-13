@@ -95,6 +95,85 @@ pub(crate) struct SandboxConfig {
 
     /// [`SandboxBuilder::audit`].
     pub(crate) audit: Option<crate::audit::AuditHook>,
+
+    /// The paths the configuration names, each with where it resolved to
+    /// when the sandbox was built. See [`SandboxConfig::pin`].
+    pub(crate) pinned: Vec<(PathBuf, PathBuf)>,
+}
+
+impl SandboxConfig {
+    /// Resolves, once, what the configuration names: where each path leads
+    /// through symlinks. The rules a run is given are made from these, not
+    /// from the file system as it is by then, and [`check_pinned`] refuses a
+    /// run if one has since moved.
+    ///
+    /// Without it, a command could swap the sandbox's own writable
+    /// directory, or one above it, for a symlink to somewhere it may not
+    /// write: the next run would resolve the path through the link, and
+    /// grant that place as the writable one.
+    ///
+    /// [`check_pinned`]: SandboxConfig::check_pinned
+    #[cfg(unix)]
+    pub(crate) fn pin(&mut self) {
+        let named = self
+            .mounts
+            .iter()
+            .filter(|m| m.source == m.target)
+            .map(|m| m.target.clone())
+            .chain(std::iter::once(self.working_dir.clone()))
+            .chain(self.deny_read.iter().cloned());
+        let mut pinned: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for path in named {
+            if pinned.iter().all(|(given, _)| *given != path)
+                && let Ok(real) = path.canonicalize()
+            {
+                pinned.push((path, real));
+            }
+        }
+        self.pinned = pinned;
+    }
+
+    /// Where `path` led when the sandbox was built, if it was named then.
+    pub(crate) fn pinned_path(&self, path: &Path) -> Option<&Path> {
+        self.pinned
+            .iter()
+            .find(|(given, _)| given == path)
+            .map(|(_, real)| real.as_path())
+    }
+
+    /// Refuses a run if a named path no longer leads where it did: it, or a
+    /// directory above it, was replaced, which a command may have done.
+    #[cfg(unix)]
+    pub(crate) fn check_pinned(&self) -> Result<()> {
+        for (given, was) in &self.pinned {
+            match given.canonicalize() {
+                Ok(now) if now == *was => {}
+                Ok(now) => {
+                    return Err(SandboxError::Config {
+                        context: format!(
+                            "{} led to {} when the sandbox was built and now leads to {}: it, or a \
+                             directory above it, was replaced. Not running; build the sandbox (or \
+                             restart the server) again to use the new one",
+                            given.display(),
+                            was.display(),
+                            now.display()
+                        ),
+                        source: None,
+                    });
+                }
+                Err(e) => {
+                    return Err(SandboxError::Config {
+                        context: format!(
+                            "{} is no longer there ({e}); not running",
+                            given.display()
+                        ),
+                        source: None,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for SandboxConfig {
@@ -131,6 +210,7 @@ impl Default for SandboxConfig {
             clear_env: true,
             hostname: "sandbox".into(),
             audit: None,
+            pinned: Vec::new(),
         }
     }
 }
