@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "libc",
  "nix",
@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox-mcp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "libc",
  "nanosandbox",

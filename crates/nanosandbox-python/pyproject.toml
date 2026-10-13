@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nanosandbox"
-version = "0.3.1"
+version = "0.3.2"
 description = "Lightweight cross-platform sandbox for secure code execution"
 license = { text = "MIT" }
 requires-python = ">=3.8"
