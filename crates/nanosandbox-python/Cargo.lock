@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "libc",
  "nix",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox_python"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "nanosandbox",
  "pyo3",
