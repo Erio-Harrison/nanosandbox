@@ -711,9 +711,9 @@ fn audit_dir() -> tempfile::TempDir {
     tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
 }
 
-fn verify_log(path: &std::path::Path) -> (Option<i32>, String, String) {
+fn audit_cmd(args: &[&str]) -> (Option<i32>, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))
-        .args(["--audit-verify", path.to_str().unwrap()])
+        .args(args)
         .output()
         .unwrap();
     (
@@ -723,21 +723,41 @@ fn verify_log(path: &std::path::Path) -> (Option<i32>, String, String) {
     )
 }
 
-/// Each run is a line; the chain verifies; nothing private is in it; the
-/// commands themselves can't read it.
+fn verify_dir(dir: &std::path::Path) -> (Option<i32>, String, String) {
+    audit_cmd(&["--audit-verify", dir.to_str().unwrap()])
+}
+
+fn session_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("session-")
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Each command is a start and an end; the chain verifies; the session is
+/// sealed when the client goes away; nothing private is in it; the commands
+/// themselves can't read it.
 #[test]
-fn the_audit_log_records_each_run_and_keeps_what_is_private_out() {
+fn the_audit_dir_records_each_command_and_keeps_what_is_private_out() {
     let ws = workspace();
     let dir = audit_dir();
-    let log = dir.path().join("audit.jsonl");
     let mut c = Client::in_workspace(
         ws.path(),
         &[
-            "--audit-log",
-            log.to_str().unwrap(),
+            "--audit-dir",
+            dir.path().to_str().unwrap(),
             // The home directory is hidden by default, which would hide the
-            // log too: with it visible, only the log's own protection stops
-            // a read.
+            // record too: with it visible, only its own protection stops a
+            // read.
             "--no-hide-home",
             "--env",
             "API_KEY=value-that-must-not-leak",
@@ -745,94 +765,197 @@ fn the_audit_log_records_each_run_and_keeps_what_is_private_out() {
     );
     let out = c.run(1, "sh", &["-c", "echo first; exit 4"]);
     assert_eq!(out["exit_code"], 4);
-    let out = c.run(2, "echo", &["second"]);
-    assert_eq!(out["exit_code"], 0);
-    let read = c.run(3, "cat", &[log.to_str().unwrap()]);
-    assert_ne!(read["exit_code"], 0, "a command read the audit log: {read}");
+    c.run(2, "curl", &["--token=tok-live-999", "http://localhost:1"]);
+    let read = c.run(
+        3,
+        "sh",
+        &[
+            "-c",
+            &format!(
+                "cat {}/session-* {}/ledger.jsonl",
+                dir.path().display(),
+                dir.path().display()
+            ),
+        ],
+    );
+    assert_ne!(read["exit_code"], 0, "a command read the record: {read}");
     assert!(
         !read["stdout"].as_str().unwrap().contains("first"),
         "{read}"
     );
 
-    let (code, stdout, err) = verify_log(&log);
+    drop(c.child.stdin.take());
+    assert!(c.child.wait().unwrap().success());
+
+    let (code, stdout, err) = verify_dir(dir.path());
     assert_eq!(code, Some(0), "{err}");
-    assert!(stdout.starts_with("ok: 3 records"), "{stdout}");
-    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        stdout.starts_with("ok: 1 sessions (1 sealed), 3 commands"),
+        "{stdout}"
+    );
+    let text = std::fs::read_to_string(&session_files(dir.path())[0]).unwrap();
     assert!(text.contains("\"exit_code\":4"), "{text}");
     assert!(text.contains("echo first; exit 4"), "{text}");
     assert!(text.contains("API_KEY"), "the name is kept: {text}");
     assert!(!text.contains("value-that-must-not-leak"), "{text}");
-    assert!(
-        !text.contains("\"stdout\""),
-        "no output in a record: {text}"
+    assert!(!text.contains("tok-live-999"), "{text}");
+    assert!(text.contains("<redacted>"), "{text}");
+    assert!(text.contains("session_end"), "{text}");
+}
+
+/// The server killed while a command runs: the record shows it started, and
+/// never ended, and that the session was never sealed.
+#[test]
+fn a_server_killed_mid_command_leaves_the_command_started_and_not_ended() {
+    let ws = workspace();
+    let dir = audit_dir();
+    let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
+    c.run(1, "echo", &["fine"]);
+    c.send(
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":
+        {"name":"run_command","arguments":{"command":"sleep","args":["31234"]}}}),
     );
+    // Wait until the sleep's start is on disk.
+    let file = session_files(dir.path())[0].clone();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(&file).unwrap().contains("31234") {
+        assert!(Instant::now() < deadline, "the start was never written");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    c.child.kill().unwrap();
+    c.child.wait().unwrap();
+
+    let (code, stdout, err) = verify_dir(dir.path());
+    assert_eq!(code, Some(0), "killing the server isn't tampering: {err}");
+    assert!(stdout.contains("unsealed"), "{stdout}");
+    assert!(
+        stdout.contains("2 commands started, 1 with no end"),
+        "{stdout}"
+    );
+    let _ = Command::new("pkill").args(["-f", "[s]leep 31234"]).status();
 }
 
 #[test]
-fn a_changed_audit_log_fails_verification_and_blocks_a_restart() {
+fn a_changed_audit_file_fails_verification() {
     let ws = workspace();
     let dir = audit_dir();
-    let log = dir.path().join("audit.jsonl");
     {
-        let mut c = Client::in_workspace(ws.path(), &["--audit-log", log.to_str().unwrap()]);
+        let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
         c.run(1, "echo", &["a"]);
         c.run(2, "echo", &["b"]);
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
     }
-    assert_eq!(verify_log(&log).0, Some(0));
-    let text = std::fs::read_to_string(&log).unwrap();
-    std::fs::write(&log, text.replacen("\"b\"", "\"c\"", 1)).unwrap();
-    let (code, _, err) = verify_log(&log);
+    assert_eq!(verify_dir(dir.path()).0, Some(0));
+    let file = &session_files(dir.path())[0];
+    let text = std::fs::read_to_string(file).unwrap();
+    std::fs::write(file, text.replacen("\"b\"", "\"c\"", 1)).unwrap();
+    let (code, _, err) = verify_dir(dir.path());
     assert_eq!(code, Some(1), "{err}");
-    assert!(err.contains("line 2"), "{err}");
+    assert!(err.contains("changed"), "{err}");
+}
 
+/// A broken ledger stops a new server: it would be adding to a record it
+/// can't vouch for.
+#[test]
+fn a_changed_ledger_blocks_a_new_server() {
+    let ws = workspace();
+    let dir = audit_dir();
+    {
+        let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
+        c.run(1, "echo", &["a"]);
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
+    }
+    let ledger = dir.path().join("ledger.jsonl");
+    let text = std::fs::read_to_string(&ledger).unwrap();
+    std::fs::write(&ledger, text.replacen("open", "opem", 1)).unwrap();
     let (code, err) = refused(&[
         "--workspace",
         ws.path().to_str().unwrap(),
-        "--audit-log",
-        log.to_str().unwrap(),
+        "--audit-dir",
+        dir.path().to_str().unwrap(),
     ]);
     assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("line 2"), "{err}");
+    assert!(err.contains("ledger.jsonl"), "{err}");
 }
 
 /// Where commands can write, they could rewrite their own record.
 #[test]
-fn the_audit_log_is_refused_where_commands_can_write() {
+fn the_audit_dir_is_refused_where_commands_can_write() {
     let ws = workspace();
-    let inside = ws.path().join("audit.jsonl");
-    let (code, err) = refused(&[
-        "--workspace",
-        ws.path().to_str().unwrap(),
-        "--audit-log",
-        inside.to_str().unwrap(),
-    ]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("where commands can write"), "{err}");
+    for place in [
+        ws.path().join("audit").to_str().unwrap().to_string(),
+        "/tmp/nsb-audit-should-not-exist".to_string(),
+    ] {
+        let (code, err) = refused(&[
+            "--workspace",
+            ws.path().to_str().unwrap(),
+            "--audit-dir",
+            &place,
+        ]);
+        assert_eq!(code, Some(2), "{place}: {err}");
+        assert!(err.contains("where commands can write"), "{err}");
+        assert!(
+            !std::path::Path::new(&place).exists(),
+            "{place} was created"
+        );
+    }
+}
 
-    let (code, err) = refused(&[
-        "--workspace",
-        ws.path().to_str().unwrap(),
-        "--audit-log",
-        "/tmp/nsb-audit-should-not-exist.jsonl",
-    ]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(!std::path::Path::new("/tmp/nsb-audit-should-not-exist.jsonl").exists());
+/// Two agents on one machine can share a directory: a session file each.
+#[test]
+fn two_servers_can_record_into_the_same_directory() {
+    let ws1 = workspace();
+    let ws2 = workspace();
+    let dir = audit_dir();
+    let args = ["--audit-dir", dir.path().to_str().unwrap()];
+    let mut a = Client::in_workspace(ws1.path(), &args);
+    let mut b = Client::in_workspace(ws2.path(), &args);
+    a.run(1, "echo", &["a"]);
+    b.run(1, "echo", &["b"]);
+    for c in [&mut a, &mut b] {
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
+    }
+    assert_eq!(session_files(dir.path()).len(), 2);
+    let (code, stdout, err) = verify_dir(dir.path());
+    assert_eq!(code, Some(0), "{err}");
+    assert!(
+        stdout.starts_with("ok: 2 sessions (2 sealed), 2 commands"),
+        "{stdout}"
+    );
 }
 
 #[test]
-fn two_servers_cannot_share_one_audit_log() {
+fn audit_cleanup_removes_old_sessions_on_request_and_leaves_the_record_sound() {
     let ws = workspace();
     let dir = audit_dir();
-    let log = dir.path().join("audit.jsonl");
-    let _first = Client::in_workspace(ws.path(), &["--audit-log", log.to_str().unwrap()]);
-    std::thread::sleep(Duration::from_millis(300));
-    let ws2 = workspace();
-    let (code, err) = refused(&[
-        "--workspace",
-        ws2.path().to_str().unwrap(),
-        "--audit-log",
-        log.to_str().unwrap(),
-    ]);
-    assert_eq!(code, Some(2), "{err}");
-    assert!(err.contains("in use by another server"), "{err}");
+    for _ in 0..3 {
+        let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
+        c.run(1, "echo", &["x"]);
+        drop(c.child.stdin.take());
+        c.child.wait().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let d = dir.path().to_str().unwrap();
+    assert_eq!(
+        audit_cmd(&["--audit-cleanup", d]).0,
+        Some(2),
+        "a filter is required"
+    );
+    let (_, dry, _) = audit_cmd(&["--audit-cleanup", d, "--keep", "1", "--dry-run"]);
+    assert!(dry.contains("would remove 2 sessions"), "{dry}");
+    assert_eq!(
+        session_files(dir.path()).len(),
+        3,
+        "a dry run removes nothing"
+    );
+    let (code, out, err) = audit_cmd(&["--audit-cleanup", d, "--keep", "1"]);
+    assert_eq!(code, Some(0), "{err}");
+    assert!(out.contains("removed 2 sessions"), "{out}");
+    assert_eq!(session_files(dir.path()).len(), 1);
+    let (code, stdout, err) = verify_dir(dir.path());
+    assert_eq!(code, Some(0), "{err}");
+    assert!(stdout.starts_with("ok: 1 sessions"), "{stdout}");
 }

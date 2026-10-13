@@ -29,6 +29,11 @@ pub enum SandboxError {
     #[error("Path not found: {0}")]
     PathNotFound(PathBuf),
 
+    /// The audit sink refused to record the start of a run, so the command
+    /// was not run: there is no unaudited execution.
+    #[error("Audit: {0}")]
+    Audit(String),
+
     // Linux
     #[error(
         "Unprivileged user namespaces disabled. Run: sudo sysctl kernel.unprivileged_userns_clone=1"

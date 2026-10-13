@@ -59,8 +59,9 @@ is refused.
 | `--strict-tmp` | macOS only: make `/tmp` and the other system temp directories read-only; commands get a private `$TMPDIR`. Breaks `/tmp` by name, `mktemp -t` and `/usr/bin/clang`/`cc`; see [platform-macos.md](https://github.com/Erio-Harrison/nanosandbox/blob/master/docs/platform-macos.md#shared_tmpfalse) | off |
 | `--host-uid`, `--host-gid`, `--no-seccomp` | Linux only | |
 | `--log-io` | Also log stdin/stdout/stderr bodies | off |
-| `--audit-log <FILE>` | Append one line per run to a hash-chained log, see [Audit log](#audit-log) | off |
-| `--audit-verify <FILE>` | Check that log's chain and exit | |
+| `--audit-dir <DIR>` | Record every command in DIR, hash-chained, see [Audit record](#audit-record) | off |
+| `--audit-verify <DIR>` | Check the record and exit | |
+| `--audit-cleanup <DIR>` | Remove old sessions on request: `--keep N`, `--older-than DAYS`, `--max-total-size SIZE`, `--dry-run` | |
 | `--clean-tmp` | Remove temp files that killed servers left behind, then exit | |
 
 Run `nanosandbox-mcp --help` for the full text. A limit this platform can't enforce (for example
@@ -138,27 +139,53 @@ command runs until it ends or hits the time limit.
 One line per call goes to stderr (command, exit code, duration, which limit hit, blocked hosts).
 Stdin and output are only logged with `--log-io`, since they can contain secrets.
 
-## Audit log
+## Audit record
 
-`--audit-log <FILE>` appends one line per call: the command and arguments, the policy it ran under
-(network, readable and writable paths, limits, environment variable *names*), and how it ended (exit
-code, signal, which limit hit, output sizes, blocked hosts). Not stdin, output or environment values,
-which can hold secrets. Arguments are kept as given, so keep secrets out of them.
+`--audit-dir <DIR>` keeps a record of what the server ran, one file per server run
+(`session-<time>-<pid>.jsonl`) and a small `ledger.jsonl` listing the sessions. For each call:
 
-Each line holds the SHA-256 of itself and of the line before, so changing, removing or reordering a
-line breaks the chain from there on:
+- a `run_start`, written **before** the command runs: the command and arguments, the policy it runs
+  under (network, readable and writable paths, limits, environment variable *names*). If it can't be
+  written, **the command doesn't run**.
+- a `run_end` after: exit code, signal, which limit hit, output sizes, blocked hosts.
+
+Not stdin, output or environment values, which can hold secrets. In the arguments, what looks like a
+secret (`--token=...`, an `Authorization:` header, a password in a URL, `NAME=value` with a
+secret-sounding name) is replaced by `<redacted>`. That's a pattern match, not a guarantee: keep
+secrets out of arguments.
+
+Each line holds the SHA-256 of itself and of the line before, so changing, removing or reordering
+one breaks the chain from there on. The ledger notes when a session opens, and when it closes (with
+its length and last hash), so a session file that vanishes, or is cut short after it was sealed, is
+seen. A clean shutdown seals the session; a server that was killed leaves it *unsealed*, and a
+command that was running then shows as started and never ended.
 
 ```
-nanosandbox-mcp --audit-verify audit.jsonl
-ok: 412 records, head 51a9d6db...
+$ nanosandbox-mcp --audit-verify ~/.local/state/nanosandbox-audit
+ok: 14 sessions (13 sealed), 412 commands, ledger head 51a9d6db...
+note: session-1791...-4242-0.jsonl: unsealed: the server died or was killed (3 commands started, 1 with no end)
 ```
 
-What it doesn't show: lines cut off the end, or the file replaced by a new chain. Keep the `head`
-somewhere else (another host, a signed commit) to close that. The server won't start on a broken
-log, and one server holds the file at a time.
+What it doesn't show: lines cut off an unsealed session, the ledger's own tail cut off, or the whole
+directory replaced by a new chain. Keep the ledger's `head` somewhere else (another host, a signed
+commit) to close that. Several servers can share one directory. If the record can't be written, no
+more commands run.
 
-The file has to be somewhere commands can't write (not the workspace, a `--writable` path or `/tmp`),
-or the server refuses to start. Commands can't read it either.
+The directory has to be somewhere commands can't write (not the workspace, a `--writable` path or
+`/tmp`), or the server refuses to start. Commands can't read it either.
+
+**Nothing is deleted automatically.** The record grows until you remove sessions:
+
+```
+nanosandbox-mcp --audit-cleanup DIR --keep 50              # the 50 newest stay
+nanosandbox-mcp --audit-cleanup DIR --older-than 90        # only older than 90 days
+nanosandbox-mcp --audit-cleanup DIR --max-total-size 500M  # oldest first, until under 500 MB
+nanosandbox-mcp --audit-cleanup DIR --keep 50 --dry-run    # say what would go
+```
+
+Given more than one, all hold. A session still running, or one that doesn't verify, is never
+removed. A removal is written to the ledger with the session's length and last hash. Starting a
+server reads only the ledger, however long the history.
 
 ## Protocol
 

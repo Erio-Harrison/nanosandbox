@@ -301,16 +301,26 @@ Past the limit it's still read, so the program runs on, but dropped, and
 pub fn audit(self, sink: Arc<dyn AuditSink>) -> Self
 ```
 
-After each `run`, hand one `AuditEvent` to `sink`, on the thread that ran it:
-the command and arguments, the policy (network, paths, limits, environment
-variable names), and the outcome (exit code, signal, limits hit, output
-sizes, blocked hosts, or the error if it never ran). No data from the run is in
-it: not stdin, not output, not environment values. Events are `Serialize`, with
-integer fields only. The sink may be called from several threads, and a panic
-in it loses that event, not the result.
+Two events per `run`, handed to `sink` on the thread that ran it:
+
+- `AuditSink::begin(&AuditStart)`, **before** the command starts: the command and
+  arguments, the policy (network, paths, limits, environment variable names), and
+  a run number. If it returns `Err`, or panics, the run is refused with
+  `SandboxError::Audit`: nothing runs unrecorded.
+- `AuditSink::end(&AuditEnd)`, after, with how it ended: exit code, signal,
+  limits hit, output sizes, blocked hosts, or the error if it never ran. A
+  panic here is caught, and the run's result still returned.
+
+A start with no end means the host died while the command ran. No data from the
+run is in an event: not stdin, not output, not environment values. In the
+arguments, what looks like a secret (`--token=...`, an `Authorization:` header,
+a password in a URL, `NAME=value` with a secret-sounding name) is replaced by
+`<redacted>`; that is a pattern match, so keep secrets out of arguments. Events
+are `Serialize`, with integer fields only. Both methods may be called from
+several threads at once.
 
 Keeping the events, and keeping them tamper-evident, is the sink's job.
-`nanosandbox-mcp --audit-log` writes a hash chain.
+`nanosandbox-mcp --audit-dir` writes hash chains.
 
 ### Environment
 

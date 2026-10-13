@@ -1,13 +1,21 @@
-//! An audit trail: one structured event per run, handed to an
+//! An audit trail: two structured events per run, handed to an
 //! [`AuditSink`] the caller supplies with [`SandboxBuilder::audit`].
 //!
-//! An event says what ran, under which policy, and how it ended. It carries
-//! no data from the run itself: not stdin, not stdout or stderr (only their
-//! sizes), not environment values (only the names). Command and arguments
-//! are recorded as given, so they should not hold secrets.
+//! [`AuditSink::begin`] is called before the command starts, and may refuse
+//! it: a run whose start could not be recorded does not happen, so nothing
+//! runs unaudited. [`AuditSink::end`] is called after, with how it ended. A
+//! start with no end is itself a record: the host died, or was killed, while
+//! the command ran.
+//!
+//! Events carry no data from the run: not stdin, not stdout or stderr (only
+//! their sizes), not environment values (only the names). The command and its
+//! arguments are recorded, with what looks like a secret in them (a
+//! `--token=...`, an `Authorization:` header, a password in a URL, a
+//! `NAME=value` with a secret-sounding name) replaced by `<redacted>`. That
+//! is best effort, a pattern match: keep secrets out of arguments.
 //!
 //! Where the events go, and how they're kept tamper-evident, is the sink's
-//! business: `nanosandbox-mcp --audit-log` writes a hash chain.
+//! business: `nanosandbox-mcp --audit-dir` writes a hash chain.
 //!
 //! [`SandboxBuilder::audit`]: crate::SandboxBuilder::audit
 
@@ -18,28 +26,48 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Receives one [`AuditEvent`] after each run, on the thread that ran it.
-/// Runs may overlap, so `record` can be called from several threads at once.
-/// It should return quickly and not panic: a panic is caught, and the run's
-/// result is still returned, but that event is lost.
+/// Receives the events of each run, on the thread that ran it. Runs may
+/// overlap, so both methods can be called from several threads at once. They
+/// should return quickly.
 pub trait AuditSink: Send + Sync {
-    fn record(&self, event: &AuditEvent);
+    /// Called before the command starts. `Err` refuses the run, which then
+    /// returns [`SandboxError::Audit`] without running anything. A panic
+    /// counts as an `Err`.
+    fn begin(&self, start: &AuditStart) -> Result<(), String>;
+
+    /// Called after the run, whatever became of it. Nothing can be refused
+    /// any more; a panic here is caught, and the run's result still returned.
+    fn end(&self, end: &AuditEnd);
 }
 
-/// What one run did. Serializes to JSON with integer fields only, so that
+/// What is about to run. Serializes to JSON with integer fields only, so that
 /// the same event always serializes to the same text.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
-pub struct AuditEvent {
-    /// When the run ended, in milliseconds since the Unix epoch.
+pub struct AuditStart {
+    /// When the run began, in milliseconds since the Unix epoch.
     pub ts_ms: u64,
     pub sandbox_id: String,
+    /// This sandbox's run counter: `(sandbox_id, run)` names the run, and
+    /// ties its [`AuditEnd`] to this.
+    pub run: u64,
     pub platform: &'static str,
     pub command: String,
+    /// As given, with likely secrets replaced by `<redacted>`.
     pub args: Vec<String>,
     /// Length of the input given on stdin; the input itself isn't kept.
     pub stdin_bytes: u64,
     pub policy: AuditPolicy,
+}
+
+/// How a run ended.
+#[derive(Debug, Clone, Serialize)]
+#[non_exhaustive]
+pub struct AuditEnd {
+    /// When the run ended, in milliseconds since the Unix epoch.
+    pub ts_ms: u64,
+    pub sandbox_id: String,
+    pub run: u64,
     pub outcome: AuditOutcome,
 }
 
@@ -167,14 +195,49 @@ impl AuditPolicy {
     }
 }
 
-/// Builds the event for a finished run and hands it to the sink.
-pub(crate) fn record(
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Records the start of a run. An error means it must not go ahead.
+pub(crate) fn begin(
     hook: &AuditHook,
     sandbox_id: &str,
+    run: u64,
     config: &SandboxConfig,
     cmd: &str,
     args: &[&str],
     stdin: Option<&[u8]>,
+) -> Result<(), SandboxError> {
+    let start = AuditStart {
+        ts_ms: now_ms(),
+        sandbox_id: sandbox_id.to_string(),
+        run,
+        platform: crate::platform::name(),
+        command: redact::word(cmd),
+        args: redact::args(args),
+        stdin_bytes: stdin.map_or(0, |s| s.len() as u64),
+        policy: AuditPolicy::from_config(config),
+    };
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.0.begin(&start))) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(SandboxError::Audit(format!(
+            "{e}; not running the command, since it could not be recorded"
+        ))),
+        Err(_) => Err(SandboxError::Audit(
+            "the audit sink panicked; not running the command, since it could not be recorded"
+                .into(),
+        )),
+    }
+}
+
+/// Records how a run ended.
+pub(crate) fn end(
+    hook: &AuditHook,
+    sandbox_id: &str,
+    run: u64,
     result: &Result<ExecutionResult, SandboxError>,
 ) {
     let outcome = match result {
@@ -197,18 +260,233 @@ pub(crate) fn record(
             error: e.to_string(),
         },
     };
-    let event = AuditEvent {
-        ts_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64),
+    let end = AuditEnd {
+        ts_ms: now_ms(),
         sandbox_id: sandbox_id.to_string(),
-        platform: crate::platform::name(),
-        command: cmd.to_string(),
-        args: args.iter().map(|a| a.to_string()).collect(),
-        stdin_bytes: stdin.map_or(0, |s| s.len() as u64),
-        policy: AuditPolicy::from_config(config),
+        run,
         outcome,
     };
-    // A sink that panics loses its event, not the caller's result.
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.0.record(&event)));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook.0.end(&end)));
+}
+
+/// Best-effort removal of what looks like a secret from a command line.
+mod redact {
+    const REDACTED: &str = "<redacted>";
+
+    /// Words that make a name (`--api-key`, `GITHUB_TOKEN`) one whose value
+    /// is a secret.
+    const SECRET_WORDS: [&str; 11] = [
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pwd",
+        "apikey",
+        "api_key",
+        "api-key",
+        "credential",
+        "auth",
+        "private_key",
+    ];
+
+    /// Headers whose whole value is one.
+    const SECRET_HEADERS: [&str; 6] = [
+        "authorization:",
+        "proxy-authorization:",
+        "x-api-key:",
+        "x-auth-token:",
+        "cookie:",
+        "set-cookie:",
+    ];
+
+    fn secret_name(name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        SECRET_WORDS.iter().any(|w| name.contains(w))
+    }
+
+    /// Flags whose next argument is a credential, whatever the flag's name.
+    fn takes_credential(flag: &str) -> bool {
+        matches!(flag, "-u" | "--user" | "--proxy-user") || secret_name(flag)
+    }
+
+    pub(super) fn args(args: &[&str]) -> Vec<String> {
+        let mut out = Vec::with_capacity(args.len());
+        let mut redact_next = false;
+        for arg in args {
+            if std::mem::take(&mut redact_next) {
+                out.push(REDACTED.to_string());
+                continue;
+            }
+            let is_flag = arg.starts_with('-') && !arg.contains(char::is_whitespace);
+            if is_flag && !arg.contains('=') && takes_credential(arg) {
+                redact_next = true;
+            }
+            out.push(word(arg));
+        }
+        out
+    }
+
+    /// One argument: a flag, a value, or a whole `sh -c` script.
+    pub(super) fn word(text: &str) -> String {
+        let text = headers(text);
+        let text = bearer(&text);
+        let text = url_passwords(&text);
+        assignments(&text)
+    }
+
+    /// `Authorization: ...` up to the end of the line or the closing quote.
+    fn headers(text: &str) -> String {
+        let lower = text.to_ascii_lowercase();
+        let mut out = String::new();
+        let mut at = 0;
+        while at < text.len() {
+            let hit = SECRET_HEADERS
+                .iter()
+                .filter_map(|h| lower[at..].find(h).map(|i| (at + i, h.len())))
+                .min();
+            let Some((start, len)) = hit else { break };
+            let value = start + len;
+            out.push_str(&text[at..value]);
+            out.push(' ');
+            out.push_str(REDACTED);
+            let end = text[value..]
+                .find(['"', '\'', '\n'])
+                .map_or(text.len(), |i| value + i);
+            at = end;
+        }
+        out.push_str(&text[at..]);
+        out
+    }
+
+    /// `Bearer abc` and `Basic abc`, anywhere.
+    fn bearer(text: &str) -> String {
+        let mut out = String::new();
+        let mut words = text.split_inclusive(char::is_whitespace).peekable();
+        while let Some(w) = words.next() {
+            out.push_str(w);
+            let name = w.trim_end().to_ascii_lowercase();
+            if (name == "bearer" || name == "basic" || name.ends_with(" bearer"))
+                && w.ends_with(char::is_whitespace)
+                && let Some(secret) = words.next()
+            {
+                let trail = &secret[secret.trim_end().len()..];
+                if secret.trim_end() != REDACTED {
+                    out.push_str(REDACTED);
+                    out.push_str(trail);
+                } else {
+                    out.push_str(secret);
+                }
+            }
+        }
+        out
+    }
+
+    /// `scheme://user:password@host`.
+    fn url_passwords(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(i) = rest.find("://") {
+            let after = i + 3;
+            out.push_str(&rest[..after]);
+            rest = &rest[after..];
+            let end = rest
+                .find(|c: char| {
+                    c == '/' || c == '?' || c == '#' || c.is_whitespace() || c == '"' || c == '\''
+                })
+                .unwrap_or(rest.len());
+            let authority = &rest[..end];
+            match authority.rsplit_once('@') {
+                Some((userinfo, host)) if userinfo.contains(':') => {
+                    let user = userinfo.split(':').next().unwrap_or("");
+                    out.push_str(&format!("{user}:{REDACTED}@{host}"));
+                }
+                _ => out.push_str(authority),
+            }
+            rest = &rest[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// `NAME=value` where `NAME` sounds like a secret, in any word of it.
+    fn assignments(text: &str) -> String {
+        let mut out = String::new();
+        for w in text.split_inclusive(char::is_whitespace) {
+            let body = w.trim_end();
+            let trail = &w[body.len()..];
+            match body.split_once('=') {
+                Some((name, value))
+                    if !value.is_empty()
+                        && value != REDACTED
+                        && secret_name(name.trim_start_matches('-')) =>
+                {
+                    out.push_str(&format!("{name}={REDACTED}{trail}"));
+                }
+                _ => out.push_str(w),
+            }
+        }
+        out
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn args_of(a: &[&str]) -> Vec<String> {
+            args(a)
+        }
+
+        #[test]
+        fn flags_with_secret_names_lose_their_value() {
+            assert_eq!(
+                args_of(&["--token=abc123", "x"]),
+                ["--token=<redacted>", "x"]
+            );
+            assert_eq!(
+                args_of(&["--password", "hunter2", "x"]),
+                ["--password", "<redacted>", "x"]
+            );
+            assert_eq!(
+                args_of(&["-u", "me:pw", "url"]),
+                ["-u", "<redacted>", "url"]
+            );
+            assert_eq!(args_of(&["--api-key=k"]), ["--api-key=<redacted>"]);
+        }
+
+        #[test]
+        fn headers_and_bearer_tokens_are_removed_inside_a_script() {
+            let script =
+                r#"curl -H "Authorization: Bearer abc.def" -H 'X-Api-Key: k1' https://x.test"#;
+            let out = word(script);
+            assert!(!out.contains("abc.def") && !out.contains("k1"), "{out}");
+            assert!(out.contains("https://x.test"), "{out}");
+            assert!(word("curl --oauth2-bearer x").contains("--oauth2-bearer"));
+            assert!(!word("echo Bearer sk-live-123").contains("sk-live-123"));
+        }
+
+        #[test]
+        fn a_password_in_a_url_goes_and_the_rest_stays() {
+            assert_eq!(
+                word("git clone https://me:s3cret@github.com/a/b.git"),
+                "git clone https://me:<redacted>@github.com/a/b.git"
+            );
+            assert_eq!(word("https://github.com/a/b"), "https://github.com/a/b");
+            assert_eq!(word("http://localhost:8080/x"), "http://localhost:8080/x");
+        }
+
+        #[test]
+        fn secret_looking_assignments_in_a_script_lose_their_value() {
+            let out = word("export GITHUB_TOKEN=ghp_abc && AWS_SECRET_ACCESS_KEY=zzz run");
+            assert!(!out.contains("ghp_abc") && !out.contains("zzz"), "{out}");
+            assert!(out.contains("GITHUB_TOKEN=<redacted>"), "{out}");
+            assert_eq!(word("PATH=/usr/bin ls"), "PATH=/usr/bin ls");
+            assert_eq!(word("N=3 ./run"), "N=3 ./run");
+        }
+
+        #[test]
+        fn ordinary_commands_are_left_alone() {
+            let cmd = ["-c", "ls -la /tmp && python3 -c 'print(2+2)' > out.txt"];
+            assert_eq!(args_of(&cmd), cmd);
+        }
+    }
 }

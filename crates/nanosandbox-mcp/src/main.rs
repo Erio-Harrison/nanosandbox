@@ -26,13 +26,37 @@ fn main() {
             );
             return;
         }
-        Ok(config::Parsed::AuditVerify(path)) => {
-            match audit::verify(&path) {
-                Ok(v) => println!("ok: {} records, head {}", v.records, v.head),
-                Err(e) => {
-                    eprintln!("nanosandbox-mcp: {e}");
-                    std::process::exit(1);
+        Ok(config::Parsed::AuditVerify(dir)) => {
+            let report = audit::verify(&dir);
+            for e in &report.errors {
+                eprintln!("nanosandbox-mcp: {e}");
+            }
+            if !report.errors.is_empty() {
+                std::process::exit(1);
+            }
+            println!(
+                "ok: {} sessions ({} sealed), {} commands, ledger head {}",
+                report.sessions, report.sealed, report.runs, report.ledger_head
+            );
+            for n in &report.notes {
+                println!("note: {n}");
+            }
+            return;
+        }
+        Ok(config::Parsed::AuditCleanup(dir, plan)) => {
+            match audit::cleanup(&dir, &plan) {
+                Ok(removed) => {
+                    let verb = if plan.dry_run {
+                        "would remove"
+                    } else {
+                        "removed"
+                    };
+                    for r in &removed {
+                        println!("{verb} {} ({} bytes)", r.session, r.bytes);
+                    }
+                    println!("{verb} {} sessions", removed.len());
                 }
+                Err(e) => die(&e),
             }
             return;
         }
@@ -45,7 +69,7 @@ fn main() {
     }
     // Refuses here, not on the first call, anything this platform can't
     // enforce (see nanosandbox's `build()`).
-    let sandbox = cfg.build().unwrap_or_else(|e| die(&e));
+    let (sandbox, audit) = cfg.build().unwrap_or_else(|e| die(&e));
 
     eprintln!(
         "nanosandbox-mcp {} ready on {}: {}",
@@ -79,7 +103,11 @@ fn main() {
         }
     }
     // Stdin closed: the client is shutting us down. Exit now rather than
-    // wait on running commands; a sandbox dies with its host process.
+    // wait on running commands; a sandbox dies with its host process. What
+    // was still running shows in the record as started and never ended.
+    if let Some(audit) = &audit {
+        audit.close();
+    }
     std::process::exit(0);
 }
 

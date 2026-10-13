@@ -39,6 +39,8 @@ pub struct Sandbox {
     /// spun up and torn down per call; dropped (and shut down) with the
     /// `Sandbox` itself.
     proxy: Option<ProxiedNetwork>,
+    /// Counts runs, so an audit start and its end can be tied together.
+    runs: AtomicU64,
 }
 
 impl Sandbox {
@@ -81,6 +83,7 @@ impl Sandbox {
             id: generate_sandbox_id(),
             executor,
             proxy,
+            runs: AtomicU64::new(0),
         })
     }
 
@@ -131,11 +134,15 @@ impl Sandbox {
         args: &[&str],
         stdin: Option<&[u8]>,
     ) -> Result<ExecutionResult> {
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(hook) = &self.config.audit {
+            crate::audit::begin(hook, &self.id, run, &self.config, cmd, args, stdin)?;
+        }
         let result = self
             .executor
             .execute(&self.config, cmd, args, stdin, self.proxy.as_ref());
         if let Some(hook) = &self.config.audit {
-            crate::audit::record(hook, &self.id, &self.config, cmd, args, stdin, &result);
+            crate::audit::end(hook, &self.id, run, &result);
         }
         result
     }

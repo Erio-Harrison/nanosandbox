@@ -209,16 +209,25 @@ containment -- there isn't any.
 
 ## The audit trail
 
-`SandboxBuilder::audit` hands a sink one event per run. With
-`nanosandbox-mcp --audit-log` the events go to a file, each line chained to
-the one before by SHA-256. That makes the file *tamper-evident against the
-commands it records*: it must be somewhere they can't write, and the server
-refuses a path they could, and denies them reading it.
+`SandboxBuilder::audit` hands a sink an event before each run and one after.
+The start is recorded first, and a run whose start can't be recorded doesn't
+happen, so a command is never executed unrecorded; one that began and never
+ended is the trace of a host that died mid-run. With `nanosandbox-mcp
+--audit-dir` the events go to files, one per server run, each line chained to
+the one before by SHA-256, with a ledger that notes when sessions open, close
+and are removed. That makes the record *tamper-evident against the commands it
+records*: it must be somewhere they can't write, and the server refuses a
+place they could, and denies them reading it.
 
 It is not tamper-proof against whoever runs the server. They can cut lines off
-the end or start a new chain, and neither shows; that needs the last hash kept
+the end of a session that was never sealed, cut the ledger's tail, or start a
+new chain, and none of that shows; for that, keep the ledger's last hash
 elsewhere. It records what ran and under which policy, not what the command
-did inside the files it was allowed to write.
+did inside the files it was allowed to write. Secret-looking arguments are
+redacted by pattern, so a secret in an unusual form can get through.
+
+Nothing is deleted except by `--audit-cleanup`, which never touches a running
+session or one that fails to verify.
 
 ## What nanosandbox does not protect against, on any platform
 
