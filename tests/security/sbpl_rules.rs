@@ -1,7 +1,5 @@
 //! macOS SBPL (Sandbox Profile Language) rules tests
 
-#![cfg(target_os = "macos")]
-
 use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 

@@ -3,8 +3,6 @@
 //! private tmpfs they're the host's real, shared, persistent paths --
 //! writable by every sandbox and the host alike. See `MountPlan::tmpfs_mounts`.
 
-#![cfg(target_os = "linux")]
-
 use nanosandbox::Sandbox;
 use std::time::Duration;
 

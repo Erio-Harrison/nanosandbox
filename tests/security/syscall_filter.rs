@@ -1,7 +1,5 @@
 //! Seccomp syscall filter tests - Linux only
 
-#![cfg(target_os = "linux")]
-
 use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
