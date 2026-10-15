@@ -327,6 +327,7 @@ fn test_root_caller_runs_as_nobody() {
 /// case for a directory a root-run container created -- used to fail deep
 /// inside the sandboxed program's own `EACCES`. `build()` catches it instead.
 #[test]
+#[cfg(unix)]
 fn test_root_caller_writable_unwritable_by_nobody_is_refused_upfront() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } != 0 {
@@ -351,6 +352,7 @@ fn test_root_caller_writable_unwritable_by_nobody_is_refused_upfront() {
 /// Same setup, but world-writable: nobody from a root caller's sandbox can
 /// write there, so this must build and run, not be refused.
 #[test]
+#[cfg(unix)]
 fn test_root_caller_writable_world_writable_is_accepted() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } != 0 {

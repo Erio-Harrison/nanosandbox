@@ -13,6 +13,7 @@ use std::time::Duration;
 
 /// Test: Sandbox IDs should be unique across threads
 #[test]
+#[cfg(unix)]
 fn test_sandbox_id_unique_across_threads() {
     let ids: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut handles = vec![];
@@ -50,6 +51,7 @@ fn test_sandbox_id_unique_across_threads() {
 
 /// Test: Parallel sandbox execution should not interfere with each other
 #[test]
+#[cfg(unix)]
 fn test_parallel_execution_isolation() {
     let results: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(vec![]));
     let mut handles = vec![];
@@ -136,6 +138,7 @@ fn test_cgroup_no_conflicts() {
 
 /// Test: Concurrent proxy operations should not conflict
 #[test]
+#[cfg(unix)]
 fn test_concurrent_proxy_no_conflicts() {
     if crate::common::skip_without_userns_privileges() {
         return;
@@ -183,6 +186,7 @@ fn test_concurrent_proxy_no_conflicts() {
 
 /// Test: Rapid creation and destruction should not cause races
 #[test]
+#[cfg(unix)]
 fn test_rapid_create_destroy() {
     let mut handles = vec![];
 
@@ -210,6 +214,7 @@ fn test_rapid_create_destroy() {
 
 /// Test: Shared state (if any) should be properly synchronized
 #[test]
+#[cfg(unix)]
 fn test_no_data_races() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -243,6 +248,7 @@ fn test_no_data_races() {
 
 /// Test: Timeout handling should work correctly under contention
 #[test]
+#[cfg(unix)]
 fn test_timeout_under_contention() {
     let mut handles = vec![];
 

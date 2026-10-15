@@ -1,6 +1,10 @@
 //! Integration tests for nanosandbox
 //!
 //! These tests verify that the sandbox actually works on the current platform.
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, unused_imports, unused_variables, unused_mut)
+)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -17,6 +21,7 @@ fn test_platform_supported() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_simple_command() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -41,6 +46,7 @@ fn test_simple_command() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_command_with_stdin() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -56,6 +62,7 @@ fn test_command_with_stdin() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_exit_code() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -72,6 +79,7 @@ fn test_exit_code() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_stderr() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -87,6 +95,7 @@ fn test_stderr() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_timeout() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -105,6 +114,7 @@ fn test_timeout() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_environment_variables() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -123,6 +133,7 @@ fn test_environment_variables() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_python_execution() {
     // Skip if Python is not available
     let sandbox = Sandbox::builder()
@@ -148,6 +159,7 @@ fn test_python_execution() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_sandbox_id_unique() {
     let sandbox1 = Sandbox::builder()
         .working_dir("/tmp")
@@ -163,6 +175,7 @@ fn test_sandbox_id_unique() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_presets() {
     // Presets mount these directories in place and a private tmpfs on /tmp
     // -- which needs mounts, and directories outside /tmp.
@@ -250,6 +263,7 @@ fn test_proxied_network_setup() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_sandbox_with_proxied_network() {
     if crate::common::skip_without_userns_privileges() {
         return;
@@ -271,6 +285,7 @@ fn test_sandbox_with_proxied_network() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_proxy_env_vars_in_sandbox() {
     if crate::common::skip_without_userns_privileges() {
         return;
@@ -309,6 +324,7 @@ fn test_proxy_env_vars_in_sandbox() {
 /// With private destinations allowed, the host's local services are reached
 /// through the proxy, so loopback must not be on NO_PROXY.
 #[test]
+#[cfg(unix)]
 fn test_loopback_goes_through_the_proxy_when_private_destinations_are_allowed() {
     if crate::common::skip_without_userns_privileges() {
         return;

@@ -84,6 +84,7 @@ fn test_no_private_tmp() {
 /// rename the other's private directory, which (where it isn't a tmpfs)
 /// used to sit in the temp directory, writable by every sandbox.
 #[test]
+#[cfg(unix)]
 fn test_a_run_cannot_reach_another_runs_private_tmp() {
     use std::sync::mpsc;
     let a = sandbox(16 * MB);

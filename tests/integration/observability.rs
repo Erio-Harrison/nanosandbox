@@ -10,6 +10,7 @@ use std::time::Duration;
 
 /// Test: ExecutionResult should contain timing information
 #[test]
+#[cfg(unix)]
 fn test_result_contains_timing() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -30,6 +31,7 @@ fn test_result_contains_timing() {
 
 /// Test: Sandbox should have unique, traceable ID
 #[test]
+#[cfg(unix)]
 fn test_sandbox_has_traceable_id() {
     let sandbox1 = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -81,6 +83,7 @@ fn test_platform_identifiable() {
 
 /// Test: Exit codes should be accurately captured
 #[test]
+#[cfg(unix)]
 fn test_exit_code_accuracy() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -121,6 +124,7 @@ fn test_signal_capture() {
 
 /// Test: Timeout flag should be accurate
 #[test]
+#[cfg(unix)]
 fn test_timeout_flag_accuracy() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -142,6 +146,7 @@ fn test_timeout_flag_accuracy() {
 
 /// Test: Stdout and stderr should be properly separated
 #[test]
+#[cfg(unix)]
 fn test_output_separation() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -171,6 +176,7 @@ fn test_output_separation() {
 
 /// Test: Resource metrics structure is present (even if values are None)
 #[test]
+#[cfg(unix)]
 fn test_resource_metrics_structure() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -206,6 +212,7 @@ fn test_proc_isolated_true_outside_apparmor_restriction() {
 
 /// Test: Duration should be accurate for various execution times
 #[test]
+#[cfg(unix)]
 fn test_duration_accuracy() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -233,6 +240,7 @@ fn test_duration_accuracy() {
 
 /// Test: Multiple runs should each have independent metrics
 #[test]
+#[cfg(unix)]
 fn test_independent_metrics() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -261,6 +269,7 @@ fn test_independent_metrics() {
 
 /// Test: Error output should be captured completely
 #[test]
+#[cfg(unix)]
 fn test_error_output_capture() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -288,6 +297,7 @@ fn test_error_output_capture() {
 
 /// Test: Large output should be captured (within limits)
 #[test]
+#[cfg(unix)]
 fn test_large_output_capture() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -323,6 +333,7 @@ fn test_large_output_capture() {
 
 /// Test: Binary output should not corrupt results
 #[test]
+#[cfg(unix)]
 fn test_binary_output_handling() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 

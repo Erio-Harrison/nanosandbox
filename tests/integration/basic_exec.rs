@@ -188,6 +188,7 @@ fn test_environment_variables() {
 }
 
 #[test]
+#[cfg(unix)]
 #[cfg(not(target_os = "windows"))]
 fn test_working_directory() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();

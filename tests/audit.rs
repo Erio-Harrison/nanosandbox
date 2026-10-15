@@ -1,4 +1,8 @@
 //! The events each run hands to the sink.
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, unused_imports, unused_variables, unused_mut)
+)]
 
 use nanosandbox::audit::{AuditEnd, AuditOutcome, AuditSink, AuditStart};
 use nanosandbox::{Sandbox, SandboxError};
@@ -66,6 +70,7 @@ fn sandbox(sink: Arc<dyn AuditSink>) -> Sandbox {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_run_has_a_start_before_it_and_an_end_after() {
     let rec = Arc::new(Recorder::default());
     let sb = sandbox(rec.clone());
@@ -100,6 +105,7 @@ fn a_run_has_a_start_before_it_and_an_end_after() {
 }
 
 #[test]
+#[cfg(unix)]
 fn each_run_of_a_sandbox_has_its_own_number() {
     let rec = Arc::new(Recorder::default());
     let sb = sandbox(rec.clone());
@@ -112,6 +118,7 @@ fn each_run_of_a_sandbox_has_its_own_number() {
 /// The point of recording the start first: a run that can't be recorded
 /// doesn't happen.
 #[test]
+#[cfg(unix)]
 fn a_run_whose_start_cannot_be_recorded_does_not_run() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
@@ -142,6 +149,7 @@ fn sandbox_writing_to(dir: &std::path::Path, sink: Arc<dyn AuditSink>) -> Sandbo
 }
 
 #[test]
+#[cfg(unix)]
 fn a_sink_that_panics_at_the_end_does_not_lose_the_result() {
     let sb = sandbox(Arc::new(PanicsAtEnd));
     let out = sb.run("echo", &["still here"]).unwrap();
@@ -151,6 +159,7 @@ fn a_sink_that_panics_at_the_end_does_not_lose_the_result() {
 /// Nothing from the run, no value from the configuration, and no secret on
 /// the command line is in it.
 #[test]
+#[cfg(unix)]
 fn an_event_holds_no_input_output_environment_value_or_secret_argument() {
     let rec = Arc::new(Recorder::default());
     let sb = sandbox(rec.clone());
@@ -201,6 +210,7 @@ fn a_command_that_cannot_run_still_has_an_end() {
 }
 
 #[test]
+#[cfg(unix)]
 fn the_same_event_always_serializes_to_the_same_text() {
     let rec = Arc::new(Recorder::default());
     let sb = sandbox(rec.clone());

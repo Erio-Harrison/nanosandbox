@@ -1,4 +1,8 @@
 //! Security tests entry point
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, unused_imports, unused_variables, unused_mut)
+)]
 
 #[path = "common/mod.rs"]
 mod common;
@@ -16,9 +20,11 @@ mod private_tmp;
 mod read_rules;
 
 #[path = "security/read_only_inside_writable.rs"]
+#[cfg(unix)]
 mod read_only_inside_writable;
 
 #[path = "security/workspace_swap.rs"]
+#[cfg(unix)]
 mod workspace_swap;
 
 #[cfg(target_os = "linux")]

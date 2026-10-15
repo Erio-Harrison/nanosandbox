@@ -67,6 +67,7 @@ fn assert_victim_untouched(victim: &Path) {
 
 /// The usual layout: a workspace in a directory the sandbox can't write.
 #[test]
+#[cfg(unix)]
 fn a_command_cannot_swap_its_workspace_for_a_symlink() {
     let l = layout();
     if crate::common::skip_if_unreachable_by_nobody(&l.ws) {
@@ -103,6 +104,7 @@ fn a_command_cannot_swap_its_workspace_for_a_symlink() {
 /// A workspace inside a directory the sandbox can write, which lets it move
 /// the workspace aside.
 #[test]
+#[cfg(unix)]
 fn a_command_cannot_swap_a_workspace_that_sits_in_a_writable_parent() {
     let l = layout();
     if crate::common::skip_if_unreachable_by_nobody(&l.ws) {
@@ -164,6 +166,7 @@ fn a_command_cannot_swap_a_directory_above_its_workspace() {
 /// Replaced by someone else, between runs: refused, clearly, and put back
 /// to a real directory it runs again.
 #[test]
+#[cfg(unix)]
 fn a_workspace_replaced_between_runs_is_refused_and_a_real_one_is_not() {
     let l = layout();
     if crate::common::skip_if_unreachable_by_nobody(&l.ws) {

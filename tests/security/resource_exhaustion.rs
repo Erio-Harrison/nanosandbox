@@ -130,6 +130,7 @@ fn test_subprocess_bomb_contained() {
 
 /// File descriptor bomb test
 #[test]
+#[cfg(unix)]
 #[cfg(not(target_os = "windows"))]
 fn test_fd_bomb_contained() {
     let sandbox = Sandbox::builder()

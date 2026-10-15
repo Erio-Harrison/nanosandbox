@@ -1,4 +1,8 @@
 //! Integration tests entry point
+#![cfg_attr(
+    not(unix),
+    allow(dead_code, unused_imports, unused_variables, unused_mut)
+)]
 
 #[path = "common/mod.rs"]
 mod common;

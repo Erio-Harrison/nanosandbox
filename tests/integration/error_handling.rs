@@ -163,6 +163,7 @@ fn test_graceful_cgroup_check() {
 
 /// Test: Timeout errors should be distinguishable
 #[test]
+#[cfg(unix)]
 fn test_error_timeout_distinguishable() {
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -223,6 +224,7 @@ fn test_validation_reports_issues() {
 
 /// Test: Build should succeed with valid configuration
 #[test]
+#[cfg(unix)]
 fn test_valid_config_succeeds() {
     let result = Sandbox::builder()
         .working_dir("/tmp")
@@ -281,6 +283,7 @@ fn test_invalid_limits_refused() {
 /// A NUL byte in an argument is an error, not a panic, and leaks nothing.
 /// It used to panic, and before that leak the run's pipes.
 #[test]
+#[cfg(unix)]
 fn test_nul_in_argument_is_an_error() {
     let sandbox = Sandbox::builder().build().unwrap();
     let fds = || std::fs::read_dir("/proc/self/fd").map(|d| d.count()).ok();

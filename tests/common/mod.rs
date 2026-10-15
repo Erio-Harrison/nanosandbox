@@ -33,6 +33,7 @@ pub fn skip_without_userns_privileges() -> bool {
 /// A temp directory the sandbox can use even when the caller is root, whose
 /// sandbox runs as `nobody` (see `host_uid`): `tempfile` makes it mode 0700,
 /// owned by the caller, which nobody can't enter, let alone write to.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn sandbox_tempdir_in(parent: impl AsRef<std::path::Path>) -> tempfile::TempDir {
     use std::os::unix::fs::PermissionsExt;
@@ -41,6 +42,7 @@ pub fn sandbox_tempdir_in(parent: impl AsRef<std::path::Path>) -> tempfile::Temp
     dir
 }
 
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn sandbox_tempdir() -> tempfile::TempDir {
     sandbox_tempdir_in(std::env::temp_dir())
@@ -52,6 +54,7 @@ pub fn sandbox_tempdir() -> tempfile::TempDir {
 /// when that applies, so a test that needs the sandbox to reach `path` can
 /// return early instead of failing on the environment. Never true for a
 /// non-root caller, whose sandbox runs as itself.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -75,6 +78,7 @@ pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
 
 /// World-writable, so the sandbox's user can write where it's allowed to and
 /// the test can then tell that what it was denied really was.
+#[cfg(unix)]
 #[allow(dead_code)]
 pub fn chmod_open(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;

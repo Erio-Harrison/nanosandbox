@@ -18,6 +18,7 @@ fn minimal_rootfs(root: &Path) -> nanosandbox::SandboxBuilder {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_readonly_mount_rejects_writes() {
     if skip_without_userns_privileges() {
         return;
@@ -41,6 +42,7 @@ fn test_readonly_mount_rejects_writes() {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_readwrite_mount_and_tmpfs() {
     if skip_without_userns_privileges() {
         return;
@@ -72,6 +74,7 @@ fn test_readwrite_mount_and_tmpfs() {
 /// host path gets shadowed once the bind covers it. Mounting tmpfs before
 /// all binds unconditionally (instead of by depth) broke exactly this.
 #[test]
+#[cfg(unix)]
 fn test_tmpfs_nested_inside_a_bind_target() {
     if skip_without_userns_privileges() {
         return;
@@ -127,6 +130,7 @@ fn test_tmpfs_nested_inside_a_bind_target() {
 /// Every sandbox used to pivot_root through one shared `<rootfs>/old_root`
 /// directory, so concurrent runs on the same rootfs failed setup.
 #[test]
+#[cfg(unix)]
 fn test_concurrent_sandboxes_share_rootfs() {
     if skip_without_userns_privileges() {
         return;
@@ -167,6 +171,7 @@ fn test_concurrent_sandboxes_share_rootfs() {
 /// resolved against the host's PATH first: a command only the rootfs had
 /// wasn't found, and one only the host had was run from the rootfs's path.
 #[test]
+#[cfg(unix)]
 fn test_path_lookup_happens_in_the_rootfs() {
     if skip_without_userns_privileges() {
         return;
@@ -197,6 +202,7 @@ fn test_path_lookup_happens_in_the_rootfs() {
 /// source nobody can't write to is refused at build(), rootfs or not --
 /// the check used to be skipped entirely with a rootfs.
 #[test]
+#[cfg(unix)]
 fn test_root_caller_unwritable_bind_source_is_refused_with_a_rootfs() {
     use std::os::unix::fs::PermissionsExt;
     if unsafe { libc::geteuid() } != 0 || skip_without_userns_privileges() {
