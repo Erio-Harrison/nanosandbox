@@ -1,7 +1,7 @@
 //! Windows: what a run's Job Object enforces, and what `build()` refuses
 //! without the one-time install.
 
-use nanosandbox::{MB, Sandbox, SandboxError};
+use nanosandbox::{ExecutionResult, MB, Sandbox, SandboxBuilder, SandboxError};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -9,26 +9,57 @@ fn builder() -> nanosandbox::SandboxBuilder {
     crate::common::builder().working_dir(r"C:\Windows\Temp")
 }
 
-fn powershell(sandbox: &Sandbox, script: &str) -> nanosandbox::ExecutionResult {
-    sandbox
-        .run(
-            "powershell",
-            &["-NoProfile", "-NonInteractive", "-Command", script],
-        )
+const HELPER_ARGS: [&str; 4] = ["--exact", "job_limits::helper", "--ignored", "--nocapture"];
+
+/// Not a test: what the memory and CPU tests run in the sandbox, this test
+/// binary started again. PowerShell's own start-up time and memory vary too
+/// much between machines (hundreds of MB on a fresh CI runner) to measure
+/// against. `NSB_HELPER` is a size in MB to allocate, or `spin`.
+#[test]
+#[ignore]
+fn helper() {
+    let Ok(mode) = std::env::var("NSB_HELPER") else {
+        return;
+    };
+    if mode == "spin" {
+        loop {
+            std::hint::black_box(0u64);
+        }
+    }
+    // With NSB_TWIN, the same again in a second process, alive at once.
+    let twin = std::env::var_os("NSB_TWIN").map(|_| {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args(HELPER_ARGS)
+            .env_remove("NSB_TWIN")
+            .spawn()
+            .unwrap()
+    });
+    let block = vec![1u8; mode.parse::<usize>().unwrap() * MB as usize];
+    std::thread::sleep(Duration::from_secs(2));
+    println!("allocated {}", block.len());
+    if let Some(mut twin) = twin {
+        twin.wait().unwrap();
+    }
+}
+
+fn run_helper(builder: SandboxBuilder, mode: &str, twin: bool) -> ExecutionResult {
+    let mut builder = builder
+        .env("NSB_HELPER", mode)
+        .wall_time_limit(Duration::from_secs(30));
+    if twin {
+        builder = builder.env("NSB_TWIN", "1");
+    }
+    let exe = std::env::current_exe().unwrap();
+    builder
+        .build()
+        .unwrap()
+        .run(exe.to_str().unwrap(), &HELPER_ARGS)
         .unwrap()
 }
 
 #[test]
 fn test_memory_limit_kills_the_run() {
-    let sandbox = builder()
-        .memory_limit(150 * MB)
-        .wall_time_limit(Duration::from_secs(30))
-        .build()
-        .unwrap();
-    let r = powershell(
-        &sandbox,
-        "$a = New-Object byte[] 400MB; $a[0] = 1; 'allocated'",
-    );
+    let r = run_helper(builder().memory_limit(150 * MB), "400", false);
     assert!(r.killed_by_oom, "not killed for memory: {r:?}");
     assert!(!r.stdout.contains("allocated"));
     assert!(!r.success());
@@ -42,19 +73,12 @@ fn test_memory_limit_kills_the_run() {
 /// each fit under it alone don't fit together.
 #[test]
 fn test_memory_limit_counts_every_process_of_the_run() {
-    let alloc = "$a = New-Object byte[] 120MB; $a[0] = 1; Start-Sleep 3";
-    let one = builder()
-        .memory_limit(260 * MB)
-        .wall_time_limit(Duration::from_secs(30))
-        .build()
-        .unwrap();
-    let r = powershell(&one, alloc);
-    assert!(!r.killed_by_oom, "one process alone should fit: {r:?}");
-
-    let two = format!(
-        "$p = Start-Process powershell -ArgumentList '-NoProfile','-Command','{alloc}' -PassThru -NoNewWindow; {alloc}; $p.WaitForExit()"
+    let r = run_helper(builder().memory_limit(200 * MB), "120", false);
+    assert!(
+        !r.killed_by_oom && r.stdout.contains("allocated"),
+        "one process alone should fit: {r:?}"
     );
-    let r = powershell(&one, &two);
+    let r = run_helper(builder().memory_limit(200 * MB), "120", true);
     assert!(r.killed_by_oom, "two together should not: {r:?}");
 }
 
@@ -77,13 +101,12 @@ fn test_max_pids_limits_the_process_count() {
 
 #[test]
 fn test_cpu_time_limit_kills_the_run() {
-    let sandbox = builder()
-        .cpu_time_limit(Duration::from_secs(1))
-        .wall_time_limit(Duration::from_secs(30))
-        .build()
-        .unwrap();
     let start = Instant::now();
-    let r = powershell(&sandbox, "while ($true) {}");
+    let r = run_helper(
+        builder().cpu_time_limit(Duration::from_secs(1)),
+        "spin",
+        false,
+    );
     assert!(r.killed_by_cpu_limit, "{r:?}");
     assert!(start.elapsed() < Duration::from_secs(10));
     let used = r.cpu_time.unwrap();
