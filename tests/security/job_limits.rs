@@ -212,6 +212,7 @@ fn test_what_needs_the_install_is_refused() {
     ));
     assert!(unsupported(builder().writable(r"C:\Windows\Temp")));
     assert!(unsupported(builder().deny_read(r"C:\Windows\Temp")));
+    assert!(unsupported(builder().cpu_limit(1.0)));
     assert!(unsupported(builder().max_file_size(MB)));
     assert!(unsupported(builder().max_open_files(10)));
 }

@@ -200,8 +200,7 @@ oversight -- see project history for the fuller reasoning.
 ## Windows
 
 Mechanism: a Job Object per run (`memory_limit`, `max_pids`,
-`cpu_time_limit`; `cpu_limit` is ignored where VBS is on). **No filesystem
-or network isolation at all.**
+`cpu_time_limit`). **No filesystem or network isolation at all.**
 `read_only`/`writable`/`deny_read`/`hide_home`/`allow_network`/`no_network`
 are all refused by `build()` on Windows (`SandboxError::Unsupported`) rather
 than silently ignored -- see [platform-windows.md](platform-windows.md).

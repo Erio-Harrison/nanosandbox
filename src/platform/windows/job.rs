@@ -14,7 +14,6 @@ use windows_sys::Win32::System::IO::{
     CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED,
 };
 use windows_sys::Win32::System::JobObjects::*;
-use windows_sys::Win32::System::Threading::{ALL_PROCESSOR_GROUPS, GetActiveProcessorCount};
 
 /// Job notifications, as delivered on its completion port.
 pub(super) const MSG_END_OF_JOB_TIME: u32 = 1;
@@ -25,8 +24,6 @@ pub(super) const MSG_JOB_MEMORY_LIMIT: u32 = 10;
 pub(super) struct Limits {
     pub(super) memory: Option<u64>,
     pub(super) max_pids: Option<u32>,
-    /// Cores' worth of CPU, as `cpu_limit` takes it.
-    pub(super) cpus: Option<f64>,
     pub(super) cpu_time: Option<Duration>,
 }
 
@@ -81,15 +78,6 @@ impl Job {
             ext.JobMemoryLimit = usize::try_from(bytes).unwrap_or(usize::MAX);
         }
         job.set(JobObjectExtendedLimitInformation, &ext)?;
-
-        if let Some(rate) = limits.cpus.and_then(cpu_rate) {
-            let info = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
-                ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
-                    | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-                Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 { CpuRate: rate },
-            };
-            job.set(JobObjectCpuRateControlInformation, &info)?;
-        }
         Ok(job)
     }
 
@@ -178,33 +166,5 @@ impl Drop for Job {
             CloseHandle(self.handle);
             CloseHandle(self.port);
         }
-    }
-}
-
-/// `cpu_limit` as a hard cap in a Job's units: hundredths of a percent of
-/// every processor on the machine. None when it would cap nothing.
-fn cpu_rate(cpus: f64) -> Option<u32> {
-    let total = unsafe { GetActiveProcessorCount(ALL_PROCESSOR_GROUPS) }.max(1);
-    rate_of(cpus, total)
-}
-
-fn rate_of(cpus: f64, processors: u32) -> Option<u32> {
-    let rate = (cpus / f64::from(processors) * 10_000.0).round();
-    (rate < 10_000.0).then(|| (rate as u32).max(1))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rate_of;
-
-    #[test]
-    fn cpu_limit_is_a_share_of_the_whole_machine() {
-        assert_eq!(rate_of(1.0, 16), Some(625));
-        assert_eq!(rate_of(0.5, 4), Some(1250));
-        assert_eq!(rate_of(0.01, 64), Some(2));
-        assert_eq!(rate_of(0.0001, 64), Some(1));
-        // As many cores as there are, or more, caps nothing.
-        assert_eq!(rate_of(16.0, 16), None);
-        assert_eq!(rate_of(32.0, 16), None);
     }
 }

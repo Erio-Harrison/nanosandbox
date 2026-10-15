@@ -115,7 +115,7 @@ Allow specific domains only (uses a local HTTP proxy):
 | | Linux | macOS | Windows |
 |---|:---:|:---:|:---:|
 | Memory limits | ✓ | ~ | ✓ |
-| CPU limits | ✓ | - | ~ |
+| CPU limits | ✓ | - | - |
 | Process limits | ✓ | - | ✓ |
 | Wall-clock timeout | ✓ | ✓ | ✓ |
 | Filesystem isolation | ✓ | ✓ | - |

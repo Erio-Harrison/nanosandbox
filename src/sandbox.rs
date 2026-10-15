@@ -290,10 +290,13 @@ impl Sandbox {
 }
 
 /// The presets' CPU share and process count, where they can be enforced:
-/// macOS has neither, and refuses them rather than ignore them.
+/// macOS has neither and Windows no CPU share, and they refuse them rather
+/// than ignore them.
 fn cpu_and_pids(builder: SandboxBuilder, cpus: f64, pids: u32) -> SandboxBuilder {
     if cfg!(target_os = "macos") {
         builder
+    } else if cfg!(windows) {
+        builder.max_pids(pids)
     } else {
         builder.cpu_limit(cpus).max_pids(pids)
     }

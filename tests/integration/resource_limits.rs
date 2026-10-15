@@ -152,7 +152,7 @@ fn test_multiple_limits_combined() {
 }
 
 #[test]
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn test_cpu_limit() {
     // CPU limit test - verifies it doesn't crash
     let sandbox = crate::common::builder()

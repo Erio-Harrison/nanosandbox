@@ -106,7 +106,6 @@ impl PlatformExecutor for WindowsExecutor {
         let job = Job::create(&Limits {
             memory: config.memory_limit,
             max_pids: config.max_pids,
-            cpus: config.cpu_limit,
             cpu_time: config.cpu_time_limit,
         })
         .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
@@ -154,6 +153,13 @@ impl PlatformExecutor for WindowsExecutor {
                 setting: "no_network()/allow_network() on Windows".into(),
                 reason: "there's no network isolation; call host_network() to run with the \
                          host's network (no_network() is the default)"
+                    .into(),
+            });
+        }
+        if config.cpu_limit.is_some() {
+            return Err(SandboxError::Unsupported {
+                setting: "cpu_limit on Windows".into(),
+                reason: "Windows ignores a Job's CPU cap where VBS is on; use cpu_time_limit"
                     .into(),
             });
         }
