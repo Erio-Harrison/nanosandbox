@@ -31,6 +31,10 @@ fn test_memory_limit_kills_the_run() {
     assert!(r.killed_by_oom, "not killed for memory: {r:?}");
     assert!(!r.stdout.contains("allocated"));
     assert!(!r.success());
+    // Windows counts the refused 400MB into the Job's own peak; what's
+    // reported is what was in use, never past the limit.
+    let peak = r.peak_memory.unwrap();
+    assert!(peak > 0 && peak <= 150 * MB, "peak {peak}");
 }
 
 /// The limit is the whole run's, not each process's: two processes that

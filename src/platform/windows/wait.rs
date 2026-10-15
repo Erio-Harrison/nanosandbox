@@ -41,6 +41,9 @@ pub(super) fn wait(
 
     let deadline = start + config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
     let (mut killed_by_timeout, mut killed_by_oom, mut killed_by_cpu_limit) = (false, false, false);
+    // The most memory seen in use, for when the Job's own peak can't be
+    // trusted (see `peak_memory` below).
+    let mut seen_memory = 0;
     loop {
         if child.try_wait()?.is_some() {
             break;
@@ -50,7 +53,9 @@ pub(super) fn wait(
             killed_by_timeout = true;
             break;
         }
-        match job.next_message(POLL.min(deadline - now)) {
+        let message = job.next_message(POLL.min(deadline - now));
+        seen_memory = seen_memory.max(job.memory().unwrap_or(0));
+        match message {
             Some(MSG_JOB_MEMORY_LIMIT) => {
                 // The allocation past the limit failed; the run is killed,
                 // as it is on Linux, rather than left to cope with that.
@@ -95,10 +100,23 @@ pub(super) fn wait(
         killed_by_tmp_limit: false,
         killed_by_cpu_limit,
         signal: None,
-        peak_memory: job.peak_memory(),
+        peak_memory: peak_memory(job, config.memory_limit, seen_memory),
         cpu_time: job.cpu_time(),
         blocked_hosts: Vec::new(),
         proc_isolated: true,
+    })
+}
+
+/// The Job's peak, unless it went past the memory limit: nothing can
+/// commit past it, so that's a refused allocation Windows counted at its
+/// full size (asking for 400MB under a 100MB limit gives a peak above
+/// 400MB). Then the most seen in use while polling, which a short burst
+/// between two polls can be above.
+fn peak_memory(job: &Job, limit: Option<u64>, seen: u64) -> Option<u64> {
+    let peak = job.peak_memory()?;
+    Some(match limit {
+        Some(limit) if peak > limit => seen.min(limit),
+        _ => peak,
     })
 }
 

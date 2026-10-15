@@ -154,7 +154,16 @@ impl Job {
         Some(Duration::from_nanos(ticks.saturating_mul(100)))
     }
 
-    /// The most committed memory the job's processes have had at once.
+    /// The memory the job's processes have committed right now.
+    pub(super) fn memory(&self) -> Option<u64> {
+        let v: JOBOBJECT_LIMIT_VIOLATION_INFORMATION =
+            self.query(JobObjectLimitViolationInformation)?;
+        Some(v.JobMemory)
+    }
+
+    /// The most committed memory the job's processes have had at once, as
+    /// Windows counts it: an allocation the memory limit refused counts in
+    /// it too, at its full size, so past the limit it overstates.
     pub(super) fn peak_memory(&self) -> Option<u64> {
         let e: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
             self.query(JobObjectExtendedLimitInformation)?;
