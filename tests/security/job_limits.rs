@@ -2,6 +2,7 @@
 //! without the one-time install.
 
 use nanosandbox::{MB, Sandbox, SandboxError};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn builder() -> nanosandbox::SandboxBuilder {
@@ -92,61 +93,88 @@ fn test_cpu_time_limit_kills_the_run() {
     );
 }
 
+/// A batch file that starts a descendant, which writes `started` at once and
+/// `alive` after `alive_after` seconds; it waits for `started`, then runs
+/// `then`. So the descendant has surely run, and only its being killed keeps
+/// `alive` from appearing. cmd, not PowerShell: that can take seconds to
+/// start on a fresh CI machine.
+fn descendant_script(dir: &Path, alive_after: u32, then: &str) -> PathBuf {
+    let script = dir.join("run.bat");
+    let ping = alive_after + 1; // ping -n N waits N - 1 seconds
+    std::fs::write(
+        &script,
+        format!(
+            "@echo off\r\ncd /d \"%~dp0\"\r\n\
+             start /b cmd /c \"echo x>started& ping -n {ping} 127.0.0.1 >nul& echo x>alive\"\r\n\
+             :wait\r\nif not exist started (ping -n 1 127.0.0.1 >nul& goto wait)\r\n\
+             {then}\r\n"
+        ),
+    )
+    .unwrap();
+    script
+}
+
 #[test]
 fn test_wall_time_limit_kills_descendants_too() {
     let dir = tempfile::tempdir().unwrap();
-    let marker = dir.path().join("still-alive");
-    let script = format!(
-        "Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 4; Set-Content \"{}\" x' -NoNewWindow; Start-Sleep 30",
-        marker.display()
-    );
-
-    // Control: given the time, the descendant does write the marker.
-    let patient = builder()
-        .wall_time_limit(Duration::from_secs(7))
-        .build()
-        .unwrap();
-    powershell(&patient, &script);
-    assert!(marker.exists(), "control: the descendant never ran");
-    std::fs::remove_file(&marker).unwrap();
-
+    let script = descendant_script(dir.path(), 5, "ping -n 30 127.0.0.1 >nul");
     let sandbox = builder()
-        .wall_time_limit(Duration::from_secs(1))
+        .wall_time_limit(Duration::from_secs(3))
         .build()
         .unwrap();
-    let r = powershell(&sandbox, &script);
-    assert!(r.killed_by_timeout);
+    let r = sandbox
+        .run("cmd", &["/c", script.to_str().unwrap()])
+        .unwrap();
+    assert!(r.killed_by_timeout, "{r:?}");
+    assert!(
+        dir.path().join("started").exists(),
+        "the descendant never ran"
+    );
     std::thread::sleep(Duration::from_secs(5));
-    assert!(!marker.exists(), "a descendant outlived the run");
+    assert!(
+        !dir.path().join("alive").exists(),
+        "a descendant outlived the run"
+    );
 }
 
 /// A run ends when its command does: what it left running in the
 /// background goes with it, as on Linux and macOS.
 #[test]
 fn test_background_processes_end_with_the_run() {
+    let sandbox = builder()
+        .wall_time_limit(Duration::from_secs(30))
+        .build()
+        .unwrap();
+
+    // Control: left alive, the descendant does write `alive`.
+    let control = tempfile::tempdir().unwrap();
+    let wait_for_alive = ":alive\r\nif not exist alive (ping -n 1 127.0.0.1 >nul& goto alive)";
+    let script = descendant_script(control.path(), 3, wait_for_alive);
+    let r = sandbox
+        .run("cmd", &["/c", script.to_str().unwrap()])
+        .unwrap();
+    assert!(r.success(), "control: {r:?}");
+
     let dir = tempfile::tempdir().unwrap();
-    let marker = dir.path().join("still-alive");
-    let sandbox = builder().build().unwrap();
-    let background = format!(
-        "Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 3; Set-Content \"{}\" x' -NoNewWindow",
-        marker.display()
-    );
-
-    // Control: with the command still running, the background process
-    // does write the marker, so its absence below means something.
-    powershell(&sandbox, &format!("{background}; Start-Sleep 6"));
-    assert!(marker.exists(), "control: the background process never ran");
-    std::fs::remove_file(&marker).unwrap();
-
+    let script = descendant_script(dir.path(), 3, "echo root done");
     let start = Instant::now();
-    let r = powershell(&sandbox, &format!("{background}; 'root done'"));
-    assert!(r.stdout.contains("root done"));
+    let r = sandbox
+        .run("cmd", &["/c", script.to_str().unwrap()])
+        .unwrap();
+    assert!(r.stdout.contains("root done"), "{r:?}");
+    assert!(
+        dir.path().join("started").exists(),
+        "the descendant never ran"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(3),
         "waited for the background process"
     );
     std::thread::sleep(Duration::from_secs(4));
-    assert!(!marker.exists(), "a background process outlived the run");
+    assert!(
+        !dir.path().join("alive").exists(),
+        "a background process outlived the run"
+    );
 }
 
 /// stdin and output both far past a pipe's buffer: neither side stalls.
