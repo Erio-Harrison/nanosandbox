@@ -1,12 +1,12 @@
 //! Resource limits tests
 
-use nanosandbox::{MB, Sandbox};
+use nanosandbox::MB;
 use std::time::{Duration, Instant};
 
 /// Wall time limit test - all platforms supported
 #[test]
 fn test_wall_time_limit() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -18,8 +18,9 @@ fn test_wall_time_limit() {
 
     let start = Instant::now();
 
+    // Not `timeout /t`: it exits at once when stdin isn't a console.
     #[cfg(target_os = "windows")]
-    let result = sandbox.run("timeout", &["/t", "10"]).unwrap();
+    let result = sandbox.run("ping", &["-n", "10", "127.0.0.1"]).unwrap();
     #[cfg(not(target_os = "windows"))]
     let result = sandbox.run("sleep", &["10"]).unwrap();
 
@@ -31,7 +32,7 @@ fn test_wall_time_limit() {
 
 #[test]
 fn test_wall_time_within_limit() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -53,7 +54,7 @@ fn test_wall_time_within_limit() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_memory_limit_linux() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir("/tmp")
         .memory_limit(64 * MB)
         .wall_time_limit(Duration::from_secs(10))
@@ -77,7 +78,7 @@ fn test_memory_limit_linux() {
 
 #[test]
 fn test_memory_within_limit() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -112,7 +113,7 @@ fn test_memory_within_limit() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_max_pids_limit() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir("/tmp")
         .max_pids(10)
         .wall_time_limit(Duration::from_secs(5))
@@ -130,30 +131,31 @@ fn test_max_pids_limit() {
 
 #[test]
 fn test_multiple_limits_combined() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
             "/tmp"
         })
         .memory_limit(128 * MB)
-        .wall_time_limit(Duration::from_secs(5))
-        .max_open_files(50)
-        .build()
-        .unwrap();
-
+        .wall_time_limit(Duration::from_secs(5));
+    // Windows has no open-file limit, and refuses one.
     #[cfg(not(target_os = "windows"))]
-    {
-        let result = sandbox.run("echo", &["hello"]).unwrap();
-        assert!(result.success());
-    }
+    let sandbox = sandbox.max_open_files(50);
+    let sandbox = sandbox.build().unwrap();
+
+    #[cfg(target_os = "windows")]
+    let result = sandbox.run("cmd", &["/c", "echo hello"]).unwrap();
+    #[cfg(not(target_os = "windows"))]
+    let result = sandbox.run("echo", &["hello"]).unwrap();
+    assert!(result.success());
 }
 
 #[test]
 #[cfg(not(target_os = "macos"))]
 fn test_cpu_limit() {
     // CPU limit test - verifies it doesn't crash
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {

@@ -35,8 +35,9 @@ pub struct ExecutionResult {
 
     /// Whether the process was killed for using more than `cpu_time_limit`
     /// in total, across every process of the run, not just one of them.
-    /// Linux only (a cgroup's `cpu.stat`); `cpu_time_limit` is also applied
-    /// per process everywhere via `RLIMIT_CPU`, which this is on top of.
+    /// Linux (a cgroup's `cpu.stat`) and Windows (the run's Job Object). On
+    /// Linux and macOS `cpu_time_limit` is also applied per process via
+    /// `RLIMIT_CPU`, which this is on top of.
     pub killed_by_cpu_limit: bool,
 
     /// Signal that killed the process, if any

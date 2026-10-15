@@ -3,8 +3,19 @@
 //! Run with: cargo bench
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use nanosandbox::{MB, Sandbox};
+use nanosandbox::{MB, Sandbox, SandboxBuilder};
 use std::time::Duration;
+
+/// Without the one-time install, a Windows sandbox can only use the host's
+/// network.
+fn builder() -> SandboxBuilder {
+    let builder = Sandbox::builder();
+    if cfg!(windows) {
+        builder.host_network()
+    } else {
+        builder
+    }
+}
 
 /// Benchmark sandbox creation overhead
 fn bench_sandbox_creation(c: &mut Criterion) {
@@ -12,7 +23,7 @@ fn bench_sandbox_creation(c: &mut Criterion) {
 
     group.bench_function("minimal", |b| {
         b.iter(|| {
-            let sandbox = Sandbox::builder()
+            let sandbox = builder()
                 .working_dir(if cfg!(windows) {
                     "C:\\Windows\\Temp"
                 } else {
@@ -26,24 +37,26 @@ fn bench_sandbox_creation(c: &mut Criterion) {
 
     group.bench_function("with_limits", |b| {
         b.iter(|| {
-            let sandbox = Sandbox::builder()
+            let sandbox = builder()
                 .working_dir(if cfg!(windows) {
                     "C:\\Windows\\Temp"
                 } else {
                     "/tmp"
                 })
                 .memory_limit(256 * MB)
-                .wall_time_limit(Duration::from_secs(30))
-                .max_open_files(100)
-                .build()
-                .unwrap();
-            black_box(sandbox)
+                .wall_time_limit(Duration::from_secs(30));
+            // Windows has no open-file limit, and refuses one.
+            #[cfg(not(target_os = "windows"))]
+            let sandbox = sandbox.max_open_files(100);
+            black_box(sandbox.build().unwrap())
         })
     });
 
+    // Windows refuses writable() without the install.
+    #[cfg(not(target_os = "windows"))]
     group.bench_function("with_mounts", |b| {
         b.iter(|| {
-            let sandbox = Sandbox::builder()
+            let sandbox = builder()
                 .working_dir(if cfg!(windows) {
                     "C:\\Windows\\Temp"
                 } else {
@@ -64,7 +77,7 @@ fn bench_command_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("command_execution");
 
     // Pre-create sandbox for execution benchmarks
-    let sandbox = Sandbox::builder()
+    let sandbox = builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -115,7 +128,7 @@ fn bench_command_execution(c: &mut Criterion) {
 fn bench_output_sizes(c: &mut Criterion) {
     let mut group = c.benchmark_group("output_sizes");
 
-    let sandbox = Sandbox::builder()
+    let sandbox = builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -136,6 +149,17 @@ fn bench_output_sizes(c: &mut Criterion) {
         });
     }
 
+    #[cfg(target_os = "windows")]
+    for size in [10, 100, 1000, 10000] {
+        group.bench_with_input(BenchmarkId::new("lines", size), &size, |b, &size| {
+            b.iter(|| {
+                let cmd = format!("for /L %i in (1,1,{size}) do @echo line");
+                let result = sandbox.run("cmd", &["/c", &cmd]).unwrap();
+                black_box(result)
+            })
+        });
+    }
+
     group.finish();
 }
 
@@ -143,7 +167,7 @@ fn bench_output_sizes(c: &mut Criterion) {
 fn bench_stdin_input(c: &mut Criterion) {
     let mut group = c.benchmark_group("stdin_input");
 
-    let sandbox = Sandbox::builder()
+    let sandbox = builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -159,6 +183,17 @@ fn bench_stdin_input(c: &mut Criterion) {
             let input: Vec<u8> = vec![b'x'; size];
             b.iter(|| {
                 let result = sandbox.run_with_input("cat", &[], Some(&input)).unwrap();
+                black_box(result)
+            })
+        });
+    }
+
+    #[cfg(target_os = "windows")]
+    for size in [100, 1000, 10000] {
+        group.bench_with_input(BenchmarkId::new("bytes", size), &size, |b, &size| {
+            let input: Vec<u8> = vec![b'x'; size];
+            b.iter(|| {
+                let result = sandbox.run_with_input("sort", &[], Some(&input)).unwrap();
                 black_box(result)
             })
         });
@@ -204,7 +239,7 @@ fn bench_parallel_execution(c: &mut Criterion) {
                     let handles: Vec<_> = (0..count)
                         .map(|_| {
                             std::thread::spawn(|| {
-                                let sandbox = Sandbox::builder()
+                                let sandbox = builder()
                                     .working_dir(if cfg!(windows) {
                                         "C:\\Windows\\Temp"
                                     } else {

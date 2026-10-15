@@ -1,5 +1,18 @@
 //! Helpers shared by the test binaries.
 
+/// `Sandbox::builder()`, for tests about something other than the network.
+/// Without the one-time install, a Windows sandbox can only use the host's
+/// network, so there it says so; elsewhere it's the plain builder.
+#[allow(dead_code)]
+pub fn builder() -> nanosandbox::SandboxBuilder {
+    let builder = nanosandbox::Sandbox::builder();
+    if cfg!(windows) {
+        builder.host_network()
+    } else {
+        builder
+    }
+}
+
 /// Ubuntu 23.10+ confines a fresh user namespace created by an unprivileged,
 /// unconfined process to AppArmor's `unprivileged_userns` profile, which
 /// denies the capabilities nanosandbox needs inside it (mounting, bringing up

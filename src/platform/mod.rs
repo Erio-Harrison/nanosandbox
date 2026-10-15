@@ -9,7 +9,7 @@
 //! |----------|------------|--------|
 //! | Linux | namespaces, cgroups v2, seccomp, Landlock | Full support |
 //! | macOS | sandbox-exec, App Sandbox | Full support |
-//! | Windows | Job Objects | Memory and CPU limits only |
+//! | Windows | Job Objects | Resource limits only |
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -20,7 +20,6 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-#[cfg(unix)]
 pub(crate) mod output;
 #[cfg(unix)]
 pub(crate) mod private_tmp;

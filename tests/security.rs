@@ -43,6 +43,10 @@ mod shared_tmp_dirs;
 #[path = "security/sbpl_rules.rs"]
 mod sbpl_rules;
 
+#[cfg(target_os = "windows")]
+#[path = "security/job_limits.rs"]
+mod job_limits;
+
 // P0: Process management tests (zombie, process groups, signals)
 #[cfg(unix)]
 #[path = "security/process_management.rs"]

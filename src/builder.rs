@@ -154,6 +154,7 @@ impl SandboxConfig {
     }
 
     /// Where `path` led when the sandbox was built, if it was named then.
+    #[cfg_attr(not(unix), allow(dead_code))] // file rules are Unix only so far
     pub(crate) fn pinned_path(&self, path: &Path) -> Option<&Path> {
         self.pinned
             .iter()

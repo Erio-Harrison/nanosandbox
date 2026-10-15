@@ -4,7 +4,7 @@ use nanosandbox::Sandbox;
 
 #[test]
 fn test_echo() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -24,7 +24,7 @@ fn test_echo() {
 
 #[test]
 fn test_exit_code_propagation() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -49,7 +49,7 @@ fn test_exit_code_propagation() {
 
 #[test]
 fn test_stderr_capture() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -68,7 +68,7 @@ fn test_stderr_capture() {
 
 #[test]
 fn test_stdin_input() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -167,7 +167,7 @@ fn test_no_home_without_a_private_temp_directory() {
 
 #[test]
 fn test_environment_variables() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -199,7 +199,7 @@ fn test_working_directory() {
 
 #[test]
 fn test_command_not_found() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -214,7 +214,7 @@ fn test_command_not_found() {
 
 #[test]
 fn test_long_output() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
@@ -239,7 +239,7 @@ fn test_long_output() {
 
 #[test]
 fn test_binary_output() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {

@@ -1,21 +1,38 @@
 //! Windows platform implementation
 //!
-//! Uses Windows security features for sandboxing:
+//! Without the one-time install (see `docs/platform-windows.md`), a run is
+//! the calling user's own process in a Job Object: resource limits and
+//! process lifetime only, no file system or network isolation, so `build()`
+//! refuses every setting that would need them.
 //!
-//! - **Job Objects**: Process group management and resource limits
-//! - **Restricted Tokens**: Security token restrictions
-//! - **AppContainer**: Application isolation (Windows 8+)
+//! - **Job Objects**: every process of a run, with its memory, process
+//!   count, CPU share and CPU time limits; killing the whole run at once.
+
+mod job;
+mod wait;
 
 use crate::builder::{NetworkMode, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::PlatformExecutor;
 use crate::result::ExecutionResult;
-use std::time::Duration;
+use job::{Job, Limits};
+use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
+use std::time::Instant;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+};
+use windows_sys::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+};
 
 /// Check if Windows sandboxing is supported
 pub fn is_supported() -> bool {
-    // Windows sandboxing is always available on Windows
+    // Job Objects (nested, as needed when the host is itself in one) are
+    // in every supported Windows.
     true
 }
 
@@ -36,6 +53,11 @@ impl Default for WindowsExecutor {
     }
 }
 
+/// Environment variables a Windows program can't do without, passed on
+/// from this process even with `clear_env`: without `SystemRoot`, for one,
+/// Winsock fails to start. None of them is a secret.
+const SYSTEM_ENV: [&str; 5] = ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT"];
+
 impl PlatformExecutor for WindowsExecutor {
     fn execute(
         &self,
@@ -43,39 +65,32 @@ impl PlatformExecutor for WindowsExecutor {
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
-        // check_support refuses allow_network on Windows.
+        // check_support refuses allow_network without the install.
         _proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult> {
-        // Windows implementation using Job Objects and Restricted Tokens
-
-        use std::io::Write;
-        use std::process::{Command, Stdio};
-        use std::time::Instant;
-
         let start = Instant::now();
 
-        // Build command
         let mut command = Command::new(cmd);
         command.args(args);
         command.current_dir(&config.working_dir);
 
-        // Set environment
         if config.clear_env {
             command.env_clear();
+            for key in SYSTEM_ENV {
+                if !has_env(config, key)
+                    && let Some(value) = std::env::var_os(key)
+                {
+                    command.env(key, value);
+                }
+            }
         }
         for (key, value) in &config.env {
             command.env(key, value);
         }
-
-        if !config.env.contains_key("PATH") {
-            // Default Windows PATH
-            command.env(
-                "PATH",
-                r"C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem",
-            );
+        if !has_env(config, "PATH") {
+            command.env("PATH", default_path());
         }
 
-        // Setup I/O
         command.stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -83,8 +98,19 @@ impl PlatformExecutor for WindowsExecutor {
         });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
+        // Suspended until it's in the Job, so not even its first instruction
+        // runs outside it. No console window of its own, and none shared
+        // with this process: a Ctrl+C meant for the host isn't the run's.
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
 
-        // Spawn process
+        let job = Job::create(&Limits {
+            memory: config.memory_limit,
+            max_pids: config.max_pids,
+            cpus: config.cpu_limit,
+            cpu_time: config.cpu_time_limit,
+        })
+        .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
+
         let mut child = command.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 SandboxError::CommandNotFound(cmd.to_string())
@@ -96,22 +122,25 @@ impl PlatformExecutor for WindowsExecutor {
             }
         })?;
 
-        // Create Job Object and apply limits
-        #[cfg(windows)]
-        {
-            self.apply_job_limits(&child, config)?;
+        let started = job
+            .assign(child.as_raw_handle() as HANDLE)
+            .map_err(|e| {
+                SandboxError::JobObjectCreation(format!("assign the process to its Job: {e}"))
+            })
+            .and_then(|()| {
+                resume(child.id()).map_err(|e| SandboxError::ExecutionFailed {
+                    context: "resume the process".into(),
+                    source: Box::new(e),
+                })
+            });
+        if let Err(e) = started {
+            // Never resumed, or never in the Job: it hasn't run.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
         }
 
-        // Write stdin
-        if let Some(data) = stdin {
-            if let Some(mut stdin_pipe) = child.stdin.take() {
-                let _ = stdin_pipe.write_all(data);
-            }
-        }
-
-        // Wait with timeout
-        let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
-        self.wait_with_timeout(&mut child, timeout, start)
+        wait::wait(&mut child, &job, stdin, config, start)
     }
 
     /// Refuses what this executor can't enforce, instead of running the
@@ -129,15 +158,13 @@ impl PlatformExecutor for WindowsExecutor {
             });
         }
         for (set, setting) in [
-            (config.cpu_time_limit.is_some(), "cpu_time_limit"),
-            (config.max_pids.is_some(), "max_pids"),
             (config.max_file_size.is_some(), "max_file_size"),
             (config.max_open_files.is_some(), "max_open_files"),
         ] {
             if set {
                 return Err(SandboxError::Unsupported {
                     setting: format!("{setting} on Windows"),
-                    reason: "not implemented on Windows yet; leave it unset there".into(),
+                    reason: "Windows has no per-process limit for it; leave it unset there".into(),
                 });
             }
         }
@@ -157,131 +184,50 @@ impl PlatformExecutor for WindowsExecutor {
     }
 }
 
-impl WindowsExecutor {
-    #[cfg(windows)]
-    fn apply_job_limits(&self, child: &std::process::Child, config: &SandboxConfig) -> Result<()> {
-        use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::HANDLE;
-        use windows::Win32::System::JobObjects::*;
+/// Environment variable names are case-insensitive on Windows.
+fn has_env(config: &SandboxConfig, key: &str) -> bool {
+    config.env.keys().any(|k| k.eq_ignore_ascii_case(key))
+}
 
-        unsafe {
-            // Create Job Object
-            let job = CreateJobObjectW(None, None)
-                .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
+/// The system directories, where Windows actually is.
+fn default_path() -> String {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+    format!(r"{root}\system32;{root};{root}\System32\Wbem;{root}\System32\WindowsPowerShell\v1.0\")
+}
 
-            // Set basic limits
-            let mut basic_limits = JOBOBJECT_BASIC_LIMIT_INFORMATION::default();
-            basic_limits.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-            // Memory limit
-            if let Some(memory) = config.memory_limit {
-                basic_limits.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
-                let mut extended_limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-                extended_limits.BasicLimitInformation = basic_limits;
-                extended_limits.ProcessMemoryLimit = memory as usize;
-
-                SetInformationJobObject(
-                    job,
-                    JobObjectExtendedLimitInformation,
-                    &extended_limits as *const _ as *const _,
-                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-                )
-                .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
-            }
-
-            // CPU limit
-            if let Some(cpu) = config.cpu_limit {
-                let cpu_rate = JOBOBJECT_CPU_RATE_CONTROL_INFORMATION {
-                    ControlFlags: JOB_OBJECT_CPU_RATE_CONTROL_ENABLE
-                        | JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
-                    Anonymous: JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0 {
-                        CpuRate: (cpu * 10000.0) as u32, // In hundredths of a percent
-                    },
+/// Resumes the only thread of a process created suspended.
+fn resume(pid: u32) -> std::io::Result<()> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..std::mem::zeroed()
+        };
+        let mut resumed = Err(std::io::Error::other("its thread wasn't found"));
+        let mut more = Thread32First(snapshot, &mut entry) != 0;
+        while more {
+            if entry.th32OwnerProcessID == pid {
+                let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                resumed = if thread.is_null() {
+                    Err(std::io::Error::last_os_error())
+                } else {
+                    let r = ResumeThread(thread);
+                    CloseHandle(thread);
+                    if r == u32::MAX {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
                 };
-
-                SetInformationJobObject(
-                    job,
-                    JobObjectCpuRateControlInformation,
-                    &cpu_rate as *const _ as *const _,
-                    std::mem::size_of::<JOBOBJECT_CPU_RATE_CONTROL_INFORMATION>() as u32,
-                )
-                .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
+                break;
             }
-
-            // Assign process to job
-            let process_handle = HANDLE(child.as_raw_handle());
-            AssignProcessToJobObject(job, process_handle)
-                .map_err(|e| SandboxError::JobObjectCreation(e.to_string()))?;
+            more = Thread32Next(snapshot, &mut entry) != 0;
         }
-
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    fn apply_job_limits(
-        &self,
-        _child: &std::process::Child,
-        _config: &SandboxConfig,
-    ) -> Result<()> {
-        // No-op on non-Windows
-        Ok(())
-    }
-
-    fn wait_with_timeout(
-        &self,
-        child: &mut std::process::Child,
-        timeout: Duration,
-        start: std::time::Instant,
-    ) -> Result<ExecutionResult> {
-        use std::io::Read;
-
-        let mut killed_by_timeout = false;
-
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    let mut stdout = String::new();
-                    let mut stderr = String::new();
-
-                    if let Some(mut pipe) = child.stdout.take() {
-                        let _ = pipe.read_to_string(&mut stdout);
-                    }
-                    if let Some(mut pipe) = child.stderr.take() {
-                        let _ = pipe.read_to_string(&mut stderr);
-                    }
-
-                    return Ok(ExecutionResult {
-                        stdout,
-                        stderr,
-                        exit_code: status.code().unwrap_or(-1),
-                        duration: start.elapsed(),
-                        killed_by_timeout,
-                        killed_by_oom: false,
-                        killed_by_tmp_limit: false,
-                        killed_by_cpu_limit: false,
-                        signal: None,
-                        peak_memory: None,
-                        cpu_time: None,
-                        blocked_hosts: Vec::new(),
-                        output_truncated: false,
-                        proc_isolated: true,
-                    });
-                }
-                Ok(None) => {
-                    if start.elapsed() > timeout {
-                        let _ = child.kill();
-                        killed_by_timeout = true;
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) => {
-                    return Err(SandboxError::ExecutionFailed {
-                        context: "wait for process".into(),
-                        source: Box::new(e),
-                    });
-                }
-            }
-        }
+        CloseHandle(snapshot);
+        resumed
     }
 }
 
@@ -290,14 +236,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_windows_executor_creation() {
-        let executor = WindowsExecutor::new();
-        let _ = executor;
-    }
-
-    #[test]
     fn test_windows_is_supported() {
-        #[cfg(windows)]
         assert!(is_supported());
     }
 }

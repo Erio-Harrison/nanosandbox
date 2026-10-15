@@ -123,7 +123,7 @@ fn test_environment_isolation() {
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("SECRET_VAR", "secret_value") };
 
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {

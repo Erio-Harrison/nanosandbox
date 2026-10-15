@@ -62,6 +62,7 @@ impl Sandbox {
 
     /// Create a sandbox from a builder
     pub(crate) fn from_builder(builder: SandboxBuilder) -> Result<Self> {
+        #[cfg_attr(not(unix), allow(unused_mut))] // pinned on Unix only
         let mut config = builder.into_config();
         let executor = get_executor();
 

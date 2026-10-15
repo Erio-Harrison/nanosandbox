@@ -59,7 +59,10 @@ fn test_sandbox_has_traceable_id() {
 /// Test: Platform should be identifiable
 #[test]
 fn test_platform_identifiable() {
-    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let sandbox = crate::common::builder()
+        .working_dir("/tmp")
+        .build()
+        .unwrap();
 
     let platform = sandbox.platform();
 

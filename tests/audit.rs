@@ -61,7 +61,11 @@ impl AuditSink for PanicsAtEnd {
 }
 
 fn sandbox(sink: Arc<dyn AuditSink>) -> Sandbox {
-    Sandbox::builder()
+    let builder = Sandbox::builder();
+    // Without the one-time install, Windows only runs with the host's network.
+    #[cfg(windows)]
+    let builder = builder.host_network();
+    builder
         .working_dir("/")
         .env("SECRET_TOKEN", "hunter2-hunter2")
         .audit(sink)

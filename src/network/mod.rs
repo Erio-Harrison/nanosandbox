@@ -37,7 +37,11 @@
 //! on Linux, a fresh loopback port on macOS. It closes when the run ends,
 //! taking the run's open connections with it.
 
+// Windows refuses allow_network() until its install exists, so nothing
+// there serves a run through the proxy yet.
+#[cfg_attr(windows, allow(dead_code))]
 mod manager;
+#[cfg_attr(windows, allow(dead_code))]
 mod proxy;
 
 pub use manager::ProxiedNetwork;

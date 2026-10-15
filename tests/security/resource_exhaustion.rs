@@ -57,7 +57,7 @@ except MemoryError:
 /// CPU bomb test - all platforms
 #[test]
 fn test_cpu_bomb_contained() {
-    let sandbox = Sandbox::builder()
+    let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"
         } else {
