@@ -356,7 +356,7 @@ let cpu_time = Duration::from_secs(rusage.ru_utime.tv_sec)
 
 ## Windows Implementation
 
-Windows uses a Job Object for memory and CPU limits, and nothing else yet:
+Windows uses a Job Object for resource limits, and nothing else yet:
 the process runs as the calling user, with its file system and network.
 `build()` refuses `no_network()` (the default), `allow_network()`, `mount`,
 `tmpfs` and `rootfs` there. The code below is the intended design.

@@ -139,13 +139,20 @@ fn create_restricted_token() -> Result<HANDLE> {
 
 ## What's Enforced Today
 
-Only the Job Object's memory and CPU limits. The process runs as the calling
-user, with that user's file system and network access; Restricted Tokens and
-AppContainer below are design notes, not implemented. So `build()` refuses
-what can't be enforced instead of quietly running without it:
+Only resource limits, through a Job Object holding every process of a run:
+`memory_limit`, `max_pids`, `cpu_time_limit` and `wall_time_limit`, and
+whatever the run leaves running is killed when it ends. `cpu_limit` is set as
+a hard cap, but Windows ignores it where VBS is on (seen on Windows 11, with
+the hypervisor's root scheduler).
+
+The process runs as the calling user, with that user's file system and
+network access; Restricted Tokens and AppContainer below are design notes,
+not implemented. So `build()` refuses what can't be enforced instead of
+quietly running without it:
 
 - `no_network()` (the default) and `allow_network()`: call `host_network()`.
-- `rootfs`, `mount` and `tmpfs`.
+- `read_only`, `writable`, `private_tmp`, `deny_read` and `hide_home`.
+- `max_file_size` and `max_open_files`.
 
 ## Feature Limitations
 
@@ -157,7 +164,7 @@ what can't be enforced instead of quietly running without it:
 | Network isolation | ✅ network ns | ❌ | Windows has no network namespaces |
 | PID isolation | ✅ PID ns | ❌ | Windows has no PID isolation |
 | Memory limit | ✅ cgroups | ✅ Job | Equivalent functionality |
-| CPU limit | ✅ cgroups | ✅ Job | Equivalent functionality |
+| CPU limit | ✅ cgroups | ⚠️ Job | Ignored where VBS is on |
 | Process count limit | ✅ cgroups | ✅ Job | Equivalent functionality |
 
 ### Windows-Specific Issues

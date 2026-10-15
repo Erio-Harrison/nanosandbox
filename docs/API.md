@@ -241,10 +241,10 @@ Where a platform can't enforce a limit, `build()` refuses it
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | `memory_limit` | cgroup | checked every 10 ms, killed when over | Job Object |
-| `cpu_limit` | cgroup | refused | Job Object |
+| `cpu_limit` | cgroup | refused | Job Object, ignored where VBS is on |
 | `wall_time_limit` | ✓ | ✓ | ✓ |
-| `cpu_time_limit` | rlimit *and* cgroup total | rlimit | refused |
-| `max_pids` | cgroup | refused | refused |
+| `cpu_time_limit` | rlimit *and* cgroup total | rlimit | Job Object total |
+| `max_pids` | cgroup | refused | Job Object |
 | `max_file_size`, `max_open_files` | rlimit | rlimit | refused |
 
 The presets leave out `cpu_limit` and `max_pids` on macOS. Values that can't
@@ -254,8 +254,8 @@ refused too.
 `cpu_time_limit` is `RLIMIT_CPU`, which only charges time to the one process
 it's set on. On Linux that's on top of a second check, against the whole
 cgroup's total CPU time, so a program that forks can't multiply its budget
-by however many children it starts; macOS and Windows have no equivalent
-for that second check.
+by however many children it starts. Windows checks only that total (its
+Job Object); macOS has no equivalent.
 
 ### Network
 
