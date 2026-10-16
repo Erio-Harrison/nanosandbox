@@ -11,10 +11,8 @@ fn builder() -> nanosandbox::SandboxBuilder {
 
 const HELPER_ARGS: [&str; 4] = ["--exact", "job_limits::helper", "--ignored", "--nocapture"];
 
-/// Not a test: what the memory and CPU tests run in the sandbox, this test
-/// binary started again. PowerShell's own start-up time and memory vary too
-/// much between machines (hundreds of MB on a fresh CI runner) to measure
-/// against. `NSB_HELPER` is a size in MB to allocate, or `spin`.
+/// Not a test: what the memory and CPU tests run in the sandbox (this binary again; PowerShell's
+/// start-up varies too much to measure against). `NSB_HELPER` is MB to allocate, or `spin`.
 #[test]
 #[ignore]
 fn helper() {
@@ -26,7 +24,6 @@ fn helper() {
             std::hint::black_box(0u64);
         }
     }
-    // With NSB_TWIN, the same again in a second process, alive at once.
     let twin = std::env::var_os("NSB_TWIN").map(|_| {
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(HELPER_ARGS)
@@ -69,8 +66,7 @@ fn test_memory_limit_kills_the_run() {
     assert!(peak > 0 && peak <= 150 * MB, "peak {peak}");
 }
 
-/// The limit is the whole run's, not each process's: two processes that
-/// each fit under it alone don't fit together.
+/// The limit is the whole run's: two processes that fit alone don't fit together.
 #[test]
 fn test_memory_limit_counts_every_process_of_the_run() {
     let r = run_helper(builder().memory_limit(200 * MB), "120", false);
@@ -116,11 +112,8 @@ fn test_cpu_time_limit_kills_the_run() {
     );
 }
 
-/// A batch file that starts a descendant, which writes `started` at once and
-/// `alive` after `alive_after` seconds; it waits for `started`, then runs
-/// `then`. So the descendant has surely run, and only its being killed keeps
-/// `alive` from appearing. cmd, not PowerShell: that can take seconds to
-/// start on a fresh CI machine.
+/// A batch file that starts a descendant writing `started` at once and `alive` after `alive_after`s;
+/// it waits for `started`, then runs `then`. cmd, not PowerShell, which can take seconds to start on CI.
 fn descendant_script(dir: &Path, alive_after: u32, then: &str) -> PathBuf {
     let script = dir.join("run.bat");
     let ping = alive_after + 1; // ping -n N waits N - 1 seconds
@@ -160,8 +153,7 @@ fn test_wall_time_limit_kills_descendants_too() {
     );
 }
 
-/// A run ends when its command does: what it left running in the
-/// background goes with it, as on Linux and macOS.
+/// A run ends with its command: background leftovers go with it, as on Linux and macOS.
 #[test]
 fn test_background_processes_end_with_the_run() {
     let sandbox = builder()
@@ -169,7 +161,6 @@ fn test_background_processes_end_with_the_run() {
         .build()
         .unwrap();
 
-    // Control: left alive, the descendant does write `alive`.
     let control = tempfile::tempdir().unwrap();
     let wait_for_alive = ":alive\r\nif not exist alive (ping -n 1 127.0.0.1 >nul& goto alive)";
     let script = descendant_script(control.path(), 3, wait_for_alive);
@@ -226,8 +217,7 @@ fn test_output_past_max_output_is_truncated() {
     assert!(r.success());
 }
 
-/// clear_env leaves out the host's variables, but not the few Windows
-/// programs can't start without.
+/// clear_env leaves out host variables but not the few Windows programs need to start.
 #[test]
 fn test_clear_env_keeps_what_windows_needs() {
     // SAFETY: tests in this binary don't read this variable concurrently.
@@ -257,7 +247,6 @@ fn test_accounting_is_reported() {
 fn test_what_needs_the_install_is_refused() {
     let unsupported =
         |b: nanosandbox::SandboxBuilder| matches!(b.build(), Err(SandboxError::Unsupported { .. }));
-    // no_network() is the default.
     assert!(unsupported(
         Sandbox::builder().working_dir(r"C:\Windows\Temp")
     ));

@@ -1,21 +1,9 @@
-//! An audit trail: two structured events per run, handed to an
-//! [`AuditSink`] the caller supplies with [`SandboxBuilder::audit`].
+//! Audit trail: a start and an end event per run, handed to the [`AuditSink`] set with [`SandboxBuilder::audit`].
 //!
-//! [`AuditSink::begin`] is called before the command starts, and may refuse
-//! it: a run whose start could not be recorded does not happen, so nothing
-//! runs unaudited. [`AuditSink::end`] is called after, with how it ended. A
-//! start with no end is itself a record: the host died, or was killed, while
-//! the command ran.
-//!
-//! Events carry no data from the run: not stdin, not stdout or stderr (only
-//! their sizes), not environment values (only the names). The command and its
-//! arguments are recorded, with what looks like a secret in them (a
-//! `--token=...`, an `Authorization:` header, a password in a URL, a
-//! `NAME=value` with a secret-sounding name) replaced by `<redacted>`. That
-//! is best effort, a pattern match: keep secrets out of arguments.
-//!
-//! Where the events go, and how they're kept tamper-evident, is the sink's
-//! business: `nanosandbox-mcp --audit-dir` writes a hash chain.
+//! `begin` may refuse a run, so nothing runs unaudited; a start with no end means the host
+//! died mid-run. Events carry only sizes and env names, never stdin/stdout/env values.
+//! Secret-looking arguments (`--token=...`, `Authorization:`, URL passwords, `NAME=value`)
+//! become `<redacted>`; best effort, keep secrets out of arguments.
 //!
 //! [`SandboxBuilder::audit`]: crate::SandboxBuilder::audit
 
@@ -26,30 +14,23 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Receives the events of each run, on the thread that ran it. Runs may
-/// overlap, so both methods can be called from several threads at once. They
-/// should return quickly.
+/// Receives each run's events on the thread that ran it; called concurrently, keep it fast.
 pub trait AuditSink: Send + Sync {
-    /// Called before the command starts. `Err` refuses the run, which then
-    /// returns [`SandboxError::Audit`] without running anything. A panic
-    /// counts as an `Err`.
+    /// Called before the command starts. `Err` or a panic refuses the run with [`SandboxError::Audit`].
     fn begin(&self, start: &AuditStart) -> Result<(), String>;
 
-    /// Called after the run, whatever became of it. Nothing can be refused
-    /// any more; a panic here is caught, and the run's result still returned.
+    /// Called after the run; a panic is caught and the result still returned.
     fn end(&self, end: &AuditEnd);
 }
 
-/// What is about to run. Serializes to JSON with integer fields only, so that
-/// the same event always serializes to the same text.
+/// What is about to run. Serializes to JSON with integer fields only.
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct AuditStart {
     /// When the run began, in milliseconds since the Unix epoch.
     pub ts_ms: u64,
     pub sandbox_id: String,
-    /// This sandbox's run counter: `(sandbox_id, run)` names the run, and
-    /// ties its [`AuditEnd`] to this.
+    /// `(sandbox_id, run)` names the run and ties it to its [`AuditEnd`].
     pub run: u64,
     pub platform: &'static str,
     pub command: String,
@@ -79,8 +60,7 @@ pub struct AuditPolicy {
     pub network: &'static str,
     pub allowed_domains: Vec<String>,
     pub allow_private_destinations: bool,
-    /// Paths the sandbox may read, and may write; `source:target` where a
-    /// bind puts one at another path.
+    /// Readable and writable paths; `source:target` for binds.
     pub read_only: Vec<String>,
     pub writable: Vec<String>,
     pub deny_read: Vec<String>,
@@ -273,8 +253,7 @@ pub(crate) fn end(
 mod redact {
     const REDACTED: &str = "<redacted>";
 
-    /// Words that make a name (`--api-key`, `GITHUB_TOKEN`) one whose value
-    /// is a secret.
+    /// Words that mark a name (`--api-key`, `GITHUB_TOKEN`) as holding a secret.
     const SECRET_WORDS: [&str; 11] = [
         "token",
         "secret",

@@ -1,10 +1,6 @@
-//! Network control module
-//!
-//! Provides cross-platform network isolation and domain whitelisting.
+//! Network isolation and domain allowlisting through an HTTP proxy on every platform.
 //!
 //! ## Architecture
-//!
-//! All platforms use an HTTP proxy for domain whitelisting:
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
@@ -33,12 +29,10 @@
 //! | macOS    | SBPL rules        | HTTP proxy       |
 //! | Windows  | none: only `host_network()` is supported | none |
 //!
-//! Each run gets a proxy listener of its own: inside its network namespace
-//! on Linux, a fresh loopback port on macOS. It closes when the run ends,
-//! taking the run's open connections with it.
+//! Each run gets its own proxy listener (in its network namespace on Linux, a fresh loopback
+//! port on macOS), closed with the run's open connections when it ends.
 
-// Windows refuses allow_network() until its install exists, so nothing
-// there serves a run through the proxy yet.
+// // Windows refuses allow_network() for now, so nothing there uses the proxy.
 #[cfg_attr(windows, allow(dead_code))]
 mod manager;
 #[cfg_attr(windows, allow(dead_code))]

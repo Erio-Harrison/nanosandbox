@@ -1,15 +1,5 @@
-//! Platform abstraction layer
-//!
-//! This module provides a unified interface for sandbox implementation
-//! across different operating systems.
-//!
-//! ## Supported Platforms
-//!
-//! | Platform | Technology | Status |
-//! |----------|------------|--------|
-//! | Linux | namespaces, cgroups v2, seccomp, Landlock | Full support |
-//! | macOS | sandbox-exec, App Sandbox | Full support |
-//! | Windows | Job Objects | Resource limits only |
+//! Platform abstraction layer: Linux (namespaces, cgroups v2, seccomp, Landlock), macOS
+//! (sandbox-exec), Windows (Job Objects, resource limits only).
 
 #[cfg(target_os = "linux")]
 pub mod linux;
@@ -31,33 +21,16 @@ use crate::error::Result;
 use crate::network::ProxiedNetwork;
 use crate::result::ExecutionResult;
 
-/// `cpu_time_limit` as RLIMIT_CPU, which counts whole seconds: rounded up,
-/// and never below 1. Truncating instead meant a sub-second limit became 0
-/// and was skipped, i.e. no limit at all.
+/// `cpu_time_limit` as RLIMIT_CPU whole seconds, rounded up and at least 1 (0 would mean no limit).
 #[cfg(unix)]
 pub(crate) fn rlimit_cpu_secs(limit: std::time::Duration) -> u64 {
     (limit.as_secs() + u64::from(limit.subsec_nanos() > 0)).max(1)
 }
 
-/// Platform-specific sandbox executor trait
-///
-/// This trait defines the interface that all platform implementations must provide.
-/// Each platform (Linux, macOS, Windows) has its own implementation using
-/// native sandboxing mechanisms.
+/// Platform-specific sandbox executor.
 pub trait PlatformExecutor: Send + Sync {
-    /// Execute a command in the sandbox
-    ///
-    /// # Arguments
-    /// * `config` - Sandbox configuration (limits, mounts, etc.)
-    /// * `cmd` - Command to execute
-    /// * `args` - Command arguments
-    /// * `stdin` - Optional stdin data to pass to the process
-    /// * `proxy` - The sandbox's proxy, already running, when `network_mode` is
-    ///   `Proxied`. Owned by the `Sandbox` and reused across every `run()` call
-    ///   instead of being started and torn down per call.
-    ///
-    /// # Returns
-    /// * `ExecutionResult` containing stdout, stderr, exit code, and resource usage
+    /// Execute a command in the sandbox. `proxy` is the sandbox's running proxy when
+    /// `network_mode` is `Proxied`, reused across `run()` calls.
     fn execute(
         &self,
         config: &SandboxConfig,
@@ -67,17 +40,11 @@ pub trait PlatformExecutor: Send + Sync {
         proxy: Option<&ProxiedNetwork>,
     ) -> Result<ExecutionResult>;
 
-    /// Check if this platform supports all requested features
-    ///
-    /// This validates that the platform can implement all features
-    /// specified in the configuration before attempting execution.
+    /// Check that the platform supports every requested feature.
     fn check_support(&self, config: &SandboxConfig) -> Result<()>;
 }
 
-/// Get the platform-specific executor
-///
-/// Returns a boxed executor for the current platform. The executor implements
-/// sandboxing using platform-native mechanisms.
+/// Get the executor for the current platform.
 pub fn get_executor() -> Box<dyn PlatformExecutor> {
     #[cfg(target_os = "linux")]
     {
@@ -100,9 +67,7 @@ pub fn get_executor() -> Box<dyn PlatformExecutor> {
     }
 }
 
-/// Check if the current platform supports sandboxing
-///
-/// Returns true if the platform has the necessary capabilities for sandboxing.
+/// Whether the current platform supports sandboxing.
 pub fn is_supported() -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -154,7 +119,6 @@ mod tests {
 
     #[test]
     fn test_platform_is_supported() {
-        // Should return true on all supported platforms
         assert!(is_supported());
     }
 
@@ -173,7 +137,6 @@ mod tests {
     #[test]
     fn test_get_executor() {
         let executor = get_executor();
-        // Just verify we can get an executor
         let _ = executor;
     }
 

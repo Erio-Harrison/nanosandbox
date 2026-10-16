@@ -1,18 +1,9 @@
-//! P1: Advanced Proxy Tests
-//!
-//! Tests for:
-//! - Chunked transfer encoding support
-//! - Connection keep-alive
-//! - Proxy timeout handling
-//! - Error retry logic
+//! Advanced proxy behavior: chunked encoding, keep-alive, timeouts, large and malformed responses.
 
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: Proxy should handle chunked transfer encoding
-///
-/// Current bug: Proxy doesn't properly handle chunked responses
-/// Expected: Chunked responses are correctly forwarded to client
+/// Chunked responses are forwarded correctly to the client.
 #[test]
 #[cfg(unix)]
 fn test_proxy_chunked_transfer() {
@@ -26,7 +17,6 @@ fn test_proxy_chunked_transfer() {
         .build()
         .unwrap();
 
-    // httpbin /stream/N returns N chunked JSON lines
     let result = sandbox
         .run(
             "sh",
@@ -51,7 +41,6 @@ fn test_proxy_chunked_transfer() {
 
     let output = result.stdout.trim();
 
-    // Either chunked works or curl not available
     if !output.contains("NO_CURL") {
         assert!(
             output.contains("CHUNKED_OK") || output.contains("CHUNKED_FAIL"),
@@ -59,17 +48,13 @@ fn test_proxy_chunked_transfer() {
             output
         );
 
-        // If we got a failure, it documents current behavior
         if output.contains("CHUNKED_FAIL") {
             println!("Note: Chunked transfer not fully working yet: {}", output);
         }
     }
 }
 
-/// Test: Proxy should support keep-alive connections
-///
-/// Current bug: Each request creates new connection
-/// Expected: Multiple requests reuse the same connection
+/// Keep-alive: multiple requests should reuse one connection (currently each opens a new one).
 #[test]
 #[cfg(unix)]
 fn test_proxy_keepalive() {
@@ -83,7 +68,6 @@ fn test_proxy_keepalive() {
         .build()
         .unwrap();
 
-    // Make multiple requests - keep-alive should make this faster
     let result = sandbox
         .run(
             "sh",
@@ -112,13 +96,10 @@ fn test_proxy_keepalive() {
     let output = result.stdout.trim();
 
     if output.contains("REQUESTS_DONE") {
-        // Requests completed - keep-alive would make them faster
-        // For now just verify they work
         assert!(result.exit_code == 0 || result.killed_by_timeout);
     }
 }
 
-/// Test: Proxy should handle large responses
 #[test]
 #[cfg(unix)]
 fn test_proxy_large_response() {
@@ -132,7 +113,6 @@ fn test_proxy_large_response() {
         .build()
         .unwrap();
 
-    // httpbin /bytes/N returns N random bytes
     let result = sandbox
         .run(
             "sh",
@@ -158,14 +138,11 @@ fn test_proxy_large_response() {
     let output = result.stdout.trim();
 
     if output.contains("LARGE_OK") {
-        // Large response worked
     } else if output.contains("LARGE_FAIL") {
-        // Document failure for fix
         println!("Note: Large response handling may need work: {}", output);
     }
 }
 
-/// Test: Proxy should handle connection refused gracefully
 #[test]
 #[cfg(unix)]
 fn test_proxy_connection_refused() {
@@ -179,7 +156,6 @@ fn test_proxy_connection_refused() {
         .build()
         .unwrap();
 
-    // Try to connect to a port that's likely not listening
     let result = sandbox
         .run(
             "sh",
@@ -203,7 +179,6 @@ fn test_proxy_connection_refused() {
 
     let output = result.stdout.trim();
 
-    // Should get a proper error, not hang
     assert!(
         output.contains("REFUSED_HANDLED")
             || output.contains("NO_CURL")
@@ -213,7 +188,6 @@ fn test_proxy_connection_refused() {
     );
 }
 
-/// Test: Proxy should handle malformed responses
 #[test]
 #[cfg(unix)]
 fn test_proxy_malformed_response() {
@@ -227,7 +201,6 @@ fn test_proxy_malformed_response() {
         .build()
         .unwrap();
 
-    // This just verifies the proxy doesn't crash on edge cases
     let result = sandbox
         .run(
             "sh",
@@ -246,13 +219,11 @@ fn test_proxy_malformed_response() {
         )
         .unwrap();
 
-    // Should complete without crash
     assert!(result.exit_code == 0 || result.stdout.contains("NO_CURL"));
 }
 
-/// Test: concurrent runs each have a proxy listener of their own, so each
-/// sees only the hosts refused to it. (On Linux each listens on the same
-/// port, inside its own network namespace; on macOS each on a fresh one.)
+/// Concurrent runs each get their own proxy listener, seeing only their own refused hosts
+/// (same port per netns on Linux, a fresh port on macOS).
 #[test]
 #[cfg(unix)]
 fn test_runs_have_separate_proxy_listeners() {
@@ -288,7 +259,6 @@ fn test_runs_have_separate_proxy_listeners() {
     }
 }
 
-/// Test: Proxy should handle HTTPS properly (CONNECT method)
 #[test]
 #[cfg(unix)]
 fn test_proxy_https_connect() {
@@ -326,7 +296,6 @@ fn test_proxy_https_connect() {
 
     let output = result.stdout.trim();
 
-    // HTTPS through proxy should work
     if !output.contains("NO_CURL") {
         assert!(
             output.contains("HTTPS_OK") || output.contains("HTTPS_FAIL"),
@@ -336,7 +305,6 @@ fn test_proxy_https_connect() {
     }
 }
 
-/// Test: Proxy should handle concurrent requests from same sandbox
 #[test]
 #[cfg(unix)]
 fn test_proxy_concurrent_requests() {
@@ -388,7 +356,6 @@ fn test_proxy_concurrent_requests() {
 
     if let Some(count_str) = output.strip_prefix("SUCCESS:") {
         let count: i32 = count_str.parse().unwrap_or(0);
-        // At least some should succeed (may fail due to network)
         if count < 3 {
             println!(
                 "Note: Only {} of 5 concurrent requests succeeded (network issues?)",

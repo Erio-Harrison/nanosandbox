@@ -75,8 +75,7 @@ def test_other_threads_keep_running_during_a_run():
     assert sandbox.run("sleep", ["1"]).success()
     stop.set()
     t.join()
-    # ~50 ticks when the GIL is free, 0 or 1 when the run holds it; a slow CI
-    # runner stretches sleep(), so the bar is far below the first.
+    # ~50 ticks with the GIL free, 0 or 1 if held; slow CI stretches sleep().
     assert len(ticks) >= 5, f"only {len(ticks)} ticks while the run was in flight"
 
 

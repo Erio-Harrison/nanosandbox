@@ -1,5 +1,4 @@
-//! Waiting for a run to finish, its timeout/memory/tmp polling, and killing
-//! every process of it (including ones that left the tracked process tree).
+//! Wait for a run, poll its limits, and kill every process of it.
 
 use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
@@ -52,22 +51,15 @@ impl MacOSExecutor {
         let mut stdout = Captured::new(config.max_output);
         let mut stderr = Captured::new(config.max_output);
 
-        // Use wait4 with WNOHANG for non-blocking wait with rusage collection
         loop {
-            // Write more stdin and drain whatever output is available, non-
-            // blocking, interleaved on every iteration -- not all stdin
-            // upfront then all output after exit, which deadlocks once
-            // either side fills its pipe buffer before the other side has
-            // drained it (confirmed for real).
+            // Interleave stdin writes and output drains; doing them in sequence deadlocks on full pipes.
             if !stdin_remaining.is_empty()
                 && let Some(pipe) = stdin_pipe.as_mut()
             {
                 match pipe.write(stdin_remaining) {
                     Ok(n) if n > 0 => stdin_remaining = &stdin_remaining[n..],
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    // Either wrote 0 (shouldn't happen for non-empty
-                    // data) or the reader's gone (e.g. EPIPE) -- nothing
-                    // more to usefully write either way.
+                    // Wrote 0 or the reader is gone (EPIPE).
                     _ => stdin_remaining = &[],
                 }
             }
@@ -83,34 +75,24 @@ impl MacOSExecutor {
             let result = unsafe { libc::wait4(child_pid, &mut status, libc::WNOHANG, &mut rusage) };
 
             if result == child_pid {
-                // Catch anything written in the child's last moments.
                 drain_available(&mut stdout_pipe, &mut stdout);
                 drain_available(&mut stderr_pipe, &mut stderr);
 
-                // The immediate child exiting (normally or by signal) says
-                // nothing about descendants it backgrounded before doing so
-                // (e.g. `cmd & exit 0`) -- those keep running, untracked and
-                // unbounded by wall_time_limit/memory_limit, unless we sweep
-                // the whole tree here too, not just on the timeout/oom paths
-                // below (confirmed for real: a backgrounded `sleep 20` was
-                // still alive well after run() returned).
+                // Sweep descendants the child backgrounded (`cmd & exit 0`); they'd outlive run().
                 Self::kill_run(child_pid, marker);
 
-                // Extract exit code and signal
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
                     (libc::WEXITSTATUS(status), None)
                 } else if libc::WIFSIGNALED(status) {
-                    // 128 + signal, the shell's convention and Linux's here.
+                    // 128 + signal, as the shell and Linux report.
                     (128 + libc::WTERMSIG(status), Some(libc::WTERMSIG(status)))
                 } else {
                     (-1, None)
                 };
 
-                // Extract resource usage
-                // maxrss is in bytes on macOS
+                // ru_maxrss is in bytes on macOS.
                 let peak_memory = Some(rusage.ru_maxrss as u64);
 
-                // CPU time = user time + system time
                 let user_time = Duration::new(
                     rusage.ru_utime.tv_sec as u64,
                     rusage.ru_utime.tv_usec as u32 * 1000,
@@ -138,7 +120,6 @@ impl MacOSExecutor {
                     proc_isolated: true,
                 });
             } else if result == 0 {
-                // Still running, check timeout
                 if start.elapsed() > timeout && !killed_by_timeout {
                     Self::kill_run(child_pid, marker);
                     killed_by_timeout = true;
@@ -166,9 +147,7 @@ impl MacOSExecutor {
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
-                    // Interrupted by a signal, not a real failure -- WNOHANG
-                    // means we weren't blocked on anything to begin with, so
-                    // just retry rather than treating this as fatal.
+                    // EINTR: retry.
                     continue;
                 }
                 Self::kill_run(child_pid, marker);
@@ -204,9 +183,8 @@ impl MacOSExecutor {
         pids
     }
 
-    /// The root process, its process group and all descendants. Descendants that
-    /// leave the group (setsid/setpgid) are found through parent links; ones
-    /// orphaned to launchd are not, macOS has no cgroup-style way to find them.
+    /// The root, its process group and descendants found via parent links; processes
+    /// orphaned to launchd are not found (see `RunMarker`).
     fn sandbox_pids(root: i32) -> Vec<i32> {
         const PROC_PGRP_ONLY: u32 = 2;
         const PROC_PPID_ONLY: u32 = 6;
@@ -227,10 +205,8 @@ impl MacOSExecutor {
         seen.into_iter().collect()
     }
 
-    /// Kill every process of the run: the tree under `root`, then anything
-    /// the run's sandbox still has, such as a child that left the process
-    /// group and outlived its parent. Again until none are left, in case one
-    /// forks while this goes.
+    /// Kill the tree under `root`, then whatever the run's sandbox still holds; repeat until
+    /// none are left, since one may fork meanwhile.
     fn kill_run(root: i32, marker: &RunMarker) {
         Self::kill_process_tree(root);
         for _ in 0..50 {
@@ -247,7 +223,6 @@ impl MacOSExecutor {
         }
     }
 
-    /// Kill the sandbox's whole process tree
     fn kill_process_tree(root: i32) {
         for pid in Self::sandbox_pids(root) {
             unsafe {
@@ -259,14 +234,8 @@ impl MacOSExecutor {
         }
     }
 
-    /// Physical footprint summed over the whole run, including a process
-    /// that's left the tree `sandbox_pids` would have walked (the same
-    /// daemonize pattern `run_marker` exists for). It used to use
-    /// `sandbox_pids`, so a daemonized process ballooning memory went
-    /// uncounted for as long as the run lasted -- confirmed for real: a
-    /// double fork into 300MB, with memory_limit set to 64MB, finished
-    /// clean, neither OOM nor timeout. The process still doesn't outlive
-    /// the run either way: `kill_run` always sweeps by marker too.
+    /// Physical footprint over the whole run, found by marker so a daemonized process
+    /// that left the tree still counts.
     fn tree_footprint(marker: &RunMarker) -> u64 {
         marker
             .members()
@@ -286,8 +255,7 @@ impl MacOSExecutor {
     }
 }
 
-/// Read whatever is available on a non-blocking pipe without blocking.
-/// EOF (Ok(0)) or a hard error drops the handle so later iterations skip it.
+/// Drain a non-blocking pipe; EOF or a hard error drops the handle.
 fn drain_available<R: Read>(pipe: &mut Option<R>, out: &mut Captured) {
     let Some(p) = pipe else { return };
     let mut tmp = [0u8; 64 * 1024];

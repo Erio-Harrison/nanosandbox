@@ -1,6 +1,4 @@
-//! Linux namespace management
-//!
-//! Handles user namespace UID/GID mapping.
+//! Linux user namespace UID/GID mapping.
 
 use crate::error::{Result, SandboxError};
 use std::fs;
@@ -8,11 +6,9 @@ use std::fs;
 /// `nobody` and `nogroup` on Linux, the ids nothing on the host belongs to.
 pub(crate) const NOBODY: u32 = 65534;
 
-/// Whether the caller is root, so that the sandbox runs as nobody, and drops
-/// the supplementary groups it inherits (a root caller's `root` group, or
-/// `docker`, would give it those groups' files). An unprivileged caller
-/// can't do either: it may only map its own ids, and the kernel keeps its
-/// groups once setgroups is denied.
+/// Whether the caller is root: then the sandbox runs as nobody and drops inherited
+/// supplementary groups (e.g. `root`, `docker`). Unprivileged callers can only map their own
+/// ids and keep their groups.
 pub(crate) fn runs_as_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
@@ -62,16 +58,9 @@ impl UserNamespace {
 
     /// Write UID/GID mappings for the child process
     pub fn write_mappings(&self, child_pid: i32) -> Result<()> {
-        // Mapped to the caller's own ids, the sandbox has whatever the caller
-        // can do to the host's files as their owner. For root, that's
-        // writing /etc/passwd or reading /etc/shadow, capabilities or not:
-        // so a root caller's inner ids map to nobody instead (or to the host
-        // ids it chose), which root may map to, and the child switches to them before exec (a mapping
-        // alone doesn't change whose process it is). Root itself is mapped
-        // too, as 0: the child is root until then, and needs an id the
-        // namespace knows to create files in its tmpfs or rootfs. NO_NEW_PRIVS
-        // keeps a setuid-root program from turning it back into root
-        // afterwards. See runs_as_root for the groups.
+        // Mapping a root caller's own ids would give the sandbox root-owner access to host files,
+        // so root maps inner ids to nobody (or the chosen ids) and the child switches before exec.
+        // Root is also mapped as 0 for child setup; NO_NEW_PRIVS blocks regaining it via setuid.
         let root = runs_as_root();
         let (outer_uid, outer_gid) = if root {
             self.host_ids()
@@ -86,8 +75,7 @@ impl UserNamespace {
             }
         };
 
-        // An unprivileged caller has to give up setgroups to write gid_map.
-        // Root keeps it, for the child to drop its groups with.
+        // Unprivileged callers must give up setgroups to write gid_map; root keeps it to drop groups.
         if !runs_as_root() {
             let setgroups_path = format!("/proc/{}/setgroups", child_pid);
             fs::write(&setgroups_path, "deny").map_err(|e| SandboxError::NamespaceCreation {
@@ -97,7 +85,6 @@ impl UserNamespace {
             })?;
         }
 
-        // Write UID mapping: inner_uid outer_uid 1
         let uid_map = map(self.inner_uid, outer_uid);
         let uid_map_path = format!("/proc/{}/uid_map", child_pid);
         fs::write(&uid_map_path, &uid_map).map_err(|e| SandboxError::NamespaceCreation {
@@ -106,7 +93,6 @@ impl UserNamespace {
             source: Box::new(e),
         })?;
 
-        // Write GID mapping: inner_gid outer_gid 1
         let gid_map = map(self.inner_gid, outer_gid);
         let gid_map_path = format!("/proc/{}/gid_map", child_pid);
         fs::write(&gid_map_path, &gid_map).map_err(|e| SandboxError::NamespaceCreation {

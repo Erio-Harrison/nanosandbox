@@ -26,16 +26,14 @@ test('a run that cannot start rejects', async () => {
   await assert.rejects(sandbox().runAsync('echo', ['a\0b']));
 });
 
-// The point of runAsync: the event loop keeps turning while the command runs.
-// A synchronous run() holds the JS thread, so no timer fires until it ends.
+// runAsync keeps the event loop turning; sync run() blocks timers.
 test('the event loop stays free during a run', async () => {
   let ticks = 0;
   const timer = setInterval(() => ticks++, 20);
   const result = await sandbox().runAsync('sleep', ['1']);
   clearInterval(timer);
   assert.ok(result.success());
-  // ~50 ticks expected in a second, fewer on a slow CI runner; a blocked loop
-  // gets 0 or 1.
+  // ~50 ticks expected; fewer on slow CI, a blocked loop gets 0 or 1.
   assert.ok(ticks >= 5, `only ${ticks} ticks while the run was in flight`);
 });
 

@@ -1,10 +1,6 @@
-//! The Job Object a run's processes live in: its limits, what it reports
-//! back (memory limit hit, CPU time used), and killing every process of it
-//! at once.
-//!
-//! Nothing can leave it: breakaway isn't allowed, so every descendant is in
-//! it too. Closing the handle kills whatever is still running in it, which
-//! is what keeps a run from outliving this process, even if it dies.
+//! The Job Object a run lives in: its limits, notifications, and killing the run at once.
+//! No breakaway, so every descendant is in it; closing the handle kills the rest, so a run
+//! can't outlive this process.
 
 use std::io;
 use std::ptr::{null, null_mut};
@@ -15,7 +11,7 @@ use windows_sys::Win32::System::IO::{
 };
 use windows_sys::Win32::System::JobObjects::*;
 
-/// Job notifications, as delivered on its completion port.
+/// Job completion-port notifications.
 pub(super) const MSG_END_OF_JOB_TIME: u32 = 1;
 pub(super) const MSG_ACTIVE_PROCESS_ZERO: u32 = 4;
 pub(super) const MSG_JOB_MEMORY_LIMIT: u32 = 10;
@@ -32,8 +28,7 @@ pub(super) struct Job {
     port: HANDLE,
 }
 
-// Both handles are only ever used through `&self` calls the kernel
-// serializes; nothing here is thread-affine.
+// Only used through `&self` kernel calls; not thread-affine.
 unsafe impl Send for Job {}
 unsafe impl Sync for Job {}
 
@@ -59,8 +54,7 @@ impl Job {
 
         let mut ext: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         let basic = &mut ext.BasicLimitInformation;
-        // A crash ends the process instead of waiting on an error dialog
-        // until the run times out.
+        // A crash ends the process rather than waiting on an error dialog.
         basic.LimitFlags =
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
         if let Some(n) = limits.max_pids {
@@ -123,8 +117,7 @@ impl Job {
         unsafe { TerminateJobObject(self.handle, exit_code) };
     }
 
-    /// The next notification, if one comes within `timeout`. Notifications
-    /// can be lost, so the caller doesn't rely on them alone.
+    /// Next notification within `timeout`; they can be lost, so don't rely on them alone.
     pub(super) fn next_message(&self, timeout: Duration) -> Option<u32> {
         let (mut msg, mut key, mut overlapped) = (0u32, 0usize, null_mut::<OVERLAPPED>());
         let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
@@ -149,9 +142,7 @@ impl Job {
         Some(v.JobMemory)
     }
 
-    /// The most committed memory the job's processes have had at once, as
-    /// Windows counts it: an allocation the memory limit refused counts in
-    /// it too, at its full size, so past the limit it overstates.
+    /// Peak committed memory; a refused allocation counts at full size, so it overstates past the limit.
     pub(super) fn peak_memory(&self) -> Option<u64> {
         let e: JOBOBJECT_EXTENDED_LIMIT_INFORMATION =
             self.query(JobObjectExtendedLimitInformation)?;
@@ -161,7 +152,6 @@ impl Job {
 
 impl Drop for Job {
     fn drop(&mut self) {
-        // KILL_ON_JOB_CLOSE: anything still running in it dies here.
         unsafe {
             CloseHandle(self.handle);
             CloseHandle(self.port);

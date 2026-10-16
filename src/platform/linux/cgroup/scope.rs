@@ -1,6 +1,5 @@
-//! Finding, or building, the cgroup v2 scope this process may write
-//! `nanosandbox/` under: the real root for euid 0, or (via systemd, over
-//! D-Bus) a delegated subtree for everyone else.
+//! Finds or builds the cgroup v2 scope to put `nanosandbox/` under: the real root for euid 0,
+//! else a systemd-delegated subtree (over D-Bus).
 
 use crate::error::{Result, SandboxError};
 use std::fs;
@@ -9,10 +8,8 @@ use std::time::Duration;
 
 use super::CGROUP_ROOT;
 
-/// The cgroup this process may build `nanosandbox/` under: the real root
-/// for euid 0, or a cgroup v2 scope we're fully delegated (reused from the
-/// caller, or a fresh `Delegate=true` one — see `compute_own_scope`).
-/// Resolved and cached once per process.
+/// The cgroup we may build `nanosandbox/` under: real root for euid 0, or a delegated scope
+/// (reused or fresh; see `compute_own_scope`). Resolved once per process.
 pub(super) fn ensure_own_scope() -> Result<PathBuf> {
     if super::is_root() {
         return Ok(PathBuf::from(CGROUP_ROOT));
@@ -31,12 +28,9 @@ pub(super) fn ensure_own_scope() -> Result<PathBuf> {
 /// Every controller nanosandbox might enable for a sandbox run.
 const ALL_CONTROLLERS: &[&str] = &["memory", "cpu", "pids"];
 
-/// `app.slice` is uid-writable but not delegated (`Delegate=no`), so we
-/// need our own `Delegate=true` unit. If the caller already put us inside
-/// one, reuse it (checked over D-Bus, not by writability) rather than
-/// silently escaping whatever limits or lifecycle management they set up;
-/// otherwise relocate into a fresh scope, warning if that leaves a limit
-/// behind.
+/// `app.slice` isn't delegated, so we need our own `Delegate=true` unit. A scope the caller
+/// put us in is reused (checked over D-Bus) to keep their limits; else relocate into a fresh
+/// one, warning if that leaves a limit behind.
 fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     let uid = unsafe { libc::getuid() };
     let target = user_app_slice(CGROUP_ROOT, uid);
@@ -69,21 +63,14 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
             warn_if_leaving_resource_limits_behind(unit);
             preferred_slice = unit_property(unit, "Slice").and_then(|v| String::try_from(v).ok());
         }
-        // Flattened to a String here, not kept as the SandboxError these
-        // return: this whole function's result is cached in SCOPE (above)
-        // and `.clone()`d on every call, and a trait-object source inside
-        // SandboxError can't be Clone. The message text survives intact;
-        // only the structured .source() chain is lost at this one boundary.
+        // Flattened to String: the result is cached in SCOPE and cloned, and SandboxError's
+        // trait-object source can't be Clone. Only the .source() chain is lost.
         relocate_into_delegated_scope(preferred_slice.as_deref()).map_err(|e| e.to_string())?;
         own_cgroup_path().map_err(|e| e.to_string())?
     };
 
-    // Pid- and nonce-suffixed leaf so `own`'s own root never holds a process
-    // directly (required before its subtree_control can be enabled), and
-    // two processes reusing the same unit — or the same recycled pid —
-    // don't collide. Swept periodically from ensure_base, not here: this
-    // runs on every call, not just the first, so a stale sibling doesn't
-    // wait for this process to restart before it's noticed.
+    // Pid- and nonce-suffixed leaf so `own`'s root holds no process (required for
+    // subtree_control) and reused units/pids don't collide. Swept from ensure_base, not here.
     let supervisor = own.join(format!(
         "nanosandbox-supervisor-{}-{:08x}",
         std::process::id(),
@@ -104,14 +91,8 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     )
     .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
 
-    // Anything still directly in `own` is a child this process forked
-    // between landing in `own` (StartTransientUnit, or already there) and
-    // the move above -- e.g. a sandbox run that needs no cgroup and so never
-    // waits on this function. Such a child stays put after we move, and
-    // blocks enabling `own`'s controllers (EBUSY) until it exits. Confirmed
-    // for real: a `sleep` child of this process, sitting in `own`'s root.
-    // Children forked after our own move inherit `supervisor`, so one pass
-    // here is enough.
+    // Children forked between landing in `own` and the move above stay behind and block
+    // enabling `own`'s controllers (EBUSY). Later children inherit `supervisor`, so one pass suffices.
     let leftovers = fs::read_to_string(own.join("cgroup.procs")).unwrap_or_default();
     for pid in leftovers.split_whitespace() {
         // Already exited between the read and the write is fine.
@@ -121,10 +102,8 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     Ok(own)
 }
 
-/// The systemd unit (scope or service) governing this process's cgroup,
-/// found via `GetUnitByPID` rather than guessed from our own cgroup path —
-/// that guess breaks under `DelegateSubgroup=`, where the unit's main
-/// process lives one level below its own root.
+/// The systemd unit governing this process's cgroup, via `GetUnitByPID`: guessing from our
+/// cgroup path breaks under `DelegateSubgroup=`.
 struct GoverningUnit {
     root: PathBuf,
     object_path: zbus::zvariant::OwnedObjectPath,
@@ -157,8 +136,7 @@ fn governing_unit() -> Option<GoverningUnit> {
         "org.freedesktop.DBus.Properties",
     )
     .ok()?;
-    // `Id` (e.g. "foo.scope") is on the generic `Unit` interface; its
-    // suffix picks the interface `ControlGroup` actually lives on below.
+    // `Id` is on the generic `Unit` interface; its suffix picks the interface for `ControlGroup`.
     let id: OwnedValue = props
         .call("Get", &("org.freedesktop.systemd1.Unit", "Id"))
         .ok()?;
@@ -185,8 +163,7 @@ fn governing_unit() -> Option<GoverningUnit> {
     })
 }
 
-/// Required before `subtree_control` can be enabled (no-internal-process
-/// rule). An empty root (e.g. `DelegateSubgroup=`) counts as fine.
+/// Required before `subtree_control` can be enabled (no-internal-process rule). Empty root is fine.
 fn current_unit_is_exclusively_ours(unit: &GoverningUnit) -> bool {
     let Ok(procs) = fs::read_to_string(unit.root.join("cgroup.procs")) else {
         return false;
@@ -194,16 +171,14 @@ fn current_unit_is_exclusively_ours(unit: &GoverningUnit) -> bool {
     super::only_us_or_empty(&procs)
 }
 
-/// From `DelegateControllers`, not `Delegate` (`Delegate=pids` reports
-/// `true` but only delegates `pids`) or `cgroup.controllers` (shows what
-/// the kernel allows, not what was delegated).
+/// From `DelegateControllers`: `Delegate` is true for `Delegate=pids`, and
+/// `cgroup.controllers` shows kernel-allowed, not delegated.
 fn current_unit_delegated_controllers(unit: &GoverningUnit) -> Option<Vec<String>> {
     Vec::<String>::try_from(unit_property(unit, "DelegateControllers")?).ok()
 }
 
-/// Warns about a `MemoryMax`/`CPUQuota` we're about to leave behind.
-/// `TasksMax` isn't checked: its "unset" value is a real number, not
-/// infinity, so it would warn on nearly every unit.
+/// Warns about a `MemoryMax`/`CPUQuota` we'd leave behind. `TasksMax` isn't checked: its
+/// unset value is a real number, so it would warn on nearly every unit.
 fn warn_if_leaving_resource_limits_behind(unit: &GoverningUnit) {
     const INFINITY: u64 = u64::MAX;
     for (prop, label) in [
@@ -277,9 +252,8 @@ fn own_cgroup_path() -> Result<PathBuf> {
     Ok(acc)
 }
 
-/// Asks systemd, over D-Bus, to move this process into a fresh
-/// `Delegate=true` scope — only the delegater can place the first process
-/// into a delegated subtree. Attempted once per process; cached.
+/// Asks systemd over D-Bus to move us into a fresh `Delegate=true` scope (only the delegater
+/// can place the first process). Once per process; cached.
 fn relocate_into_delegated_scope(preferred_slice: Option<&str>) -> Result<()> {
     static RESULT: std::sync::OnceLock<std::result::Result<(), String>> =
         std::sync::OnceLock::new();
@@ -312,9 +286,7 @@ fn try_relocate_into_delegated_scope(
     .map_err(|e| format!("cannot reach systemd over D-Bus: {e}"))?;
 
     let pid = std::process::id();
-    // Nonce-suffixed (see process_nonce()) so a name collision with a
-    // not-yet-swept scope from a dead process that had the same recycled
-    // pid can't make this StartTransientUnit call fail.
+    // Nonce-suffixed (see process_nonce()) so a stale same-pid scope can't fail StartTransientUnit.
     let scope_name = format!("nanosandbox-{pid}-{:08x}.scope", super::process_nonce());
     let pids: &[u32] = &[pid];
     let mut properties: Vec<(&str, Value)> = vec![
@@ -333,8 +305,7 @@ fn try_relocate_into_delegated_scope(
         &(scope_name.as_str(), "fail", properties, aux),
     );
 
-    // Poll regardless of call success: systemd's job may still complete
-    // after our own wait for a reply timed out.
+    // Poll regardless: the job may complete after our reply wait timed out.
     for _ in 0..50 {
         if let Ok(rel) = own_cgroup_path()
             && rel.ends_with(&scope_name)

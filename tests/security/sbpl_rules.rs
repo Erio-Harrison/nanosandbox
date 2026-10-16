@@ -21,7 +21,6 @@ fn test_no_network_blocks_connections() {
         .build()
         .unwrap();
 
-    // Try to make a network connection - should fail
     let result = sandbox.run(
         "curl",
         &["-s", "--connect-timeout", "2", "https://example.com"],
@@ -29,7 +28,6 @@ fn test_no_network_blocks_connections() {
 
     match result {
         Ok(r) => {
-            // curl should fail due to network restrictions
             assert!(
                 !r.success() || r.stdout.is_empty(),
                 "Network should be blocked, but curl succeeded: {}",
@@ -37,7 +35,7 @@ fn test_no_network_blocks_connections() {
             );
         }
         Err(_) => {
-            // Expected - network blocked
+            // Blocked outright is fine too.
         }
     }
 }
@@ -50,7 +48,6 @@ fn test_read_only_filesystem() {
     let temp_path = temp.path();
     let temp_str = temp_path.to_str().unwrap();
 
-    // Create a test file
     std::fs::write(temp_path.join("test.txt"), "original content").unwrap();
 
     let sandbox = Sandbox::builder()
@@ -59,7 +56,6 @@ fn test_read_only_filesystem() {
         .build()
         .unwrap();
 
-    // Reading should work
     let result = sandbox
         .run("cat", &[&format!("{}/test.txt", temp_str)])
         .unwrap();
@@ -70,18 +66,14 @@ fn test_read_only_filesystem() {
     );
     assert!(result.stdout.contains("original content"));
 
-    // Writing should fail (or succeed but file content protected by OS)
     let _result = sandbox
         .run(
             "sh",
             &["-c", &format!("echo modified > {}/test.txt", temp_str)],
         )
         .unwrap();
-    // On macOS, the write might silently fail or the file content may be protected
-    // Check that the original content is still there
+    // macOS may silently fail the write or protect the content; check it's intact.
     let content = std::fs::read_to_string(temp_path.join("test.txt")).unwrap();
-    // Note: macOS sandbox may or may not enforce read-only at the SBPL level
-    // This test verifies the mount configuration was applied
     println!("File content after write attempt: {}", content);
 }
 
@@ -98,7 +90,6 @@ fn test_read_write_filesystem() {
         .build()
         .unwrap();
 
-    // Writing should work
     let file_path = temp_path.join("new_file.txt");
     let result = sandbox
         .run(
@@ -107,7 +98,6 @@ fn test_read_write_filesystem() {
         )
         .unwrap();
 
-    // Check if file was created
     if result.success() {
         let content = std::fs::read_to_string(&file_path).unwrap_or_default();
         assert!(content.contains("hello"));
@@ -116,17 +106,13 @@ fn test_read_write_filesystem() {
 
 #[test]
 fn test_sandbox_exec_profile_applied() {
-    // Verify that sandbox-exec is actually being used
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Check that we're running under sandbox
-    // On macOS, sandbox-exec sets some environment
     let result = sandbox.run("env", &[]).unwrap();
     assert!(result.success());
 }
 
-/// macOS can't limit processes or CPU share per sandbox, so build() says
-/// so instead of running without them.
+/// macOS can't limit processes or CPU share per sandbox: build() says so.
 #[test]
 fn test_unenforceable_limits_refused() {
     for builder in [
@@ -149,7 +135,6 @@ fn test_memory_limits() {
         .build()
         .unwrap();
 
-    // Simple command should work
     let result = sandbox.run("echo", &["memory test"]).unwrap();
     assert!(result.success());
 }
@@ -172,7 +157,6 @@ fn test_wall_time_limit() {
 
 #[test]
 fn test_environment_isolation() {
-    // Set some env vars in the parent
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("PARENT_SECRET", "should_not_see") };
 
@@ -200,10 +184,8 @@ fn test_cannot_access_home_directory() {
 
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Try to list home directory - may be restricted
     let result = sandbox.run("ls", &[&home]);
 
-    // This test is informational - macOS default sandbox may allow some access
     if let Ok(r) = result {
         println!(
             "Home directory access: exit_code={}, stdout_len={}",
@@ -221,7 +203,6 @@ fn test_cannot_execute_arbitrary_path() {
     let script_path = temp.path().join("evil.sh");
     std::fs::write(&script_path, "#!/bin/bash\necho 'evil executed'").unwrap();
 
-    // Make it executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -230,29 +211,21 @@ fn test_cannot_execute_arbitrary_path() {
         std::fs::set_permissions(&script_path, perms).unwrap();
     }
 
-    let sandbox = Sandbox::builder()
-        .working_dir("/tmp")
-        // Don't mount the temp directory
-        .build()
-        .unwrap();
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Try to execute the script - should fail as it's not in the sandbox
     let result = sandbox.run(script_path.to_str().unwrap(), &[]);
 
     match result {
         Ok(r) => {
-            // May fail to find the file or be blocked by sandbox
             println!("Script execution result: {:?}", r.failure_reason());
         }
         Err(e) => {
-            // Expected - file not accessible
             println!("Script execution blocked: {:?}", e);
         }
     }
 }
 
-/// By default the system temp directories are the host's own: a program that
-/// writes to /tmp by name leaves the file there.
+/// By default the system temp directories are the host's own: writing /tmp by name leaves the file there.
 #[test]
 fn test_shared_tmp_is_the_hosts_by_default() {
     let probe = format!("/tmp/nsb-shared-tmp-default-{}", std::process::id());
@@ -303,9 +276,8 @@ fn test_shared_tmp_false_denies_the_hosts_temp_directories() {
     assert!(out.contains("mktemp:ok"), "{out}");
 }
 
-/// Programs that honor $TMPDIR keep working without the host's temp directories.
-/// (Perl, not python3: /usr/bin/python3 is an xcrun shim, which resets TMPDIR
-/// -- the documented limit of `shared_tmp(false)`.)
+/// Programs honoring $TMPDIR keep working without the host's temp directories. (Perl, not python3:
+/// /usr/bin/python3 is an xcrun shim that resets TMPDIR, the documented limit of `shared_tmp(false)`.)
 #[test]
 fn test_shared_tmp_false_still_runs_programs_that_use_tmpdir() {
     let sandbox = Sandbox::builder()
@@ -319,9 +291,8 @@ fn test_shared_tmp_false_still_runs_programs_that_use_tmpdir() {
     assert_eq!(result.stdout.trim(), "in-private-tmp", "{}", result.stderr);
 }
 
-/// Apple's xcrun shims reset TMPDIR to the user's own temp directory, which
-/// `shared_tmp(false)` makes read-only: they fail. The real binaries by path
-/// don't. Documented in `shared_tmp`.
+/// Apple's xcrun shims reset TMPDIR to the user's temp dir, read-only under `shared_tmp(false)`, so they
+/// fail; real binaries by path don't.
 #[test]
 fn test_shared_tmp_false_breaks_the_xcrun_shims_but_not_the_real_tools() {
     let developer_dir = std::process::Command::new("xcode-select")

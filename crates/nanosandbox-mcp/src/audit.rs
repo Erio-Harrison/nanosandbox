@@ -1,28 +1,19 @@
 //! `--audit-dir`: what each server did, kept so that tampering shows.
 //!
-//! The directory holds one file per server run, `session-<ms>-<pid>-<n>.jsonl`.
-//! Each line is `{"seq", "prev", "record", "hash"}`, where `hash` is the SHA-256
-//! of `seq`, `prev` (the line before's hash) and the record's JSON, so
-//! changing, removing or reordering a line breaks the chain from there on.
+//! One file per server run, `session-<ms>-<pid>-<n>.jsonl`. Each line is
+//! `{"seq", "prev", "record", "hash"}`; `hash` is SHA-256 of `seq`, `prev` and the
+//! record's JSON, so editing, removing or reordering a line breaks the chain.
 //!
-//! A file starts with `session_start`, then for each command a `run_start`,
-//! written *before* the command runs (and refusing it if it can't be
-//! written), and a `run_end` after. A `run_start` with no `run_end` is a
-//! command that was running when the server died. A clean shutdown ends the
-//! file with `session_end`; without it the session is *unsealed*.
+//! `session_start`, then per command a `run_start` (written before the command
+//! runs; if it can't be written the command is refused) and a `run_end`. A
+//! `run_start` without `run_end` was running when the server died; no
+//! `session_end` means the session is *unsealed*. Servers don't share files, so
+//! none waits on another.
 //!
-//! Servers don't share a file, so any number can record into one directory
-//! and none waits on another. Starting a server reads nothing of the history.
-//!
-//! What it can't show: a session cut short or removed by whoever has the
-//! files (a cut-short sealed session just reads as unsealed), or a chain
-//! replaced by a new one. The directory is as safe as where it lives:
-//! commands can neither write nor read it (see `Config::build`), but whoever
-//! runs the server can. Keep a copy of a session's last hash elsewhere to
-//! close that.
-//!
-//! Old sessions are removed by [`prune`]: at every start, by age and total
-//! size (see [`Retention`]), and on request by `--audit-cleanup`.
+//! Not detectable: a session cut short or removed by whoever has the files, or a
+//! chain replaced by a new one. Commands can't write or read the directory (see
+//! `Config::build`), but whoever runs the server can; keep a copy of the last
+//! hash elsewhere to close that. Old sessions go via [`prune`] (see [`Retention`]).
 
 use nanosandbox::audit::{AuditEnd, AuditSink, AuditStart};
 use serde_json::{Value, json};
@@ -44,9 +35,7 @@ pub const DEFAULT_KEEP_DAYS: u64 = 30;
 /// How much a directory of sessions may hold, by default.
 pub const DEFAULT_MAX_BYTES: u64 = 1 << 30;
 
-/// A session written to this recently is left alone by the automatic
-/// removal, whatever its age or the directory's size: it may be a server
-/// that has made its file and not yet locked it.
+/// Recently written sessions are never auto-removed: may be a server that hasn't locked its file yet.
 const GRACE: Duration = Duration::from_secs(300);
 
 /// What starting a server keeps. `None`: no limit of that kind.
@@ -93,8 +82,7 @@ fn lock(file: &File) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
-/// Reads a whole chain, calling `each` on every record, and returns how many
-/// lines there are and the last hash.
+/// Reads a whole chain, calling `each` per record; returns line count and last hash.
 fn read_chain(path: &Path, mut each: impl FnMut(&Value)) -> Result<(u64, String), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut head = GENESIS.to_string();
@@ -132,8 +120,6 @@ fn line_for(seq: u64, prev: &str, record: &Value) -> (String, String) {
     (format!("{line}\n"), hash)
 }
 
-// ---- a session -------------------------------------------------------------
-
 pub struct Session {
     name: String,
     inner: Mutex<Inner>,
@@ -141,8 +127,7 @@ pub struct Session {
 }
 
 struct Inner {
-    /// Held locked for the server's life: whether a session is still running
-    /// is whether its lock can be taken.
+    /// Held locked for the server's life; the lock is how a running session is detected.
     file: File,
     seq: u64,
     head: String,
@@ -152,9 +137,7 @@ struct Inner {
 }
 
 impl Session {
-    /// Starts a session in `dir`, and then removes old ones as `retention`
-    /// says. A failure to remove is said, not fatal: a full or odd directory
-    /// shouldn't keep the server from starting.
+    /// Starts a session in `dir`, then prunes per `retention`. A prune failure is reported, not fatal.
     pub fn open(dir: &Path, retention: &Retention) -> Result<Self, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
@@ -256,16 +239,13 @@ impl AuditSink for Session {
     }
 }
 
-// ---- reading it back -------------------------------------------------------
-
 /// What `--audit-verify` found.
 #[derive(Debug, Default)]
 pub struct Report {
     pub sessions: u64,
     pub sealed: u64,
     pub runs: u64,
-    /// Not integrity failures, but worth knowing: a session that was never
-    /// sealed, a command that never ended, one that is still running.
+    /// Not integrity failures: unsealed session, command never ended, still running.
     pub notes: Vec<String>,
     /// A chain is broken.
     pub errors: Vec<String>,
@@ -377,8 +357,6 @@ pub fn verify(path: &Path) -> Report {
     report
 }
 
-// ---- removing old sessions -------------------------------------------------
-
 /// What to remove. All of the filters given have to hold for a session to go.
 #[derive(Debug, Default, Clone)]
 pub struct Plan {
@@ -390,8 +368,7 @@ pub struct Plan {
     pub max_total_bytes: Option<u64>,
     /// Leave sessions written to within this long alone.
     pub grace: Duration,
-    /// Read each session and leave one that doesn't verify: it may be the
-    /// evidence of tampering. Costs reading it.
+    /// Skip sessions that don't verify (possible tampering evidence); costs a read.
     pub verify_first: bool,
     pub dry_run: bool,
     /// A session never to remove: the caller's own.
@@ -418,11 +395,8 @@ struct Found {
     modified: SystemTime,
 }
 
-/// Removes sessions from `dir` as `plan` says, oldest first. Never one that
-/// is still running, nor the plan's `protect`. Only looks at names, sizes
-/// and times, plus each file's contents if `verify_first`.
+/// Removes sessions from `dir` as `plan` says, oldest first; never a running one or `protect`.
 pub fn prune(dir: &Path, plan: &Plan) -> Result<Pruned, String> {
-    // With no filter every condition holds, and everything would go.
     if plan.keep.is_none() && plan.older_than_days.is_none() && plan.max_total_bytes.is_none() {
         return Err("--audit-cleanup needs --keep, --older-than or --max-total-size".into());
     }
@@ -486,10 +460,8 @@ pub fn prune(dir: &Path, plan: &Plan) -> Result<Pruned, String> {
     Ok(out)
 }
 
-/// What starting a server does: removes what `retention` says is too old,
-/// then, if the directory is still too big, the oldest. Never its own
-/// session, a running one, or one written to in the last few minutes. Reads
-/// no session, so it costs the same however much history there is.
+/// Startup prune: over-age first, then oldest until under the size limit. Reads no session.
+/// Never its own session, a running one, or one written to recently.
 fn remove_old(dir: &Path, own: &str, retention: &Retention) {
     let passes = [
         Plan {
@@ -568,10 +540,8 @@ mod tests {
         name
     }
 
-    /// Waits for a dropped session's lock to go. Tests run on threads of one
-    /// process, and another test's sandbox, between clone and exec, holds
-    /// copies of every descriptor the process has, this lock among them. Not
-    /// something a real server has: only its own children could.
+    /// Waits for a dropped session's lock to go: a concurrent test's sandbox holds copies
+    /// of this process's descriptors between clone and exec.
     fn wait_dead(path: &Path) {
         let start = std::time::Instant::now();
         while is_running(path) {
@@ -613,8 +583,6 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect()
     }
-
-    // ---- recording and checking ----
 
     #[test]
     fn a_session_records_each_command_twice_and_is_sealed_on_close() {
@@ -674,14 +642,12 @@ mod tests {
         );
     }
 
-    /// A command that began and never ended is in the record.
     #[test]
     fn a_command_that_never_ended_is_shown() {
         let dir = tempfile::tempdir().unwrap();
         let session = open(dir.path());
         let sb = sandbox(&session);
         sb.run("echo", &["done"]).unwrap();
-        // Begun, then the host died: only the start was written.
         let start = json!({"command": "sleep", "args": ["60"], "run": 99});
         let mut inner = session.inner.lock().unwrap();
         Session::write(&mut inner, &json!({"kind": "run_start", "start": start})).unwrap();
@@ -733,8 +699,7 @@ mod tests {
         write(&path, &swapped);
         assert!(!verify(dir.path()).errors.is_empty());
 
-        // Cut short, a session just reads as one that was never sealed: with
-        // no one else keeping count, that is all there is to see.
+        // Cut short reads as unsealed; nothing else counts.
         write(&path, &original[..4]);
         let r = verify(dir.path());
         assert!(r.errors.is_empty(), "{:?}", r.errors);
@@ -745,7 +710,6 @@ mod tests {
         );
     }
 
-    /// Two agents on one machine, one directory.
     #[test]
     fn several_servers_can_share_a_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -760,12 +724,10 @@ mod tests {
         assert_eq!((r.sessions, r.sealed, r.runs), (2, 2, 2));
     }
 
-    /// If the record can't be written, nothing runs, and keeps not running.
     #[test]
     fn once_the_log_cannot_be_written_no_command_runs() {
         let dir = tempfile::tempdir().unwrap();
         let session = open(dir.path());
-        // A handle that can't be written to stands in for a full disk.
         let path = dir.path().join(&session.name);
         session.inner.lock().unwrap().file = File::open(path).unwrap();
         let sb = sandbox(&session);
@@ -794,8 +756,6 @@ mod tests {
         let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "{mode:o}");
     }
-
-    // ---- what starting a server removes ----
 
     #[test]
     fn starting_a_server_removes_sessions_past_the_age_limit_and_keeps_the_rest() {
@@ -849,7 +809,6 @@ mod tests {
             })
             .collect();
         let size = |n: &String| std::fs::metadata(dir.path().join(n)).unwrap().len();
-        // Room for the two newest and the new session's own file, not more.
         let budget = size(&names[2]) + size(&names[3]) + 2000;
         let r = Retention {
             keep_days: None,
@@ -881,7 +840,6 @@ mod tests {
         assert!(sessions(dir.path()).contains(&old));
     }
 
-    /// Starting costs the same however much history there is: it reads none.
     #[test]
     fn starting_a_server_reads_no_old_session() {
         let dir = tempfile::tempdir().unwrap();
@@ -924,8 +882,6 @@ mod tests {
             assert!(dir.path().join(f).exists(), "{f}");
         }
     }
-
-    // ---- removing on request ----
 
     fn removed(p: &Pruned) -> Vec<String> {
         p.removed.iter().map(|r| r.session.clone()).collect()
@@ -979,8 +935,6 @@ mod tests {
         assert!(dir.path().join(&running.name).exists() && path.exists());
     }
 
-    /// A plan with no filter would remove everything: it is refused, and
-    /// nothing is touched.
     #[test]
     fn a_cleanup_with_no_filter_is_refused_and_removes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1005,7 +959,6 @@ mod tests {
             removed(&prune(dir.path(), &by_age).unwrap()),
             std::slice::from_ref(&old)
         );
-        // Old enough *and* beyond the newest two: nothing is both.
         let both = Plan {
             older_than_days: Some(1),
             keep: Some(2),

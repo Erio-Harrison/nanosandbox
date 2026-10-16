@@ -3,7 +3,6 @@
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Fork bomb test - Linux
 #[test]
 #[cfg(target_os = "linux")]
 fn test_fork_bomb_contained() {
@@ -18,11 +17,9 @@ fn test_fork_bomb_contained() {
     sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
     let elapsed = start.elapsed();
 
-    // Should not hang - contained by pids limit
     assert!(elapsed < Duration::from_secs(6));
 }
 
-/// Memory bomb test - Linux
 #[test]
 #[cfg(target_os = "linux")]
 fn test_memory_bomb_contained() {
@@ -48,13 +45,11 @@ except MemoryError:
         ],
     );
 
-    // Should be killed by OOM or memory error (an Err is also acceptable)
     if let Ok(r) = result {
         assert!(r.killed_by_oom || r.exit_code != 0 || r.stdout.contains("memory error"));
     }
 }
 
-/// CPU bomb test - all platforms
 #[test]
 fn test_cpu_bomb_contained() {
     let sandbox = crate::common::builder()
@@ -80,7 +75,6 @@ fn test_cpu_bomb_contained() {
     assert!(result.killed_by_timeout);
 }
 
-/// Disk bomb test (tmpfs) - Linux
 #[test]
 #[cfg(target_os = "linux")]
 fn test_disk_bomb_contained_tmpfs() {
@@ -101,11 +95,9 @@ fn test_disk_bomb_contained_tmpfs() {
         )
         .unwrap();
 
-    // Should fail when tmpfs is full
     assert!(result.exit_code != 0 || result.stderr.contains("No space"));
 }
 
-/// Subprocess bomb test - Linux only (cgroups pids controller)
 #[test]
 #[cfg(target_os = "linux")]
 fn test_subprocess_bomb_contained() {
@@ -116,7 +108,6 @@ fn test_subprocess_bomb_contained() {
         .build()
         .unwrap();
 
-    // Try to spawn many processes
     let result = sandbox
         .run(
             "sh",
@@ -124,11 +115,9 @@ fn test_subprocess_bomb_contained() {
         )
         .unwrap();
 
-    // Should be contained by pids limit or wall time
     assert!(result.duration < Duration::from_secs(6));
 }
 
-/// File descriptor bomb test
 #[test]
 #[cfg(unix)]
 #[cfg(not(target_os = "windows"))]
@@ -139,7 +128,6 @@ fn test_fd_bomb_contained() {
         .build()
         .unwrap();
 
-    // Try to open many file descriptors
     let result = sandbox.run(
         "python3",
         &[
@@ -157,13 +145,12 @@ print(f'opened {len(fds)} fds')
         ],
     );
 
-    // Should complete (may hit fd limit); an Err means python3 isn't available
+    // An Err means python3 isn't available
     if let Ok(r) = result {
         assert!(r.exit_code == 0 || r.stdout.contains("fd limit"));
     }
 }
 
-/// Recursive directory bomb test - Linux only (tmpfs support)
 #[test]
 #[cfg(target_os = "linux")]
 fn test_directory_bomb_contained() {
@@ -177,7 +164,6 @@ fn test_directory_bomb_contained() {
         .build()
         .unwrap();
 
-    // Try to create deep directory structure
     let result = sandbox
         .run(
             "sh",
@@ -196,6 +182,5 @@ echo done
         )
         .unwrap();
 
-    // Should complete (may hit inode or space limit)
     assert!(result.duration < Duration::from_secs(11));
 }

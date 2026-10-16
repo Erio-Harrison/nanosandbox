@@ -1,27 +1,12 @@
-//! Seccomp-BPF syscall filter for Linux.
+//! Seccomp-BPF syscall filter, on unless `seccomp(false)`.
 //!
-//! One fixed filter, on unless the caller turns it off with `seccomp(false)`.
-//! Namespaces and cgroups decide what a sandbox can see and use; they don't
-//! shrink the kernel code it can reach. This closes the entry points most
-//! local privilege escalations go through, and leaves everything else alone:
-//!
-//! - New namespaces (`clone`/`unshare` with `CLONE_NEW*`, `setns`): a nested
-//!   user namespace hands out `CAP_SYS_ADMIN` over netfilter, mounts, etc.
-//! - Mounting, old and new API.
-//! - bpf, perf_event_open, userfaultfd, io_uring, the keyring, kernel
-//!   modules and kexec.
-//!
-//! Blocked calls fail with `EPERM`, which programs handle as "not allowed
-//! here" (libuv falls back from io_uring to epoll, for example). `clone3`
-//! gets `ENOSYS` instead: its flags sit behind a pointer the filter can't
-//! read, and libc falls back to `clone` on `ENOSYS`, where they can be
-//! checked. So does any syscall newer than [`LAST_KNOWN_SYSCALL`], so ones
-//! added to the kernel later are refused until someone looks at them, rather
-//! than let through because this list predates them. A syscall from another
-//! ABI (32-bit, x32) kills the process: the numbers above don't apply to it.
+//! Denies local-privilege-escalation entry points: new namespaces (`clone`/`unshare` with
+//! `CLONE_NEW*`, `setns`), mounting, bpf, perf_event_open, userfaultfd, io_uring, keyring,
+//! kernel modules, kexec. These fail with `EPERM`. `clone3` and syscalls newer than
+//! [`LAST_KNOWN_SYSCALL`] get `ENOSYS` (clone3's flags can't be inspected; libc falls back
+//! to `clone`). Other ABIs (32-bit, x32) kill the process.
 
-/// `AUDIT_ARCH_*` for the architectures the filter knows the syscall numbers
-/// of. `None` elsewhere: `check_support` refuses `seccomp(true)` there.
+/// `AUDIT_ARCH_*` of supported architectures; `None` elsewhere (`check_support` refuses).
 #[cfg(target_arch = "x86_64")]
 const NATIVE_ARCH: Option<u32> = Some(0xC000_003E);
 #[cfg(target_arch = "aarch64")]
@@ -29,8 +14,7 @@ const NATIVE_ARCH: Option<u32> = Some(0xC000_00B7);
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 const NATIVE_ARCH: Option<u32> = None;
 
-/// `mseal`, Linux 6.10. Newer syscalls get `ENOSYS`. Raise this after
-/// checking what the new ones do, adding any that belong in [`DENIED`].
+/// `mseal`, Linux 6.10. Newer syscalls get `ENOSYS`; raise after reviewing them.
 const LAST_KNOWN_SYSCALL: u32 = 462;
 
 /// Denied outright, with `EPERM`.
@@ -73,8 +57,7 @@ const CLONE_NAMESPACE_FLAGS: u32 = (libc::CLONE_NEWNS
     | libc::CLONE_NEWNET) as u32;
 const UNSHARE_NAMESPACE_FLAGS: u32 = CLONE_NAMESPACE_FLAGS | libc::CLONE_NEWTIME as u32;
 
-// Offsets into `struct seccomp_data`. args[0]'s low half comes first: both
-// supported architectures are little-endian, and the flags fit in 32 bits.
+// Offsets into `struct seccomp_data`; both architectures are little-endian, flags fit in 32 bits.
 const DATA_NR: u32 = 0;
 const DATA_ARCH: u32 = 4;
 const DATA_ARG0_LOW: u32 = 16;
@@ -161,11 +144,8 @@ impl SyscallFilter {
                 flags,
             ));
         }
-        // AF_UNIX is a value, not a flag to test bits of: jeq, not jset.
-        // socketpair() is a different syscall, so the proxy's own use of it
-        // (see proxy_link.rs) is untouched; only a fresh socket(2) call
-        // naming AF_UNIX is denied, nothing already connected or any other
-        // address family.
+        // AF_UNIX is a value, not a flag: jeq, not jset. socketpair() is a separate syscall,
+        // so proxy_link is unaffected.
         {
             targets.push((Label::CheckSocket, code.len()));
             code.push(load(DATA_ARG0_LOW));
@@ -202,8 +182,7 @@ impl SyscallFilter {
         Some(Self { program })
     }
 
-    /// Installs the filter on the calling thread. Runs in the child between
-    /// clone() and exec(): raw syscalls only, no allocation.
+    /// Installs the filter; runs in the child between clone() and exec().
     pub(crate) fn install(&self) -> bool {
         let prog = libc::sock_fprog {
             len: self.program.len() as libc::c_ushort,

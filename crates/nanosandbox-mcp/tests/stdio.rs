@@ -157,7 +157,6 @@ fn the_time_limit_is_the_operators_not_the_models() {
         start.elapsed()
     );
 
-    // The model can't ask for more: an extra argument is refused.
     let r = c.request(
         2,
         "tools/call",
@@ -200,8 +199,7 @@ fn the_network_is_off_unless_the_operator_allowed_it() {
         "--allow-network",
         "example.com,*.example.org",
     ];
-    // Where AppArmor denies the network namespace a filtered network needs,
-    // the server says so at startup instead of running without the filter.
+    // AppArmor may deny the netns a filtered network needs; the server must say so at startup.
     let (code, stderr) = refused_with_stdin_closed(&args);
     if code == Some(2) && stderr.contains("AppArmor") {
         eprintln!("skipping the allowlist half: {stderr}");
@@ -273,8 +271,7 @@ fn refused(args: &[&str]) -> (Option<i32>, String) {
     refused_with_stdin_closed(args)
 }
 
-/// Starts the server with nothing on stdin: it either refuses at once (exit
-/// 2, with the reason) or sees end-of-input and exits 0.
+/// Server with nothing on stdin: refuses at once (exit 2) or exits 0 on EOF.
 fn refused_with_stdin_closed(args: &[&str]) -> (Option<i32>, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_nanosandbox-mcp"))
         .args(args)
@@ -390,7 +387,6 @@ fn commands_find_what_the_servers_own_path_finds() {
     let out = c.run(1, "nsb-hello", &[]);
     assert_eq!(out["stdout"], "hello from nsb-hello\n", "{out}");
 
-    // An explicit PATH for the commands wins over the server's own.
     let mut c = client_with_path(ws.path(), &path, &["--env", "PATH=/usr/bin:/bin"]);
     let r = c.request(
         2,
@@ -408,7 +404,6 @@ fn one_noisy_command_cannot_flood_the_model() {
     assert_eq!(out["output_truncated"], true, "{}", out["exit_code"]);
     assert!(out["stdout"].as_str().unwrap().len() <= 1 << 20);
 
-    // Raised on request.
     let mut c = Client::in_workspace(ws.path(), &["--max-output", "8M"]);
     let out = c.run(1, "sh", &["-c", "yes x | head -c 5000000"]);
     assert_eq!(out["output_truncated"], false);
@@ -444,15 +439,11 @@ fn downloads_are_cached_in_the_workspace_and_kept_out_of_git() {
     assert_eq!(lines[0], cache.join("npm").to_str().unwrap());
     assert_eq!(lines[1], cache.join("pip").to_str().unwrap());
     assert_eq!(lines[2], cache.join("xdg").to_str().unwrap());
-    // HOME is still the run's own, not the cache: configuration and
-    // credentials don't outlive the call.
     assert!(!lines[3].starts_with(cache.to_str().unwrap()), "{lines:?}");
 
-    // What was cached is there for the next call.
     let again = c.run(2, "sh", &["-c", "cat \"$npm_config_cache/entry\""]);
     assert_eq!(again["stdout"], "cached\n", "{again}");
 
-    // The directory ignores itself, so it isn't in `git status`.
     assert_eq!(
         std::fs::read_to_string(cache.join(".gitignore")).unwrap(),
         "# Created by nanosandbox-mcp.\n*\n"
@@ -497,8 +488,7 @@ fn a_cache_variable_the_operator_sets_wins() {
     assert!(lines[1].ends_with(".nanosandbox-cache/npm"), "{lines:?}");
 }
 
-/// The reason the cache isn't in HOME: HOME is the run's private temp
-/// directory, capped at 256 MB, and a large package is bigger than that.
+/// The cache isn't in HOME: its private tmpdir is capped at 256 MB.
 #[test]
 fn a_download_bigger_than_the_private_temp_directory_fits_in_the_cache() {
     let ws = workspace();
@@ -511,10 +501,8 @@ fn a_download_bigger_than_the_private_temp_directory_fits_in_the_cache() {
     assert_eq!(out["stdout"].as_str().unwrap().trim(), "314572800", "{out}");
 }
 
-/// Several servers on one machine, as when a person has more than one agent
-/// open. A server that dies mid-run leaves its private temp directory behind;
-/// the next one to run a command sweeps it. It must not touch a live
-/// server's, however old that looks.
+/// Several servers on one machine: a dead server's private tmpdir is swept by the next
+/// one to run a command, never a live server's.
 #[test]
 fn a_dead_servers_leftover_directory_is_swept_and_a_live_ones_is_not() {
     let temp = std::env::temp_dir();
@@ -549,22 +537,18 @@ fn a_dead_servers_leftover_directory_is_swept_and_a_live_ones_is_not() {
     let live = start_running(ws.path());
     let mut dead = start_running(ws.path());
     if !wait_for("the live server's directory", &|| dir_of(&live).exists()) {
-        // Where the private temp directory is a tmpfs mount, there's no
-        // directory on the host to leak or to sweep.
         eprintln!("skipping: this host mounts a tmpfs instead of making a directory");
         return;
     }
     assert!(wait_for("the second server's directory", &|| dir_of(&dead).exists()));
 
-    // One dies with no chance to clean up. Both directories look abandoned
-    // by their age; only one actually is.
+    // One dies uncleaned; both dirs look abandoned by age, only one is.
     let dead_dir = dir_of(&dead);
     dead.child.kill().unwrap();
     dead.child.wait().unwrap();
     age(&dead_dir);
     age(&dir_of(&live));
 
-    // A new server runs a command, which sweeps.
     let mut fresh = Client::in_workspace(ws.path(), &[]);
     assert_eq!(fresh.run(1, "echo", &["hi"])["exit_code"], 0);
 
@@ -607,8 +591,7 @@ fn help_and_version() {
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("nanosandbox-mcp "));
 }
 
-/// `--clean-tmp` removes what nothing holds, in whatever TMPDIR it's given,
-/// and leaves what a live process holds.
+/// `--clean-tmp` removes what nothing holds and leaves what a live process holds.
 #[test]
 fn clean_tmp_removes_unheld_directories_and_keeps_held_ones() {
     use std::os::fd::AsRawFd;
@@ -641,9 +624,7 @@ fn clean_tmp_removes_unheld_directories_and_keeps_held_ones() {
     drop(held);
 }
 
-/// The first command of a fresh server was once killed about one time in
-/// five (a libc call made while the run started); it only shows over many
-/// starts.
+/// Regression: the first command of a fresh server was killed ~1 in 5 starts.
 #[test]
 fn the_first_command_of_a_fresh_server_is_not_killed() {
     let ws = workspace();
@@ -654,8 +635,7 @@ fn the_first_command_of_a_fresh_server_is_not_killed() {
     }
 }
 
-/// A command must not be able to delete its own run marker, which is how a
-/// process that left the group (setsid, double fork) would outlive the call.
+/// A command must not delete its own run marker (how a setsid process would outlive the call).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_command_cannot_strip_its_markers_to_leave_a_daemon_behind() {
@@ -685,10 +665,8 @@ time.sleep(0.5)'"#;
     );
 }
 
-/// `--read-only` on a path inside the workspace makes it read-only again:
-/// the file can't be changed, replaced or moved off (nor its directory),
-/// while the rest of the workspace is still writable. On Linux this needs
-/// mounting, which the default AppArmor restriction denies.
+/// `--read-only` on a path inside the workspace: file can't be changed, replaced or moved,
+/// the rest stays writable. Linux needs mounting, which default AppArmor denies.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_read_only_path_inside_the_workspace_stays_read_only() {
@@ -746,9 +724,7 @@ fn session_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     v
 }
 
-/// Each command is a start and an end; the chain verifies; the session is
-/// sealed when the client goes away; nothing private is in it; the commands
-/// themselves can't read it.
+/// Start/end per command, chain verifies, sealed on client exit, nothing private in it, unreadable to commands.
 #[test]
 fn the_audit_dir_records_each_command_and_keeps_what_is_private_out() {
     let ws = workspace();
@@ -758,9 +734,7 @@ fn the_audit_dir_records_each_command_and_keeps_what_is_private_out() {
         &[
             "--audit-dir",
             dir.path().to_str().unwrap(),
-            // The home directory is hidden by default, which would hide the
-            // record too: with it visible, only its own protection stops a
-            // read.
+            // Home is hidden by default, which would hide the record; make it visible so only its own protection blocks reads.
             "--no-hide-home",
             "--env",
             "API_KEY=value-that-must-not-leak",
@@ -799,8 +773,7 @@ fn the_audit_dir_records_each_command_and_keeps_what_is_private_out() {
     assert!(text.contains("session_end"), "{text}");
 }
 
-/// The server killed while a command runs: the record shows it started, and
-/// never ended, and that the session was never sealed.
+/// Server killed mid-command: record shows started, never ended, unsealed.
 #[test]
 fn a_server_killed_mid_command_leaves_the_command_started_and_not_ended() {
     let ws = workspace();
@@ -811,7 +784,6 @@ fn a_server_killed_mid_command_leaves_the_command_started_and_not_ended() {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":
         {"name":"run_command","arguments":{"command":"sleep","args":["31234"]}}}),
     );
-    // Wait until the sleep's start is on disk.
     let file = session_files(dir.path())[0].clone();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !std::fs::read_to_string(&file).unwrap().contains("31234") {
@@ -851,7 +823,6 @@ fn a_changed_audit_file_fails_verification() {
     assert!(err.contains("changed"), "{err}");
 }
 
-/// Where commands can write, they could rewrite their own record.
 #[test]
 fn the_audit_dir_is_refused_where_commands_can_write() {
     let ws = workspace();
@@ -874,7 +845,6 @@ fn the_audit_dir_is_refused_where_commands_can_write() {
     }
 }
 
-/// Two agents on one machine can share a directory: a session file each.
 #[test]
 fn two_servers_can_record_into_the_same_directory() {
     let ws1 = workspace();
@@ -931,8 +901,7 @@ fn audit_cleanup_removes_old_sessions_on_request_and_leaves_the_record_sound() {
     assert!(stdout.starts_with("ok: 1 sessions"), "{stdout}");
 }
 
-/// Starting a server removes the sessions past the retention, by default 30
-/// days, and `--audit-keep-days` changes that. A running one is left alone.
+/// Startup removes sessions past retention (default 30 days; `--audit-keep-days`); running ones stay.
 #[test]
 fn a_new_server_removes_sessions_past_the_retention() {
     let ws = workspace();
@@ -961,7 +930,6 @@ fn a_new_server_removes_sessions_past_the_retention() {
     aged(&files[0], 40);
     aged(&files[1], 10);
 
-    // With no limit on age, nothing goes.
     let mut c = Client::in_workspace(
         ws.path(),
         &["--audit-dir", d, "--audit-keep-days", "forever"],
@@ -971,7 +939,6 @@ fn a_new_server_removes_sessions_past_the_retention() {
     c.child.wait().unwrap();
     assert_eq!(session_files(dir.path()).len(), 3);
 
-    // The default is 30 days: the 40-day-old one goes, the 10-day-old stays.
     let mut c = Client::in_workspace(ws.path(), &["--audit-dir", d]);
     c.run(1, "echo", &["z"]);
     let left = session_files(dir.path());
@@ -984,10 +951,8 @@ fn a_new_server_removes_sessions_past_the_retention() {
     assert!(stdout.starts_with("ok: 3 sessions"), "{stdout}");
 }
 
-/// How an agent got into the audit directory: delete its own workspace, put
-/// a symlink to the directory in its place, and write through the path on the
-/// next call. Once with the workspace in a directory commands can't write,
-/// once in one they can.
+/// Agent deletes its workspace, symlinks the audit dir in its place, writes through it;
+/// run with the workspace in a dir commands can't write, and in one they can.
 #[test]
 fn a_command_cannot_reach_the_audit_dir_by_swapping_its_workspace_for_a_symlink() {
     for writable_parent in [false, true] {
@@ -1036,9 +1001,7 @@ fn a_command_cannot_reach_the_audit_dir_by_swapping_its_workspace_for_a_symlink(
     }
 }
 
-/// What an `npm install` that hit the time limit did to the server on
-/// Linux: node sets O_NONBLOCK on its stdin, which was the server's own, so
-/// the server's next read failed and it exited. The command gets /dev/null.
+/// Regression: node's O_NONBLOCK on a shared stdin made the server's next read fail; commands get /dev/null.
 #[test]
 fn a_command_cannot_touch_the_servers_stdin() {
     let ws = workspace();
@@ -1062,17 +1025,14 @@ fn a_command_cannot_touch_the_servers_stdin() {
     );
 }
 
-/// A command that left the process group (setsid) outlives its server being
-/// killed: the watchdog kills the group, not it. The next server's sweep of
-/// the dead server's marker files kills it first.
+/// A setsid command outlives a killed server (watchdog kills the group); the next server's sweep kills it.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep() {
     let ws = workspace();
     let mut dead = Client::in_workspace(ws.path(), &[]);
     let pid = dead.child.id();
-    // The call must still be running when the server dies: a call that ends
-    // kills what it started, escaped or not. So the parent waits.
+    // Call must still run when the server dies: a finished call kills what it started.
     dead.send(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"python3","args":["-c",
         "import os, time\nif os.fork() == 0:\n os.setsid()\n os.execvp('sleep', ['sleep', '31998'])\ntime.sleep(60)"]}}}));
     let alive = || {
@@ -1095,7 +1055,6 @@ fn a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep() {
         "the sleeper died with its server (then there is nothing to sweep)"
     );
 
-    // Make the dead server's leftovers old enough to be swept.
     let temp = std::env::temp_dir();
     let old = std::time::SystemTime::now() - Duration::from_secs(3600);
     let mut aged = 0;

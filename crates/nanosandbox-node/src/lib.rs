@@ -1,10 +1,7 @@
 //! Node.js bindings for nanosandbox, built with napi-rs.
 //!
-//! Mirrors `nanosandbox::SandboxBuilder`/`Sandbox`/`ExecutionResult` method
-//! for method; see the Rust crate's docs for behavior. Builder setters
-//! consume `self` in Rust, so each one here takes the wrapped builder out of
-//! `Option` and hands back a new wrapper -- that's what makes
-//! `Sandbox.builder().readOnly(...).memoryLimit(...)` chain in JS too.
+//! Mirrors `nanosandbox::SandboxBuilder`/`Sandbox`/`ExecutionResult`; see the Rust docs.
+//! Setters take the wrapped builder out of its `Option` and return a new wrapper so JS chains.
 
 #![deny(clippy::all)]
 
@@ -70,8 +67,6 @@ impl SandboxBuilder {
         Self::wrap(nanosandbox::Sandbox::builder())
     }
 
-    // ===== Filesystem =====
-
     #[napi]
     pub fn read_only(&mut self, path: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.read_only(path)))
@@ -106,8 +101,6 @@ impl SandboxBuilder {
     pub fn working_dir(&mut self, path: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.working_dir(path)))
     }
-
-    // ===== Resource limits =====
 
     #[napi]
     pub fn memory_limit(&mut self, bytes: f64) -> napi::Result<SandboxBuilder> {
@@ -155,8 +148,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.max_output(bytes as u64)))
     }
 
-    // ===== Network =====
-
     #[napi]
     pub fn no_network(&mut self) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.no_network()))
@@ -178,8 +169,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.allow_private_destinations()))
     }
 
-    // ===== Environment =====
-
     #[napi]
     pub fn env(&mut self, key: String, value: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.env(key, value)))
@@ -190,8 +179,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.clear_env(clear)))
     }
 
-    // ===== Build =====
-
     #[napi]
     pub fn build(&mut self) -> napi::Result<Sandbox> {
         let inner = self.take()?.build().map_err(to_napi_err)?;
@@ -201,11 +188,7 @@ impl SandboxBuilder {
     }
 }
 
-/// Linux-only `SandboxBuilder` methods. In a separate `impl` block (rather
-/// than `#[cfg(target_os = "linux")]` on individual methods inside the main
-/// one) because `#[napi]` on the surrounding block expands before per-method
-/// `cfg` stripping happens, and ends up referencing the stripped methods'
-/// generated callbacks anyway -- a block-level `cfg` avoids that.
+/// Linux-only methods, in a separate `impl`: `#[napi]` expands before per-method `cfg` stripping.
 #[cfg(target_os = "linux")]
 #[napi]
 impl SandboxBuilder {
@@ -264,13 +247,11 @@ impl SandboxBuilder {
     }
 }
 
-/// macOS-only `SandboxBuilder` methods; a separate block for the same reason
-/// as the Linux-only one above.
+/// macOS-only methods; separate block for the same reason.
 #[cfg(target_os = "macos")]
 #[napi]
 impl SandboxBuilder {
-    /// Whether /tmp and the other system temp directories stay writable (the
-    /// host's own); `false` leaves only the private `$TMPDIR`. See the Rust docs.
+    /// Whether the host's /tmp and other system temp dirs stay writable; `false` leaves only private `$TMPDIR`.
     #[napi]
     pub fn shared_tmp(&mut self, shared: bool) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.shared_tmp(shared)))
@@ -283,10 +264,7 @@ pub struct Sandbox {
     inner: std::sync::Arc<nanosandbox::Sandbox>,
 }
 
-/// A run on libuv's thread pool, for `runAsync`/`runWithInputAsync`: the
-/// synchronous `run` holds the JS thread for the whole sandboxed execution,
-/// freezing the event loop (timers, I/O, other requests) for as long as the
-/// command takes.
+/// A run on libuv's thread pool; sync `run` would freeze the event loop.
 pub struct RunTask {
     sandbox: std::sync::Arc<nanosandbox::Sandbox>,
     cmd: String,
@@ -358,10 +336,7 @@ impl Sandbox {
         Ok(ExecutionResult { inner })
     }
 
-    /// Like `run`, but returns a Promise and leaves the event loop free
-    /// while the command runs. Runs on libuv's thread pool (4 threads by
-    /// default, `UV_THREADPOOL_SIZE`), so more concurrent runs than that
-    /// queue behind each other.
+    /// Like `run`, but returns a Promise. Uses libuv's pool (4 threads, `UV_THREADPOOL_SIZE`); extra runs queue.
     #[napi(ts_return_type = "Promise<ExecutionResult>")]
     pub fn run_async(&self, cmd: String, args: Vec<String>) -> AsyncTask<RunTask> {
         self.run_with_input_async(cmd, args, None)
@@ -394,9 +369,7 @@ impl Sandbox {
     }
 }
 
-/// See `nanosandbox::ExecutionResult`. Getters read straight from the real
-/// Rust value, and `success`/`failureReason` call its own methods, so this
-/// can't drift from the core crate's definition of either.
+/// See `nanosandbox::ExecutionResult`; `success`/`failureReason` call the core methods.
 #[napi]
 pub struct ExecutionResult {
     inner: nanosandbox::ExecutionResult,

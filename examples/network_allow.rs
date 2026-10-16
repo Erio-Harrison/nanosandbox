@@ -1,7 +1,4 @@
-//! Network Whitelist Example
-//!
-//! Demonstrates using nanosandbox's network whitelisting feature to allow
-//! sandboxed processes to access only specific domains.
+//! Network allowlist: sandboxed processes reach only specific domains.
 //!
 //! Run with: cargo run --example network_allow
 
@@ -11,11 +8,9 @@ use std::time::Duration;
 fn main() {
     println!("=== Network Whitelist Example ===\n");
 
-    // Create workspace
     let workspace = std::env::temp_dir().join("nanosandbox_network_demo");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    // 1. No network access (default)
     println!("1. No network access (default):");
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -35,7 +30,6 @@ fn main() {
         println!("   [WARNING] Network access NOT blocked!\n");
     }
 
-    // 2. Whitelist specific domains
     println!("2. Whitelist specific domains:");
     println!("   Allowed: httpbin.org, *.github.com");
 
@@ -46,7 +40,6 @@ fn main() {
         .build()
         .unwrap();
 
-    // This should work - httpbin.org is whitelisted
     println!("\n   Testing httpbin.org (whitelisted):");
     let result = sandbox.run(
         "curl",
@@ -69,7 +62,6 @@ fn main() {
         }
     }
 
-    // This should work - wildcard matches api.github.com
     println!("\n   Testing api.github.com (matches *.github.com):");
     let result = sandbox.run(
         "curl",
@@ -88,7 +80,6 @@ fn main() {
         }
     }
 
-    // This should be blocked - example.com is not whitelisted
     println!("\n   Testing example.com (NOT whitelisted):");
     let result = sandbox.run(
         "curl",
@@ -120,11 +111,9 @@ fn main() {
         }
     }
 
-    // 3. AI/API use case
     println!("\n3. AI API access pattern:");
     println!("   Whitelist: api.openai.com, api.anthropic.com");
 
-    // Create a Python script that demonstrates API-style access
     let script = r#"
 import urllib.request
 import json
@@ -144,7 +133,6 @@ print(f"PATH: {os.environ.get('PATH', 'not set')[:50]}...")
     let script_path = workspace.join("api_demo.py");
     std::fs::write(&script_path, script).unwrap();
 
-    // Mount workspace and run
     let sandbox = Sandbox::agent_executor(&workspace)
         .allow_network(&["api.openai.com", "api.anthropic.com"])
         .wall_time_limit(Duration::from_secs(10))
@@ -154,7 +142,6 @@ print(f"PATH: {os.environ.get('PATH', 'not set')[:50]}...")
     let result = sandbox.run("python3", &["/workspace/api_demo.py"]).unwrap();
     println!("{}", result.stdout);
 
-    // Cleanup
     std::fs::remove_dir_all(&workspace).ok();
 
     println!("=== Network whitelist example complete ===");

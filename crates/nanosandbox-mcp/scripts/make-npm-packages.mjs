@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 // Assembles the npm packages for one release from built binaries.
-//
 //   node scripts/make-npm-packages.mjs <binaries-dir> <out-dir>
-//
-// <binaries-dir> holds one file per target, named as in TARGETS below
-// (e.g. nanosandbox-mcp-aarch64-apple-darwin). Writes <out-dir>/main and
-// <out-dir>/<platform-package> for each binary found. Every version comes
-// from Cargo.toml, so the packages can't drift from the crate.
+// Versions all come from Cargo.toml so packages can't drift from the crate.
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";

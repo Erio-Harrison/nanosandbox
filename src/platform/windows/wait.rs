@@ -1,6 +1,4 @@
-//! Waiting for a run to finish: feeding stdin and collecting output on
-//! their own threads, enforcing the wall-clock and CPU time limits, noticing
-//! the memory limit, and killing whatever is left of the run at the end.
+//! Wait for a run: feed stdin, collect output, enforce wall and CPU limits, watch memory, kill leftovers.
 
 use super::job::{Job, MSG_ACTIVE_PROCESS_ZERO, MSG_END_OF_JOB_TIME, MSG_JOB_MEMORY_LIMIT};
 use crate::builder::SandboxConfig;
@@ -12,12 +10,10 @@ use std::process::Child;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// The exit code a run's processes get when this kills them (timeout,
-/// memory or CPU time limit): `ExecutionResult` says which.
+/// Exit code of processes this kills; `ExecutionResult` says why.
 pub(super) const KILLED_EXIT_CODE: u32 = 1;
 
-/// How often CPU time is checked against `cpu_time_limit`, and the root
-/// process for exit when a notification was missed.
+/// CPU time check interval, and root-exit check when a notification was missed.
 const POLL: Duration = Duration::from_millis(20);
 
 pub(super) fn wait(
@@ -27,12 +23,10 @@ pub(super) fn wait(
     config: &SandboxConfig,
     start: Instant,
 ) -> Result<ExecutionResult> {
-    // stdin is fed and output drained on their own threads, so neither
-    // side can fill a pipe and stall the other.
+    // Own threads, so neither side's full pipe stalls the other.
     let feeder = child.stdin.take().map(|mut pipe| {
         let data = stdin.unwrap_or(&[]).to_vec();
         std::thread::spawn(move || {
-            // A program that exits without reading it all is fine.
             let _ = pipe.write_all(&data);
         })
     });
@@ -41,8 +35,7 @@ pub(super) fn wait(
 
     let deadline = start + config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
     let (mut killed_by_timeout, mut killed_by_oom, mut killed_by_cpu_limit) = (false, false, false);
-    // The most memory seen in use, for when the Job's own peak can't be
-    // trusted (see `peak_memory` below).
+    // Max memory seen, for when the Job's peak can't be trusted (see `peak_memory`).
     let mut seen_memory = 0;
     loop {
         if child.try_wait()?.is_some() {
@@ -57,8 +50,7 @@ pub(super) fn wait(
         seen_memory = seen_memory.max(job.memory().unwrap_or(0));
         match message {
             Some(MSG_JOB_MEMORY_LIMIT) => {
-                // The allocation past the limit failed; the run is killed,
-                // as it is on Linux, rather than left to cope with that.
+                // Allocation past the limit failed; kill the run, as on Linux.
                 killed_by_oom = true;
                 break;
             }
@@ -77,9 +69,7 @@ pub(super) fn wait(
         }
     }
 
-    // Whatever is left of the run (the root, if a limit stopped it, or what
-    // it left running in the background) goes now, so nothing outlives the
-    // run, and the output pipes close.
+    // Kill whatever is left so nothing outlives the run and the pipes close.
     job.terminate(KILLED_EXIT_CODE);
     let status = child.wait()?;
 
@@ -107,11 +97,8 @@ pub(super) fn wait(
     })
 }
 
-/// The Job's peak, unless it went past the memory limit: nothing can
-/// commit past it, so that's a refused allocation Windows counted at its
-/// full size (asking for 400MB under a 100MB limit gives a peak above
-/// 400MB). Then the most seen in use while polling, which a short burst
-/// between two polls can be above.
+/// The Job's peak, unless it exceeded the memory limit: that's a refused allocation counted at
+/// full size, so use the max seen while polling instead.
 fn peak_memory(job: &Job, limit: Option<u64>, seen: u64) -> Option<u64> {
     let peak = job.peak_memory()?;
     Some(match limit {

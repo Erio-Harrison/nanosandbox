@@ -1,26 +1,11 @@
-//! `private_tmp(size)` where no tmpfs can be mounted at /tmp: on macOS, and
-//! on Linux where AppArmor denies mounting in the sandbox's user namespace.
+//! `private_tmp(size)` where no tmpfs can be mounted at /tmp (macOS, and Linux under AppArmor's
+//! userns restriction). A fresh dir per run, pointed to by `TMPDIR`, stands in: private,
+//! removed afterwards, and killed if polled size exceeds `size` (no ENOSPC without a fs).
+//! Writes to `/tmp` by name still hit the host's `/tmp`.
 //!
-//! A fresh directory per run stands in for the tmpfs. `TMPDIR` points at it,
-//! so programs that find their temp directory that way (python's tempfile,
-//! node, Go, gcc, clang, mktemp...) get the three things a tmpfs gives: it's
-//! private to the run, it's gone afterwards, and it can't grow past `size`.
-//! The size is checked periodically while the program runs, and the program
-//! is killed if it's over, since there is no file system to report ENOSPC.
-//!
-//! A program that writes to `/tmp` by name still gets the host's `/tmp`, as
-//! without a tmpfs: making that read-only would break it instead.
-//!
-//! A directory is removed when its run ends, but not when the host process
-//! doesn't get to (SIGKILL, SIGTERM, Ctrl-C, a client closing the server's
-//! stdin mid-run): then it's left behind. So each run holds a `flock` on its
-//! directory for as long as it lives, and a sweep, run by whichever process
-//! creates a directory next, removes the ones it can take the lock on. The
-//! kernel drops the lock when its holder dies, however it dies. That, not
-//! the pid in the directory's name, is what says an owner is gone: a pid may
-//! be reused, or belong to a process in another pid namespace or user that
-//! this one can't see, and treating a live run as dead deletes its directory
-//! under it. See `sweep_stale` for what else it checks before removing.
+//! Dirs of runs that died uncleanly are removed by a sweep. Each run holds a `flock` on its dir;
+//! the kernel drops it when the holder dies. That, not the pid in the name (reusable, possibly in
+//! another namespace), says the owner is gone. See `sweep_stale`.
 
 use std::fs::File;
 use std::os::fd::AsRawFd;
@@ -31,30 +16,25 @@ use std::time::{Duration, Instant, SystemTime};
 
 const PREFIX: &str = "nanosandbox-tmp-";
 
-/// A directory younger than this isn't swept even if nothing holds its lock:
-/// the creator may not have taken it yet.
+/// Younger dirs aren't swept: the creator may not have taken the lock yet.
 const STALE_AFTER: Duration = Duration::from_secs(120);
 
 /// How often a process sweeps, at most.
 const SWEEP_EVERY: Duration = Duration::from_secs(300);
 
-/// How often the directory's size is measured. Walking it costs more than
-/// the wait loop's other checks, and a tmpfs limit is about not filling the
-/// disk, not about precision.
+/// Size check interval; walking the dir is costly and precision isn't needed.
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(crate) struct PrivateTmp {
     dir: PathBuf,
     limit: u64,
     last_check: Instant,
-    /// The lock that says this run is alive. `None` where the file system
-    /// can't lock: a sweep can't take one either, and then leaves it alone.
+    /// Lock showing the run is alive; `None` where the fs can't lock (a sweep then skips it).
     _lease: Option<File>,
 }
 
 impl PrivateTmp {
-    /// Creates the directory, readable only by this user, under the host
-    /// process's own temp directory.
+    /// Creates a 0700-style dir under the host's temp directory.
     pub(crate) fn create(limit: u64) -> std::io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt;
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -69,7 +49,6 @@ impl PrivateTmp {
                 Ok(()) => {
                     let lease = match take_lease(&dir) {
                         Ok(lease) => lease,
-                        // Something else already holds it: not ours to use.
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
                         Err(e) => return Err(e),
                     };
@@ -81,7 +60,6 @@ impl PrivateTmp {
                         _lease: lease,
                     });
                 }
-                // Left over from an earlier process with the same pid.
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(e),
             }
@@ -92,8 +70,7 @@ impl PrivateTmp {
         &self.dir
     }
 
-    /// Whether the directory has grown past the limit. Measures at most once
-    /// per `CHECK_INTERVAL`; in between, says no.
+    /// Whether the dir exceeds the limit; measures at most once per `CHECK_INTERVAL`.
     pub(crate) fn over_limit(&mut self) -> bool {
         if self.last_check.elapsed() < CHECK_INTERVAL {
             return false;
@@ -105,13 +82,11 @@ impl PrivateTmp {
 
 impl Drop for PrivateTmp {
     fn drop(&mut self) {
-        // Doesn't follow symlinks the program may have left in it.
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
-/// `flock`s `dir` exclusively and non-blockingly. `Ok(None)`: this file system
-/// has no locks to take. `Err(WouldBlock)`: someone holds it.
+/// Non-blocking exclusive `flock`. `Ok(None)`: fs has no locks; `Err(WouldBlock)`: held.
 fn take_lease(dir: &Path) -> std::io::Result<Option<File>> {
     let file = File::open(dir)?;
     match try_flock(&file) {
@@ -135,8 +110,7 @@ pub(crate) fn try_flock(file: &File) -> std::io::Result<bool> {
     }
 }
 
-/// Starts a sweep of the temp directory unless this process swept lately,
-/// off to the side so a run doesn't wait on deleting what an earlier one left.
+/// Starts a background sweep unless this process swept lately.
 fn sweep_if_due() {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     {
@@ -159,16 +133,9 @@ fn sweep_if_due() {
         });
 }
 
-/// Where every run's private directory is made: a directory of its own,
-/// which no run's rules let a command read or write, except its own
-/// directory in it. In the temp directory itself, writable by default, one
-/// sandbox could read or delete a concurrent run's `$TMPDIR`. On macOS it's
-/// under the user's own temp directory. On Linux it has to be outside `/tmp`,
-/// which Landlock grants whole and can't take a part back from: the user's
-/// runtime directory, else `~/.cache`; with neither (a uid with no home) it
-/// falls back to `/tmp`, where another run of the same user can reach it.
-/// Only matters where the private directory isn't a tmpfs (macOS, and Linux
-/// under AppArmor's userns restriction). Made 0700.
+/// Dir holding every run's private dir; no run may read or write it except its own entry, so
+/// one sandbox can't reach another's `$TMPDIR`. Must be outside `/tmp` on Linux (Landlock grants
+/// it whole): runtime dir, else `~/.cache`, else `/tmp` fallback. Mode 0700.
 pub(crate) fn container_dir() -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = container_location();
@@ -177,7 +144,6 @@ pub(crate) fn container_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Where `container_dir` is, whether or not it exists yet.
 pub(crate) fn container_location() -> PathBuf {
     let temp = std::env::temp_dir();
     let temp = temp.canonicalize().unwrap_or(temp);
@@ -200,11 +166,8 @@ pub(crate) fn container_location() -> PathBuf {
     }
 }
 
-/// The temp directories a run may have been using: this process's, and on
-/// Linux `/tmp` too, since `TMPDIR` may have been different when a dead run
-/// started. Not macOS's per-user default: `confstr(_CS_DARWIN_USER_TEMP_DIR)`,
-/// the way to ask for it, got about one run in five killed when called as a
-/// run started.
+/// Temp dirs a dead run may have used: this process's, plus `/tmp` on Linux. Not macOS's
+/// per-user default: `confstr(_CS_DARWIN_USER_TEMP_DIR)` got ~1 in 5 runs killed.
 fn temp_roots() -> Vec<PathBuf> {
     let mut roots = vec![std::env::temp_dir()];
     #[cfg(not(target_os = "macos"))]
@@ -219,8 +182,7 @@ fn temp_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// Sweeps every temp directory a run may have used; returns how many
-/// directories it removed. See `sweep_stale` for what it leaves alone.
+/// Sweeps every candidate temp dir; returns how many dirs were removed.
 pub(crate) fn clean_stale() -> usize {
     #[cfg(target_os = "macos")]
     let markers = super::macos::run_marker::markers_dir()
@@ -228,8 +190,7 @@ pub(crate) fn clean_stale() -> usize {
         .unwrap_or(0);
     #[cfg(not(target_os = "macos"))]
     let markers = 0;
-    // Private directories sat in the temp directory itself before 0.3.4:
-    // the roots are still swept for those.
+    // Pre-0.3.4 private dirs sat in the temp dir itself.
     let own = container_location();
     let here = if own.is_dir() {
         sweep_stale(&own, STALE_AFTER)
@@ -239,7 +200,7 @@ pub(crate) fn clean_stale() -> usize {
     here + temp_roots()
         .iter()
         .map(|r| {
-            // Marker files sat in the temp directory itself before 0.3.3.
+            // Pre-0.3.3 markers sat in the temp dir itself.
             #[cfg(target_os = "macos")]
             let old_markers = sweep_markers(r, STALE_AFTER);
             #[cfg(not(target_os = "macos"))]
@@ -250,16 +211,9 @@ pub(crate) fn clean_stale() -> usize {
         + markers
 }
 
-/// Removes the private directories under `parent` whose owner is gone, and
-/// returns how many. Best effort, and conservative: a directory is only
-/// removed if
-/// - it's named like one of ours, is a real directory (not a symlink) and is
-///   this user's;
-/// - it was last modified at least `min_age` ago; and
-/// - its `flock` can be taken here, which means nothing is holding it.
-///
-/// Anything it can't establish, it leaves. Leaving a directory costs some
-/// disk; removing a live run's costs that run.
+/// Removes private dirs under `parent` whose owner is gone; returns the count. Conservative:
+/// only real dirs named like ours, owned by this user, at least `min_age` old, with a takeable
+/// `flock`. Leaving a dir costs disk; removing a live run's costs that run.
 fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let me = unsafe { libc::geteuid() };
@@ -286,7 +240,7 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
         if !old_enough {
             continue;
         }
-        // Lock the thing we looked at, not whatever the name points to by now.
+        // Lock what we looked at, not what the name points to now.
         let Ok(dir) = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
@@ -301,7 +255,6 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
         if !matches!(try_flock(&dir), Ok(true)) {
             continue;
         }
-        // Doesn't follow symlinks the program may have left in it.
         if std::fs::remove_dir_all(&path).is_ok() {
             removed += 1;
         }
@@ -309,11 +262,8 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
     removed
 }
 
-/// Removes the run marker files (macOS; see macos/run_marker.rs) that killed
-/// runs left under `parent`, by the same rules as `sweep_stale`, first
-/// killing what the run left running (`kill_orphans`): the `-in`
-/// file of each pair holds the lock, and the pair goes if it can be taken.
-/// A lone `-out` is removed once old enough.
+/// Removes run markers (macOS) left by killed runs, killing their orphans first: a pair goes if
+/// its `-in` lock can be taken; a lone `-out` goes once old enough.
 #[cfg(target_os = "macos")]
 fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -363,9 +313,7 @@ fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
             if !matches!(try_flock(&file), Ok(true)) {
                 continue;
             }
-            // The host is gone. What it left running that escaped its
-            // process group is only findable by these two files: end it
-            // before they go.
+            // Host gone: orphans are only findable via these files, so kill them first.
             let killed = super::macos::run_marker::kill_orphans(&in_path, &out_path);
             if killed > 0 {
                 tracing::debug!(killed, "killed processes a dead run left behind");
@@ -381,8 +329,7 @@ fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
     removed
 }
 
-/// Bytes allocated on disk under `dir`, as a tmpfs counts them: a sparse
-/// file only counts the blocks it actually uses. Symlinks aren't followed.
+/// Disk bytes under `dir` as a tmpfs counts them (sparse files by blocks); no symlinks.
 fn disk_usage(dir: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     let mut total = 0;
@@ -423,7 +370,6 @@ mod tests {
         std::fs::write(dir.join("sub/big"), vec![1u8; 256 * 1024]).unwrap();
         tmp.last_check -= CHECK_INTERVAL;
         assert!(tmp.over_limit());
-        // Not measured again right away.
         assert!(!tmp.over_limit());
 
         drop(tmp);
@@ -441,12 +387,8 @@ mod tests {
         sweep_stale(parent, Duration::ZERO)
     }
 
-    /// Sweeps until `want` directories have gone, or a few seconds pass. A
-    /// lock isn't free the instant its holder lets go of it: a process another
-    /// thread has just forked holds a copy of every open fd until it execs,
-    /// this one's lease included. That only ever delays a removal, never
-    /// brings one forward, which is the safe way round for a sweep, but a
-    /// test mustn't assume it's instant.
+    /// Sweeps until `want` dirs have gone or a few seconds pass; a forked child briefly holds
+    /// a copy of the lease, which only delays removal.
     fn sweep_until(parent: &Path, want: usize) -> usize {
         let mut total = 0;
         for _ in 0..200 {
@@ -471,7 +413,6 @@ mod tests {
         assert!(!dead.exists());
         assert!(live.exists(), "swept a directory something was holding");
 
-        // Once the holder lets go -- or dies -- it's fair game.
         drop(lease);
         assert_eq!(sweep_until(parent.path(), 1), 1);
         assert!(!live.exists());
@@ -538,10 +479,8 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let victim = tempfile::tempdir().unwrap();
         std::fs::write(victim.path().join("precious"), b"keep").unwrap();
-        // A symlink named like ours, pointing at someone's directory.
         std::os::unix::fs::symlink(victim.path(), parent.path().join(format!("{PREFIX}evil")))
             .unwrap();
-        // A file, not a directory; and directories with other names.
         std::fs::write(parent.path().join(format!("{PREFIX}file")), b"x").unwrap();
         let other = parent.path().join("someone-elses-dir");
         std::fs::create_dir(&other).unwrap();
@@ -561,11 +500,9 @@ mod tests {
     fn a_private_tmp_holds_its_lease_until_it_is_gone() {
         let tmp = PrivateTmp::create(1).unwrap();
         let dir = tmp.path().to_path_buf();
-        // Another open of the same directory can't take the lock.
         let other = File::open(&dir).unwrap();
         assert!(!try_flock(&other).unwrap());
         drop(other);
-        // So a sweep, even a zero-age one, leaves it.
         assert!(dir.exists());
         sweep(dir.parent().unwrap());
         assert!(dir.exists(), "a sweep removed a live run's directory");
@@ -573,8 +510,7 @@ mod tests {
         assert!(!dir.exists());
     }
 
-    /// Not a test by itself: the other process the multi-process test starts.
-    /// It takes the lease on a directory and holds it until it's killed.
+    /// Helper process for the multi-process test: holds a lease until killed.
     #[test]
     fn lease_holder_helper() {
         let Some(dir) = std::env::var_os("NSB_LEASE_HOLD_DIR") else {
@@ -586,8 +522,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(120));
     }
 
-    /// Several agents on one machine, each running; one is killed outright.
-    /// A sweep removes that one's directory and none of the others'.
+    /// A sweep removes the killed agent's dir and none of the live ones'.
     #[test]
     fn a_sweep_removes_only_the_killed_agents_directory() {
         use std::io::{BufRead, BufReader};
@@ -622,11 +557,9 @@ mod tests {
             .collect();
         let mut agents: Vec<_> = dirs.iter().map(|d| spawn_holder(d)).collect();
 
-        // Everyone alive: nothing goes, whatever the age.
         assert_eq!(sweep(parent.path()), 0);
         assert!(dirs.iter().all(|d| d.exists()));
 
-        // One is killed outright (no chance to clean up).
         let (mut dead, _keep_pipe) = agents.remove(1);
         dead.kill().unwrap();
         dead.wait().unwrap();

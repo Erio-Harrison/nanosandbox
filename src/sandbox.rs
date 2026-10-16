@@ -1,7 +1,4 @@
-//! Sandbox implementation
-//!
-//! The main Sandbox struct that provides the high-level API for running
-//! sandboxed processes across different platforms.
+//! Sandbox: the high-level API.
 
 use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 use crate::error::Result;
@@ -23,30 +20,20 @@ fn generate_sandbox_id() -> String {
     format!("{}-{}", timestamp, count)
 }
 
-/// Main sandbox struct
-///
-/// Provides a cross-platform API for running sandboxed processes.
-/// The actual sandboxing mechanism is platform-specific:
-///
-/// - **Linux**: namespaces, cgroups v2, seccomp
-/// - **macOS**: sandbox-exec (Seatbelt)
-/// - **Windows**: Job Objects, Restricted Tokens
+/// Cross-platform sandbox: Linux namespaces/cgroups/seccomp, macOS sandbox-exec, Windows
+/// Job Objects.
 pub struct Sandbox {
     config: SandboxConfig,
     id: String,
     executor: Box<dyn PlatformExecutor>,
-    /// Started once here and reused by every `run()` call instead of being
-    /// spun up and torn down per call; dropped (and shut down) with the
-    /// `Sandbox` itself.
+    /// Started once and reused by every `run()`; shut down with the `Sandbox`.
     proxy: Option<ProxiedNetwork>,
     /// Counts runs, so an audit start and its end can be tied together.
     runs: AtomicU64,
 }
 
 impl Sandbox {
-    /// Create a new SandboxBuilder
-    ///
-    /// # Example
+    /// Create a new [`SandboxBuilder`].
     ///
     /// ```rust,no_run
     /// use nanosandbox::{Sandbox, MB};
@@ -66,15 +53,13 @@ impl Sandbox {
         let mut config = builder.into_config();
         let executor = get_executor();
 
-        // Validate platform support for this configuration
         executor.check_support(&config)?;
 
         // Where the paths it names lead, fixed now: see `SandboxConfig::pin`.
         #[cfg(unix)]
         config.pin();
 
-        // Start the proxy once, after platform support is confirmed, so it is
-        // not spun up only to be discarded by a check_support() failure.
+        // // After the support check, so a failure doesn't spin up a proxy for nothing.
         let proxy = match &config.network_mode {
             NetworkMode::Proxied { allowed_domains } => Some(ProxiedNetwork::setup(
                 allowed_domains.clone(),
@@ -92,16 +77,7 @@ impl Sandbox {
         })
     }
 
-    /// Run a command in the sandbox
-    ///
-    /// # Arguments
-    ///
-    /// * `cmd` - The command to execute
-    /// * `args` - Command arguments
-    ///
-    /// # Returns
-    ///
-    /// An `ExecutionResult` containing stdout, stderr, exit code, and resource usage.
+    /// Run `cmd` with `args`, returning output, exit code and resource usage.
     ///
     /// # Example
     ///
@@ -116,13 +92,7 @@ impl Sandbox {
         self.run_with_input(cmd, args, None)
     }
 
-    /// Run a command with optional stdin input
-    ///
-    /// # Arguments
-    ///
-    /// * `cmd` - The command to execute
-    /// * `args` - Command arguments
-    /// * `stdin` - Optional data to pass to stdin
+    /// Run a command, passing `stdin` as its input.
     ///
     /// # Example
     ///
@@ -164,18 +134,10 @@ impl Sandbox {
         crate::platform::name()
     }
 
-    // ========== Preset configurations ==========
-    //
-    // Presets only use settings every platform with file system isolation
-    // has, so they build the same on Linux and macOS, except for the CPU
-    // share and process count macOS can't limit (see cpu_and_pids).
+    // // Presets use only settings every file-system-isolating platform has; macOS can't
+    // // limit CPU share or process count (see cpu_and_pids).
 
-    /// Data analysis preset
-    ///
-    /// - Read-only input directory
-    /// - Read-write output directory
-    /// - Appropriate memory and CPU limits
-    /// - No network (default)
+    /// Data analysis preset: read-only input, writable output, no network.
     ///
     /// # Example
     ///
@@ -201,12 +163,8 @@ impl Sandbox {
             .no_network()
     }
 
-    /// Code judge preset (for OJ systems)
-    ///
-    /// - Strict limits
-    /// - Minimal permissions: `code_dir` read-only, nothing else of the
-    ///   home directory readable
-    /// - No network
+    /// Code judge preset (OJ systems): strict limits, `code_dir` read-only, no other home
+    /// directory access, no network.
     ///
     /// # Example
     ///
@@ -231,11 +189,7 @@ impl Sandbox {
             .no_network()
     }
 
-    /// AI Agent executor preset
-    ///
-    /// - Read-write workspace
-    /// - Moderate limits
-    /// - Network controlled by caller
+    /// AI agent preset: writable workspace, moderate limits, network set by the caller.
     ///
     /// # Example
     ///
@@ -260,10 +214,7 @@ impl Sandbox {
             .env("USER", "sandbox")
     }
 
-    /// Interactive shell preset
-    ///
-    /// - For debugging
-    /// - Relatively permissive
+    /// Interactive shell preset for debugging; relatively permissive.
     ///
     /// # Example
     ///
@@ -289,9 +240,8 @@ impl Sandbox {
     }
 }
 
-/// The presets' CPU share and process count, where they can be enforced:
-/// macOS has neither and Windows no CPU share, and they refuse them rather
-/// than ignore them.
+/// CPU share and process count for the presets, where enforceable (not macOS; no CPU share
+/// on Windows).
 fn cpu_and_pids(builder: SandboxBuilder, cpus: f64, pids: u32) -> SandboxBuilder {
     if cfg!(target_os = "macos") {
         builder
@@ -306,10 +256,8 @@ fn cpu_and_pids(builder: SandboxBuilder, cpus: f64, pids: u32) -> SandboxBuilder
 mod tests {
     use super::*;
 
-    /// A relative path names the directory as of build; the host's working
-    /// directory changing later must not change which one. `pin` itself, not
-    /// `build`: as root, build() refuses a writable directory that `nobody`
-    /// can't write, which this checkout is.
+    /// A relative path names the directory as of build. Calls `pin`, not `build`: as root,
+    /// build() refuses a writable directory `nobody` can't write.
     #[test]
     #[cfg(unix)]
     fn test_relative_paths_are_made_absolute_at_build() {
@@ -349,7 +297,6 @@ mod tests {
 
     #[test]
     fn test_presets() {
-        // Just verify presets compile and return builders
         let _ = Sandbox::data_analysis("/in", "/out");
         let _ = Sandbox::code_judge("/code");
         let _ = Sandbox::agent_executor("/workspace");

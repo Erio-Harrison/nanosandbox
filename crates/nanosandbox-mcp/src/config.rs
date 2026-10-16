@@ -1,5 +1,4 @@
-//! Launch options. Everything the sandbox may touch is decided here, by the
-//! person starting the server; no tool parameter can change it.
+//! Launch options. The operator decides what the sandbox may touch; no tool parameter can change it.
 
 use crate::protocol::{RunOutput, Runner};
 use nanosandbox::{Sandbox, SandboxBuilder};
@@ -135,10 +134,8 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
         memory: 512 * 1024 * 1024,
         timeout: 30.0,
         max_concurrent: std::thread::available_parallelism().map_or(2, |n| n.get()),
-        // A fork bomb is the cheap way to hurt a host; macOS can't limit it.
         max_pids: cfg!(target_os = "linux").then_some(128),
-        // The library's default is 16 MB per stream, far more than a model
-        // can use; one noisy command shouldn't fill its context.
+        // Library default is 16 MB per stream; far more than a model can use.
         max_output: Some(1 << 20),
         ..Config::default()
     };
@@ -147,7 +144,6 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     let mut cleanup = crate::audit::Plan::default();
     let mut it = args.into_iter();
     while let Some(arg) = it.next() {
-        // `--flag=value` and `--flag value` both work.
         let (flag, inline) = match arg.split_once('=') {
             Some((f, v)) if f.starts_with("--") => (f.to_owned(), Some(v.to_owned())),
             _ => (arg, None),
@@ -287,9 +283,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
 }
 
 impl Config {
-    /// Opens `--audit-dir`, refusing a place the commands could write: they
-    /// could then rewrite their own record. Returns the directory as the
-    /// sandbox must see it, and the session.
+    /// Opens `--audit-dir`, refusing a place commands could write (they could rewrite their record).
     fn open_audit_dir(
         &self,
         path: &Path,
@@ -394,7 +388,6 @@ impl Config {
             b = b.max_output(n);
         }
         if let Some((dir, log)) = &audit {
-            // Commands can't read what they ran or were allowed to do.
             b = b.deny_read(dir).audit(log.clone());
         }
         for (k, v) in &self.env {
@@ -405,11 +398,8 @@ impl Config {
                 b = b.env(k, v);
             }
         }
-        // Commands start with an empty environment. A PATH of the library's
-        // own default would leave out anything outside /usr/bin (Homebrew's
-        // node and python on Apple silicon); this process's is what the
-        // person who started it finds in their terminal. An explicit
-        // --env PATH=... wins.
+        // Empty environment, but PATH is this process's: the library default misses Homebrew.
+        // An explicit --env PATH=... wins.
         if !self.env.iter().any(|(k, _)| k == "PATH")
             && let Some(path) = std::env::var_os("PATH").and_then(|p| p.into_string().ok())
         {
@@ -449,15 +439,9 @@ impl Config {
         Ok(b)
     }
 
-    /// Points npm, pip and anything that follows `XDG_CACHE_HOME` at a
-    /// directory in the workspace, so a download is kept for the next call.
-    /// `HOME` stays private to each call, so configuration and credentials
-    /// don't outlive it; only caches do. They aren't in `HOME` because that is
-    /// the run's private temp directory, which has a size limit (256 MB) a large
-    /// package would hit; the workspace has none. The directory ignores itself
-    /// in git (a `.gitignore` holding `*`, as `.pytest_cache` has), so it
-    /// doesn't show in `git status`. Nothing is returned if it can't be made:
-    /// commands then just don't have a persistent cache.
+    /// Points npm, pip and `XDG_CACHE_HOME` users at a workspace directory so downloads persist.
+    /// `HOME` stays private per call (no credentials survive); it isn't used because its tmpdir
+    /// is capped at 256 MB. The dir ignores itself in git. Returns nothing if it can't be made.
     fn cache_env(&self, workspace: &Path) -> Vec<(String, String)> {
         if self.no_cache {
             return Vec::new();
@@ -471,8 +455,6 @@ impl Config {
             if !ignore.exists() {
                 std::fs::write(ignore, "# Created by nanosandbox-mcp.\n*\n")?;
             }
-            // Run as root, commands run as nobody, or the host user chosen:
-            // the directories made here have to be theirs to write.
             #[cfg(target_os = "linux")]
             if unsafe { libc::geteuid() } == 0 {
                 const NOBODY: u32 = 65534;

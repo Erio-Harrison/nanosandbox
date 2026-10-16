@@ -57,12 +57,8 @@ fn read_raw(fd: RawFd, buf: &mut [u8]) -> nix::Result<usize> {
     nix::errno::Errno::result(ret).map(|r| r as usize)
 }
 
-/// The paths to try executing `cmd` at, in order, the way execvp searches
-/// $PATH: `cmd` itself if it contains '/', else each directory of
-/// `path_value` (":"-separated) joined with it. The child tries them after
-/// entering its rootfs, so the search happens in what the program will see.
-/// It used to happen here, in the host's file system: with a rootfs, `ls`
-/// resolved to the host's /usr/bin/ls, which an Alpine rootfs doesn't have.
+/// Paths to try for `cmd` in order, as execvp searches $PATH: `cmd` if it contains '/', else
+/// each `path_value` directory joined with it. Tried by the child inside its rootfs, not on the host.
 fn exec_candidates(cmd: &str, path_value: &str) -> Result<Vec<CString>> {
     if cmd.contains('/') {
         return Ok(vec![CString::new(cmd)?]);
@@ -78,34 +74,25 @@ fn exec_candidates(cmd: &str, path_value: &str) -> Result<Vec<CString>> {
         .collect()
 }
 
-/// Whether a sandbox with the default config can run here: user namespaces,
-/// plus what that config needs of the kernel -- Landlock, since there's no
-/// rootfs to keep it off the host's files, and a syscall filter for this
-/// architecture. Cgroup v2 isn't checked: `check_support` only requires it
-/// for configs that set a cgroup-backed limit (see `needs_cgroup`).
-/// A host this says no to can still run some configs (a rootfs needs no
-/// Landlock, `seccomp(false)` no filter); `build()` is what decides for a
-/// given one.
+/// Whether the default config can run here: user namespaces, Landlock (no rootfs), and a
+/// syscall filter for this arch. Cgroup v2 isn't checked (see `needs_cgroup`). A host that says
+/// no can still run some configs; `build()` decides per config.
 pub fn is_supported() -> bool {
     check_user_namespace_support() && landlock::abi() >= 1 && SyscallFilter::supported()
 }
 
 fn check_user_namespace_support() -> bool {
-    // Check if unprivileged user namespaces are enabled
     std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
         .map(|s| s.trim() == "1")
         .unwrap_or(true) // If file doesn't exist, assume enabled (newer kernels)
 }
 
 fn check_cgroup_v2_support() -> bool {
-    // Check if cgroup v2 is mounted
     std::path::Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
 
-/// Whether this config needs cgroups at all -- a host without cgroup v2 (or
-/// with it unreachable, e.g. a hybrid v1/v2 mount like Ubuntu 20.04's
-/// default) should still be able to run a sandbox that asks for none of
-/// these, instead of being refused over a requirement it doesn't trigger.
+/// Whether this config needs cgroups; hosts without cgroup v2 (e.g. hybrid v1/v2) should still
+/// run sandboxes that ask for none.
 fn needs_cgroup(config: &SandboxConfig) -> bool {
     config.memory_limit.is_some()
         || config.cpu_limit.is_some()
@@ -169,9 +156,7 @@ impl PlatformExecutor for LinuxExecutor {
 
         let start = Instant::now();
 
-        // Pipes for stdout, stderr, stdin and the ready signal; see
-        // prepare::Pipes. The child gets plain copies of the fd numbers
-        // (below): it has its own fd table, and closes its own.
+        // Pipes (see prepare::Pipes). The child gets plain fd numbers: it has its own fd table.
         let user_ns = UserNamespace::new(config.uid, config.gid)
             .with_host_ids(config.host_uid, config.host_gid);
         let pipes = Pipes::create(stdin, user_ns.host_ids())?;
@@ -186,18 +171,14 @@ impl PlatformExecutor for LinuxExecutor {
         let stdin_read = pipes.stdin_read_fd.as_ref().map(AsRawFd::as_raw_fd);
         let stdin_write = pipes.stdin_write_fd.as_ref().map(AsRawFd::as_raw_fd);
 
-        // Build clone flags
         let mut clone_flags = CloneFlags::CLONE_NEWUSER
             | CloneFlags::CLONE_NEWPID
             | CloneFlags::CLONE_NEWNS
             | CloneFlags::CLONE_NEWUTS
             | CloneFlags::CLONE_NEWIPC;
 
-        // Proxied gets its own network namespace too, with the proxy as its
-        // only way out (see `ProxyLink`). Without one, the domain whitelist
-        // only held for programs that chose to honor HTTP_PROXY -- confirmed
-        // for real: `curl --noproxy '*'` reached 1.1.1.1, example.org and
-        // github.com straight past it.
+        // Proxied gets its own netns with the proxy as its only way out (see `ProxyLink`); otherwise
+        // the whitelist only held for programs honoring HTTP_PROXY.
         if !matches!(config.network_mode, NetworkMode::Host) {
             clone_flags |= CloneFlags::CLONE_NEWNET;
         }
@@ -206,25 +187,19 @@ impl PlatformExecutor for LinuxExecutor {
             _ => None,
         };
 
-        // See prepare::prepare_cgroup: created and configured *before*
-        // clone(), so a failure there never leaves a half-started child
-        // stuck on the ready pipe.
+        // See prepare::prepare_cgroup: made before clone() so a failure can't strand the child.
         let cgroup = prepare_cgroup(config)?;
 
-        // Prepare command arguments. A NUL byte in one is an error: it used
-        // to panic here.
+        // A NUL byte is an error.
         let cmd_cstr = CString::new(cmd)?;
         let args_cstr: Vec<CString> = std::iter::once(Ok(cmd_cstr.clone()))
             .chain(args.iter().map(|s| CString::new(*s)))
             .collect::<std::result::Result<_, _>>()?;
 
-        // Allocate stack for child
         let mut stack = vec![0u8; STACK_SIZE];
 
-        // private_tmp is a tmpfs at /tmp (see MountPlan), or where AppArmor
-        // denies mounting, a directory for this run, removed when this
-        // returns (see platform/private_tmp.rs). TMPDIR points to it either
-        // way.
+        // private_tmp: a tmpfs at /tmp (see MountPlan), or under AppArmor a per-run directory
+        // (platform/private_tmp.rs). TMPDIR points to it either way.
         let userns_restricted = userns_restricted_by_apparmor();
         let mut private_tmp = config
             .private_tmp
@@ -236,33 +211,22 @@ impl PlatformExecutor for LinuxExecutor {
                 source: Box::new(e),
             })?;
 
-        // See prepare::prepare_env: clear_env, TMPDIR, the proxy's env vars,
-        // a default PATH.
+        // See prepare::prepare_env.
         let env = prepare_env(
             config,
             proxy_link.is_some(),
             private_tmp.as_ref().map(PrivateTmp::path),
         );
 
-        // See prepare::ExecBuffers for why these are built here, before
-        // clone(), and just used as-is in the child.
+        // See prepare::ExecBuffers: built before clone(), used as-is in the child.
         let exec_buffers = ExecBuffers::build(cmd, cmd_cstr, args_cstr, &env)?;
 
-        // A pre-built CString, used with raw stat()/chdir() in the child
-        // instead of Path::exists()/std::env::set_current_dir() -- both
-        // allocate internally (building their own CString from the path),
-        // and any allocation in the child risks the same frozen-malloc-lock
-        // hang as ExecBuffers's own envp_cstr (see prepare.rs): clone() is a
-        // raw syscall here, not libc's fork(), so it doesn't get glibc's
-        // pthread_atfork() malloc-lock protection either. Confirmed for real
-        // via gdb: a child stuck in malloc, called from eprintln!, itself
-        // called from child.rs after clone().
+        // Pre-built CString for raw stat()/chdir() in the child: Path::exists()/set_current_dir()
+        // allocate, risking the frozen-malloc-lock hang (see ExecBuffers in prepare.rs).
         let working_dir_cstr = CString::new(config.working_dir.as_os_str().as_bytes())?;
         let hostname = config.hostname.clone();
-        // Where AppArmor denies mounting and sethostname in the sandbox's
-        // user namespace, skip both instead of having every run log their
-        // failure to the program's stderr. check_mounts already refused any
-        // mounts the caller asked for here at build() time.
+        // Where AppArmor denies mounting and sethostname in the userns, skip both rather than log
+        // failures per run. check_mounts already refused caller mounts at build().
         if userns_restricted {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| {
@@ -278,19 +242,15 @@ impl PlatformExecutor for LinuxExecutor {
             Some(MountPlan::new(config, false)?)
         };
 
-        // See prepare::prepare_rlimits: applied with raw setrlimit() in the
-        // child, built here for the same no-allocation-after-clone() reason
-        // as everything in child.rs.
+        // See prepare::prepare_rlimits: raw setrlimit() in the child.
         let rlimits = prepare_rlimits(config);
 
-        // As root, the ids the child switches to before exec (mapped to
-        // nobody, or the host ids chosen), having dropped root's groups. See namespace::runs_as_root.
+        // As root, the ids the child switches to before exec (see namespace::runs_as_root).
         let become_nobody = namespace::runs_as_root().then(|| user_ns.ids());
 
         let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
 
-        // Without a rootfs: writes only to ReadWrite mounts, tmpfs and the
-        // temp directories. check_support refused a kernel without Landlock.
+        // Without a rootfs: writes only to ReadWrite mounts, tmpfs and temp dirs.
         let write_rules =
             landlock::WriteRules::new(config, private_tmp.as_ref().map(PrivateTmp::path))?;
 
@@ -301,7 +261,6 @@ impl PlatformExecutor for LinuxExecutor {
             None
         };
 
-        // Everything the child needs, built above; see child.rs.
         let child_setup = ChildSetup {
             cmd_cstr: exec_buffers.cmd_cstr,
             args_cstr: exec_buffers.args_cstr,
@@ -330,10 +289,8 @@ impl PlatformExecutor for LinuxExecutor {
             syscall_filter,
         };
 
-        // Child process entry point
         let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || child_setup.run());
 
-        // Clone child
         let child_pid = unsafe {
             clone(
                 child_fn,
@@ -347,20 +304,13 @@ impl PlatformExecutor for LinuxExecutor {
             source: Box::new(e),
         })?;
 
-        // Parent process
-
         if let Some(link) = &mut proxy_link {
             link.close_child_end();
         }
 
-        // Everything here runs before the child is ever signaled to
-        // continue past its ready-pipe wait (below) — it's stuck there
-        // regardless of what we do, so any failure in this block must
-        // kill and reap it before returning, not just propagate the error
-        // and leave it parked forever. Folded into one closure so every
-        // early return here goes through that same cleanup, rather than
-        // needing it repeated (and, before, missed) at each fallible step.
-        // The child's ends are the child's now.
+        // Until the child is signaled it is parked on the ready pipe, so any failure here must kill
+        // and reap it. One closure so every early return goes through that cleanup. The child's ends
+        // are the child's now.
         drop(pipes.ready_read_fd);
         drop(pipes.signal_write_fd);
         drop(pipes.stdout_write_fd);
@@ -372,7 +322,6 @@ impl PlatformExecutor for LinuxExecutor {
             if let Some(ref cg) = cgroup {
                 cg.add_process(child_pid.as_raw() as u32)?;
             }
-            // Signal child to continue.
             write_raw(ready_write, &[0u8]).map_err(|e| SandboxError::Internal {
                 context: "signal child to continue".into(),
                 source: Box::new(e),
@@ -386,11 +335,9 @@ impl PlatformExecutor for LinuxExecutor {
         }
         drop(pipes.ready_write_fd);
 
-        // Serve the proxy on the listener the child just bound inside its
-        // network namespace, for exactly as long as this run lasts: kept
-        // open, it would also keep that namespace alive. No listener means
-        // the child failed its network setup, and already said why on its
-        // stderr before exiting, which the wait below collects.
+        // Serve the proxy on the listener the child bound in its netns, for this run only (kept
+        // open it would keep that ns alive). No listener: the child failed network setup and said why
+        // on stderr.
         let proxy_attachment = match (&proxy_link, proxy) {
             (Some(link), Some(proxy)) => match link.receive().map(|l| proxy.attach(l)) {
                 Some(Err(e)) => {
@@ -406,19 +353,13 @@ impl PlatformExecutor for LinuxExecutor {
             _ => None,
         };
 
-        // Stdin is written inside wait_with_timeout's own loop, interleaved
-        // with draining stdout/stderr — not sequentially before it. A
-        // program that echoes input to output as it goes (e.g. `cat`) can
-        // block once >64KB of it is buffered and unread, which stops it
-        // reading more stdin in turn; writing all of stdin here first,
-        // before anything reads stdout/stderr at all, deadlocks against
-        // that (confirmed for real with a 200KB input).
+        // Stdin is written inside wait_with_timeout's loop, interleaved with draining output;
+        // writing it all first deadlocks against programs like `cat` once >64KB is buffered.
         let stdin_pipe = match (stdin, pipes.stdin_write_fd) {
             (Some(data), Some(fd)) => Some((fd, data)),
             _ => None,
         };
 
-        // Wait for child with timeout
         let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
         let Waited {
             stdout,
@@ -449,17 +390,15 @@ impl PlatformExecutor for LinuxExecutor {
         let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);
 
-        // Without a cgroup, these used to be None. wait4's rusage is the
-        // fallback: its CPU time sums the child and the descendants it waited
-        // for, and its maxrss is the largest single one of them (not a total).
-        // The cgroup's numbers, which cover the whole tree, win when there.
+        // Without a cgroup, wait4's rusage is the fallback: CPU time sums waited descendants, maxrss
+        // is the largest single one. The cgroup's whole-tree numbers win when present.
         let tv = |t: libc::timeval| {
             Duration::from_secs(t.tv_sec as u64) + Duration::from_micros(t.tv_usec as u64)
         };
         let rusage_cpu = tv(rusage.ru_utime) + tv(rusage.ru_stime);
         let rusage_peak = rusage.ru_maxrss as u64 * 1024; // Linux reports KiB
 
-        // Collect resource stats BEFORE cgroup cleanup
+        // Collect stats BEFORE cgroup cleanup.
         let (peak_memory, cpu_time, killed_by_oom) = if let Some(ref cg) = cgroup {
             let peak = cg.get_memory_stats().ok().map(|s| s.peak);
             let cpu = cg
@@ -472,16 +411,8 @@ impl PlatformExecutor for LinuxExecutor {
             (Some(rusage_peak), Some(rusage_cpu), false)
         };
 
-        // Cgroup will be cleaned up when dropped
-
-        // The child writes this exact line, and only from this exact exit
-        // code, right before giving up on every $PATH candidate -- so it's
-        // safe to turn back into an error here, matching Windows (which
-        // can tell "not found" from "ran and failed" synchronously, since
-        // it execs the command directly instead of through a child that
-        // searches $PATH itself). This used to stay an `Ok` with exit 127
-        // on every Unix platform, so a caller matching on
-        // `SandboxError::CommandNotFound` never saw it there.
+        // The child writes this exact line only from this exit code, after giving up on every $PATH
+        // candidate, so it's safe to turn into `SandboxError::CommandNotFound`, matching Windows.
         if exit_code == 127
             && signal.is_none()
             && !killed_by_timeout
@@ -539,8 +470,7 @@ impl PlatformExecutor for LinuxExecutor {
                 reason: "0 is root's, which the sandbox must not run as".into(),
             });
         }
-        // Without a rootfs, working_dir is a host path: check it now rather
-        // than fail every run. (With one, it's a path in the rootfs.)
+        // Without a rootfs working_dir is a host path: check it now. (With one, it's in the rootfs.)
         if config.rootfs.is_none() && !config.working_dir.is_dir() {
             return Err(SandboxError::PathNotFound(config.working_dir.clone()));
         }
@@ -563,15 +493,10 @@ impl PlatformExecutor for LinuxExecutor {
     }
 }
 
-/// Ubuntu 23.10+: a fresh user namespace created by an unprivileged,
-/// unconfined process lands in AppArmor's `unprivileged_userns` profile,
-/// which denies mounting, sethostname, and bringing up a network namespace's
-/// loopback (CAP_NET_ADMIN) inside it, even though the kernel's own
-/// capability model allows all three there. Confirmed for real via dmesg
-/// (`apparmor="DENIED" ... profile="unprivileged_userns"`, for both
-/// `operation="mount"` and `capname="net_admin"`).
-/// Root isn't affected, and neither is an executable with its own AppArmor
-/// profile that allows `userns`.
+/// Ubuntu 23.10+: an unprivileged, unconfined process's new userns lands in AppArmor's
+/// `unprivileged_userns` profile, which denies mounting, sethostname and netns loopback
+/// (CAP_NET_ADMIN) despite the kernel allowing them. Root and executables with their own
+/// `userns`-allowing profile are unaffected.
 fn userns_restricted_by_apparmor() -> bool {
     if unsafe { libc::geteuid() } == 0 {
         return false;

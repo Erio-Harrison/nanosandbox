@@ -6,7 +6,6 @@ use std::time::Duration;
 fn main() {
     println!("=== nanosandbox demo ===\n");
 
-    // 1. Basic command execution
     println!("1. Basic execution:");
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -18,7 +17,6 @@ fn main() {
     println!("   exit_code: {}", result.exit_code);
     assert!(result.success());
 
-    // 2. Timeout enforcement
     println!("\n2. Timeout (500ms limit, 5s sleep):");
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
@@ -32,7 +30,6 @@ fn main() {
     assert!(result.killed_by_timeout);
     assert!(result.duration < Duration::from_secs(2));
 
-    // 3. Environment isolation
     println!("\n3. Environment isolation:");
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("SECRET", "should_not_leak") };
@@ -46,9 +43,7 @@ fn main() {
         .run("sh", &["-c", "echo SECRET=$SECRET VISIBLE=$VISIBLE"])
         .unwrap();
     println!("   output: {}", result.stdout.trim());
-    // SECRET should be empty, VISIBLE should be "yes"
 
-    // 4. Exit code propagation
     println!("\n4. Exit code propagation:");
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
@@ -56,20 +51,17 @@ fn main() {
     println!("   exit_code: {}", result.exit_code);
     assert_eq!(result.exit_code, 42);
 
-    // 5. Stderr capture
     println!("\n5. Stderr capture:");
     let result = sandbox.run("sh", &["-c", "echo error >&2"]).unwrap();
     println!("   stderr: {}", result.stderr.trim());
     assert!(result.stderr.contains("error"));
 
-    // 6. Python (if available)
     println!("\n6. Python execution:");
     match sandbox.run("python3", &["-c", "print(2+2)"]) {
         Ok(r) if r.success() => println!("   2+2 = {}", r.stdout.trim()),
         _ => println!("   (python3 not available)"),
     }
 
-    // 7. Network blocking
     println!("\n7. Network blocking:");
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")

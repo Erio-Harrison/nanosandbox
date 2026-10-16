@@ -1,6 +1,4 @@
-//! ProxiedNetwork manager
-//!
-//! Manages the lifecycle of the HTTP proxy and network configuration.
+//! Proxy lifecycle and network configuration.
 
 use super::proxy::{Blocked, Policy};
 use crate::error::{Result, SandboxError};
@@ -13,9 +11,8 @@ use std::thread::JoinHandle;
 #[cfg(target_os = "linux")]
 pub(crate) const SANDBOX_PROXY_PORT: u16 = 3128;
 
-/// The proxy for a sandbox's `allow_network`: a runtime on a thread of its
-/// own, which serves each run on a listener of that run's (see `attach`).
-/// Nothing listens between runs.
+/// The proxy for a sandbox's `allow_network`: a runtime on its own thread, serving each run
+/// on a per-run listener (see `attach`). Nothing listens between runs.
 pub struct ProxiedNetwork {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
@@ -38,13 +35,8 @@ impl Attachment {
 }
 
 impl ProxiedNetwork {
-    /// Setup proxied network for a sandbox
-    ///
-    /// # Arguments
-    ///
-    /// * `allowed_domains` - List of domains to allow access to
-    /// * `allow_private_destinations` - Whether those may resolve to
-    ///   loopback, private, link-local and other non-public addresses
+    /// Start the proxy for `allowed_domains`; `allow_private_destinations` lets them resolve to
+    /// loopback, private, link-local and other non-public addresses.
     pub fn setup(allowed_domains: Vec<String>, allow_private_destinations: bool) -> Result<Self> {
         let policy = HttpProxy::new(allowed_domains, 0)
             .allow_private_destinations(allow_private_destinations)
@@ -52,12 +44,8 @@ impl ProxiedNetwork {
         let (runtime_tx, runtime_rx) = mpsc::channel::<std::io::Result<tokio::runtime::Handle>>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-        // The runtime is built and dropped entirely on this dedicated OS thread,
-        // so it never nests inside whatever runtime the caller happens to be on.
-        // Dropping a `Runtime` from within another async context panics:
-        // https://docs.rs/tokio/latest/tokio/runtime/struct.Runtime.html#shutdown
-        // The "spawn a runtime, talk to it over a channel" pattern is documented at
-        // https://tokio.rs/tokio/topics/bridging
+        // // Built and dropped on this dedicated thread: dropping a `Runtime` inside another async
+        // // context panics.
         let thread = std::thread::Builder::new()
             .name("nanosandbox-proxy".into())
             .spawn(move || {
@@ -72,7 +60,6 @@ impl ProxiedNetwork {
                     }
                 };
                 let _ = runtime_tx.send(Ok(rt.handle().clone()));
-                // Runs the runs' connections until shutdown.
                 rt.block_on(async move {
                     let _ = shutdown_rx.await;
                 });
@@ -101,12 +88,9 @@ impl ProxiedNetwork {
         })
     }
 
-    /// Serves the proxy on `listener`, one run's, until the returned
-    /// `Attachment` is dropped or finished. On Linux the listener is bound
-    /// inside the sandbox's own network namespace, where the sandbox can
-    /// reach it but nothing else; on macOS it's on loopback, the only place
-    /// the sandbox profile lets the run connect to. Connections made on the
-    /// sandbox's behalf go out from this process's network either way.
+    /// Serves the proxy on one run's `listener` until the `Attachment` is dropped or finished.
+    /// Linux: bound in the sandbox's own netns; macOS: loopback, the only place the profile
+    /// allows. Connections go out from this process's network either way.
     pub(crate) fn attach(&self, listener: std::net::TcpListener) -> std::io::Result<Attachment> {
         listener.set_nonblocking(true)?;
         let listener = {
@@ -141,12 +125,8 @@ impl ProxiedNetwork {
     }
 
     /// [`env_vars`](Self::env_vars), plus `NO_PROXY` for loopback unless
-    /// `allow_private_destinations` is on. By default the proxy refuses a
-    /// private address, so a program that talks to a server of its own on
-    /// `127.0.0.1` through it only ever gets a 403; direct, it reaches its
-    /// own. With private destinations allowed, loopback goes through the
-    /// proxy on purpose: that's how a sandbox reaches the host's local
-    /// services, so it must not be bypassed.
+    /// `allow_private_destinations` is on (the proxy would 403 a program's own `127.0.0.1`
+    /// server). With it on, loopback must go through the proxy to reach the host's services.
     pub fn env_vars_for(port: u16, allow_private_destinations: bool) -> Vec<(String, String)> {
         let mut vars = Self::env_vars(port);
         if !allow_private_destinations {
@@ -170,8 +150,7 @@ impl ProxiedNetwork {
 impl Drop for ProxiedNetwork {
     fn drop(&mut self) {
         self.shutdown();
-        // Blocks briefly until the runtime's thread exits -- consistent with
-        // the rest of the crate, which is blocking end-to-end.
+        // // Blocks until the runtime thread exits.
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -205,8 +184,7 @@ mod tests {
             }
         }
 
-        // Allowed on purpose: loopback is how the host's own services are
-        // reached, through the proxy.
+        // // Allowed on purpose: loopback reaches the host's services via the proxy.
         let vars = ProxiedNetwork::env_vars_for(3128, true);
         assert_eq!(vars.len(), 4);
         assert!(!vars.iter().any(|(k, _)| k.eq_ignore_ascii_case("no_proxy")));
@@ -231,7 +209,6 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
 
         assert_eq!(attachment.finish(), vec!["evil.example"]);
-        // Closed with the run: nothing listens there any more.
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(std::net::TcpStream::connect(addr).is_err());
     }

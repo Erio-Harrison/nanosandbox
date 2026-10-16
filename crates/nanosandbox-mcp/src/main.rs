@@ -73,8 +73,7 @@ fn main() {
             "Windows is not supported yet: the sandbox there is a resource limiter, not a security boundary",
         );
     }
-    // Refuses here, not on the first call, anything this platform can't
-    // enforce (see nanosandbox's `build()`).
+    // Refuse here, not on the first call, what this platform can't enforce.
     let (sandbox, audit) = cfg.build().unwrap_or_else(|e| die(&e));
 
     if let Some(dir) = &cfg.audit_dir {
@@ -101,7 +100,6 @@ fn main() {
         let line = match line {
             Ok(line) => line,
             Err(e) => {
-                // End of input is Ok(None), not an error: say what this was.
                 eprintln!("nanosandbox-mcp: could not read stdin: {e}; exiting");
                 break;
             }
@@ -122,9 +120,7 @@ fn main() {
             }
         }
     }
-    // Stdin closed: the client is shutting us down. Exit now rather than
-    // wait on running commands; a sandbox dies with its host process. What
-    // was still running shows in the record as started and never ended.
+    // Stdin closed: exit now rather than wait on commands; running ones show in the audit record as started, never ended.
     if let Some(audit) = &audit {
         audit.close();
     }

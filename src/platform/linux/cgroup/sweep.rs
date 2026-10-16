@@ -1,7 +1,5 @@
-//! Garbage collection for cgroup leaves, scopes and lock files left behind
-//! by a process that didn't get to run its own `Drop` (killed, or exited
-//! via `std::process::exit`), plus the flock-based bookkeeping that tells
-//! a sweep whether a given pid's nanosandbox process is really gone.
+//! Sweeps cgroup leaves, scopes and lock files left by processes that never ran `Drop`
+//! (killed, `std::process::exit`), plus the flock bookkeeping that proves a pid's owner is gone.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,14 +8,10 @@ use std::time::{Duration, Instant};
 use super::CGROUP_ROOT;
 use super::scope::user_app_slice;
 
-/// How often a long-lived process re-sweeps its scope's neighborhood and the
-/// lock directory, beyond the one-time sweep on first use. Sweeping is cheap
-/// (a directory listing plus a few flock probes), so this can be short.
+/// Period of the re-sweep in long-lived processes, beyond the first-use sweep. Cheap, so short.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
-/// Best-effort removal of entries under `dir` whose pid (from `pid_of`) is
-/// confirmed gone by `owner_is_gone`. Leftovers from a kill or
-/// `std::process::exit`, neither of which run our `Drop`.
+/// Best-effort removal of entries under `dir` whose pid (from `pid_of`) `owner_is_gone`.
 pub(super) fn sweep_stale_leaves(
     dir: &Path,
     pid_of: impl Fn(&str) -> Option<&str>,
@@ -44,10 +38,8 @@ pub(super) fn sweep_stale_leaves(
     }
 }
 
-/// Reaps sibling `nanosandbox-<pid>-<nonce>.scope` units directly under
-/// `target` whose owner is confirmed gone: killing empties their cgroup, and
-/// systemd's own `CollectMode=inactive-or-failed` notices and removes the
-/// unit — its cgroup is systemd's to manage, not ours to `rmdir`.
+/// Reaps sibling `nanosandbox-<pid>-<nonce>.scope` units under `target` whose owner is gone.
+/// Killing empties the cgroup; systemd collects the unit itself, so we don't `rmdir` it.
 fn sweep_stale_scopes(target: &Path) {
     let Ok(entries) = fs::read_dir(target) else {
         return;
@@ -72,15 +64,9 @@ fn sweep_stale_scopes(target: &Path) {
     }
 }
 
-/// Returns whether at least `SWEEP_INTERVAL` has passed since the last call
-/// that returned true, atomically claiming this call as that next sweep if
-/// so. Shared by the two periodic sweeps below; each keeps its own gate.
+/// True if `SWEEP_INTERVAL` has passed since the last true, atomically claiming that sweep.
 fn sweep_due(last: &std::sync::Mutex<Option<Instant>>) -> bool {
-    // A panic elsewhere while holding this lock must not cascade into every
-    // future caller across the process (see FORK_LOCK in macos/mod.rs for
-    // the same pattern): the sweep is opportunistic housekeeping, not a
-    // correctness-critical section, so a poisoned lock's stale state is
-    // still safe to read.
+    // Poison ignored: housekeeping only, stale state is safe to read.
     let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
     let due = match *last {
         Some(t) => t.elapsed() >= SWEEP_INTERVAL,
@@ -92,11 +78,8 @@ fn sweep_due(last: &std::sync::Mutex<Option<Instant>>) -> bool {
     due
 }
 
-/// Beyond the one-time scope decision in `compute_own_scope`, periodically
-/// re-sweeps sibling scopes near our own and supervisor leaves inside it —
-/// called from every `ensure_base`, not just the first, so a process that
-/// stays alive a long time doesn't wait for its own restart to pick up
-/// leftovers from other processes that died after our first sweep.
+/// Periodic re-sweep of sibling scopes and supervisor leaves, from every `ensure_base`, so a
+/// long-lived process picks up leftovers from processes that died after its first sweep.
 pub(super) fn sweep_scope_neighbors_if_due(own: &Path) {
     static LAST_SWEPT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     if !sweep_due(&LAST_SWEPT) {
@@ -126,22 +109,16 @@ pub(super) fn sweep_locks_if_due() {
     }
 }
 
-/// Holds an exclusive `flock` on `$XDG_RUNTIME_DIR/nanosandbox-<pid>.lock`
-/// for this process's entire lifetime — released, by the kernel, however
-/// this process ends. Used (via `owner_is_gone`) instead of checking
-/// `/proc/<pid>`: a pid can belong to an unrelated live process in another
-/// pid namespace, or the original process can have legitimately exited
-/// while a child it spawned keeps running — either way, killing based on
-/// `/proc` alone risks killing something we don't own.
+/// Holds an exclusive `flock` on `$XDG_RUNTIME_DIR/nanosandbox-<pid>.lock` for this
+/// process's lifetime; the kernel releases it however we end. Used instead of `/proc/<pid>`,
+/// which can't tell a recycled pid in another pid namespace or an orphaned child from ours.
 pub(super) fn hold_instance_lock() {
     let Some(dir) = lock_dir() else { return };
     static LOCK: std::sync::OnceLock<Option<std::fs::File>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| lock_file(&dir, std::process::id()));
 }
 
-/// `$XDG_RUNTIME_DIR`, or — since root doesn't otherwise have one (a
-/// `sudo`/cron/system-service root has no systemd user session at all) —
-/// a root-owned directory under `/run` with the same boot-scoped lifetime.
+/// `$XDG_RUNTIME_DIR`, or for root (no systemd user session) a root-owned dir under `/run`.
 fn lock_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return Some(PathBuf::from(dir));
@@ -154,18 +131,15 @@ fn lock_dir() -> Option<PathBuf> {
     None
 }
 
-/// Opens (creating if needed) and non-blockingly `flock`s `dir`'s lock file
-/// for `pid`, returning it locked on success.
+/// Opens `dir`'s lock file for `pid` and non-blockingly `flock`s it.
 fn lock_file(dir: &Path, pid: u32) -> Option<std::fs::File> {
     use std::os::unix::io::AsRawFd;
     let file = std::fs::File::create(dir.join(format!("nanosandbox-{pid}.lock"))).ok()?;
     (unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(file)
 }
 
-/// Whether `pid`'s lock file in `dir` is confirmed released — i.e. we could
-/// take it ourselves. A missing file (unknown state) conservatively counts
-/// as *not* gone: better to miss a cleanup than kill something we can't
-/// confirm is ours.
+/// Whether `pid`'s lock file in `dir` is confirmed released. A missing file counts as not
+/// gone: better to miss a cleanup than kill what we can't confirm is ours.
 fn owner_is_gone_in(dir: &Path, pid: u32) -> bool {
     use std::os::unix::io::AsRawFd;
     let Ok(file) = std::fs::File::open(dir.join(format!("nanosandbox-{pid}.lock"))) else {
@@ -186,10 +160,7 @@ pub(super) fn owner_is_gone(pid: u32) -> bool {
     }
 }
 
-/// Removes lock files in `dir` whose owner is confirmed gone. A process
-/// that exits cleanly leaves no leaf or scope behind for the other sweeps
-/// to ever match its pid against again — without this, its lock file
-/// would otherwise never be revisited or removed by anything.
+/// Removes lock files in `dir` whose owner is gone; no other sweep revisits them.
 fn sweep_stale_locks(dir: &Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -212,9 +183,7 @@ fn sweep_stale_locks(dir: &Path) {
     }
 }
 
-/// Atomically kills every process in `dir` (`cgroup.kill`, kernel ≥ 5.14 —
-/// avoids the read-then-kill race of a process forking in between) and
-/// waits for it to take effect.
+/// Kills every process in `dir` via `cgroup.kill` (kernel >= 5.14, no fork race) and waits.
 pub(super) fn kill_cgroup_atomically(dir: &Path) {
     if fs::write(dir.join("cgroup.kill"), "1").is_err() {
         return;

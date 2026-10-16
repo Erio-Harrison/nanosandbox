@@ -1,26 +1,14 @@
-//! Finds every process of one run, wherever it went.
-//!
-//! Walking the process tree from the run's first process misses one that
-//! left its process group and whose parent exited: it's been reparented to
-//! launchd by then (`setpgrp(); sleep &`, then exit). macOS has no cgroups
-//! and no subreaper. What every process of a run does keep is its sandbox:
-//! sandbox-exec's profile is inherited by all descendants and can't be left.
-//!
-//! So each run's profile denies `file-read-metadata` on a file made for that
-//! run alone, and allows it on a second one next to it; `sandbox_check` asks
-//! any process about both. Only the run's own processes are denied the first
-//! and allowed the second. Asking about just one isn't enough: an app's own
-//! sandbox (App Sandbox) can't read this temp directory at all, and comes
-//! out denied too. Confirmed for real: three of the user's apps did. Both
-//! files have to exist: for a missing path, sandbox_check reports 1 for
-//! every process, sandboxed or not.
+//! Finds every process of one run, including ones reparented to launchd.
+//! Each run's profile denies `file-read-metadata` on one marker file and allows it on a second;
+//! `sandbox_check` on both identifies the run (the sandbox is inherited and can't be left).
+//! Both are needed (App Sandbox apps are denied the first too), and both files must exist,
+//! else sandbox_check returns 1 for every process.
 
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 
 unsafe extern "C" {
-    /// libsystem_sandbox: 0 if `pid` may do `operation` (on the filter's
-    /// argument), 1 if not; for a process without a sandbox, 0.
+    /// libsystem_sandbox: 0 if allowed, 1 if denied; 0 without a sandbox.
     fn sandbox_check(
         pid: libc::pid_t,
         operation: *const libc::c_char,
@@ -31,17 +19,12 @@ unsafe extern "C" {
 
 const SANDBOX_FILTER_NONE: libc::c_int = 0;
 const SANDBOX_FILTER_PATH: libc::c_int = 1;
-/// Don't log the denial: this is only a question.
+/// Don't log the denial.
 const SANDBOX_CHECK_NO_REPORT: libc::c_int = 0x4000_0000;
 const PROC_UID_ONLY: u32 = 4;
 
-/// Where every run's marker files live: a directory of its own under the
-/// user's temp directory, which no run's profile lets a command write
-/// (see profile.rs). In the temp directory itself, writable by default, a
-/// command could delete *another* run's markers, and that run's end-of-run
-/// kill, or the sweep of a dead run's, would then find none of its
-/// processes. Confirmed for real: `rm -f $TMPDIR/../nanosandbox-run-*-out`
-/// from one sandbox stripped a concurrent one. Made here, mode 0700.
+/// Dir for run markers; no profile lets a command write it, so one run can't delete
+/// another's markers. Mode 0700.
 pub(crate) fn markers_dir() -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir()
@@ -55,15 +38,12 @@ pub(crate) fn markers_dir() -> std::io::Result<PathBuf> {
 
 /// The run's marker files, removed when dropped.
 pub(super) struct RunMarker {
-    /// Denied to the run.
     denied: PathBuf,
     denied_c: CString,
-    /// Allowed to the run, as a control.
     allowed: PathBuf,
     allowed_c: CString,
-    /// Locked for the run's life, so that a sweep (see private_tmp.rs) can
-    /// tell these files from ones a killed host left. `None` where the file
-    /// system can't lock; a sweep then can't either, and leaves them.
+    /// Held for the run's life so a sweep can tell live markers from a killed host's.
+    /// `None` where the fs can't lock.
     _lease: Option<std::fs::File>,
 }
 
@@ -84,7 +64,6 @@ impl RunMarker {
                     .write(true)
                     .create_new(true)
                     .open(&path)?;
-                // The profile and sandbox_check both see the real path.
                 let path = path.canonicalize()?;
                 let c = CString::new(path.as_os_str().as_encoded_bytes())
                     .map_err(std::io::Error::other)?;
@@ -116,7 +95,7 @@ impl RunMarker {
         }
     }
 
-    /// The profile rules that mark the run, and keep it from touching them.
+    /// Profile rules that mark the run and stop it touching the markers.
     pub(super) fn rules(&self) -> [(&'static str, &Path); 4] {
         [
             (
@@ -127,9 +106,7 @@ impl RunMarker {
                 "(allow file-read-metadata (literal (param \"{}\")))",
                 &self.allowed,
             ),
-            // The run could otherwise delete or replace a marker, and then
-            // `members()` finds nothing: a process that left the group would
-            // outlive the call.
+            // Else the run could delete a marker and escape `members()`.
             ("(deny file-write* (literal (param \"{}\")))", &self.denied),
             ("(deny file-write* (literal (param \"{}\")))", &self.allowed),
         ]
@@ -146,15 +123,12 @@ impl RunMarker {
         }
     }
 
-    /// This user's processes that are in the run's sandbox. Empty if the
-    /// check can't be trusted: if a marker file is gone, or this process
-    /// (which has no such sandbox) doesn't come out allowed both.
+    /// This user's processes in the run's sandbox; empty if the check can't be trusted.
     pub(super) fn members(&self) -> Vec<libc::pid_t> {
         members_marked_by(&self.denied, &self.denied_c, &self.allowed, &self.allowed_c)
     }
 }
 
-/// The processes `members` finds for a marker pair at these paths.
 fn members_marked_by(
     denied: &Path,
     denied_c: &CString,
@@ -180,14 +154,8 @@ fn members_marked_by(
         .collect()
 }
 
-/// Kills what is left of a run whose host is gone, found by the marker pair
-/// it left at `denied`/`allowed`: a process that left the run's process
-/// group (setsid, a double fork) outlives the watchdog's kill of the group,
-/// and nothing else would ever end it. For the sweep of a dead host's
-/// markers (see private_tmp.rs), before it removes them, since they are the
-/// only way to tell those processes apart. Returns how many were killed.
-/// Nothing is killed unless both files are there and this process comes
-/// out allowed both, as `members` requires.
+/// Kills processes left by a dead host's run (e.g. after setsid), found by its marker pair;
+/// run before the sweep removes the markers. Returns the count killed.
 pub(crate) fn kill_orphans(denied: &Path, allowed: &Path) -> usize {
     let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
     let (denied, allowed) = (canon(denied), canon(allowed));
@@ -226,7 +194,6 @@ mod tests {
     use super::*;
     use std::process::{Child, Command};
 
-    /// sandbox-exec running `script`, under a profile with `marker`'s rules.
     fn sandboxed(marker: Option<&RunMarker>, script: &str) -> Child {
         let rules: String = marker
             .map(|m| {
@@ -270,8 +237,6 @@ mod tests {
         );
     }
 
-    /// A run whose host is gone, with a process still in its sandbox: the
-    /// marker pair finds it, and `kill_orphans` ends it.
     #[test]
     fn test_kill_orphans_ends_what_a_dead_runs_markers_still_mark() {
         let marker = RunMarker::create().unwrap();
@@ -284,25 +249,20 @@ mod tests {
         assert!(killed >= 1, "killed {killed}");
         let status = run.wait().unwrap();
         assert!(!status.success(), "{status:?}");
-        // A sandboxed process of another run isn't touched.
         assert!(
             other.try_wait().unwrap().is_none(),
             "another run's process was killed"
         );
         let _ = other.kill();
         let _ = other.wait();
-        // With a marker gone, nothing can be told apart: nothing is killed.
         std::fs::remove_file(&marker.allowed).unwrap();
         assert_eq!(kill_orphans(&marker.denied, &marker.allowed), 0);
     }
 
-    /// Only checks; sends no signals except to its own children, through
-    /// their handles.
     #[test]
     fn test_members_are_exactly_the_runs_processes() {
         let marker = RunMarker::create().unwrap();
-        // The run: a child that leaves the process group, outliving its
-        // parent. Its pid comes back through a file.
+        // The run: a child that leaves the process group and outlives its parent.
         let pid_file = marker.denied.with_extension("pid");
         let mut run = sandboxed(
             Some(&marker),
@@ -326,8 +286,6 @@ mod tests {
 
         let members = marker.members();
 
-        // Clean up before asserting: the escapee by the pid it reported, the
-        // rest by their handles.
         unsafe {
             libc::kill(escaped, libc::SIGKILL);
         }

@@ -1,14 +1,8 @@
-//! P2: Observability Tests
-//!
-//! Tests for:
-//! - Structured logging with tracing
-//! - Execution metrics collection
-//! - Security audit logging
+//! Observability: timing, IDs, platform, exit codes, signals, output capture.
 
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: ExecutionResult should contain timing information
 #[test]
 #[cfg(unix)]
 fn test_result_contains_timing() {
@@ -16,7 +10,6 @@ fn test_result_contains_timing() {
 
     let result = sandbox.run("sleep", &["0.1"]).unwrap();
 
-    // Duration should be populated and reasonable
     assert!(
         result.duration > Duration::from_millis(50),
         "Duration too short: {:?}",
@@ -29,7 +22,6 @@ fn test_result_contains_timing() {
     );
 }
 
-/// Test: Sandbox should have unique, traceable ID
 #[test]
 #[cfg(unix)]
 fn test_sandbox_has_traceable_id() {
@@ -40,14 +32,11 @@ fn test_sandbox_has_traceable_id() {
     let id1 = sandbox1.id();
     let id2 = sandbox2.id();
 
-    // IDs should be non-empty
     assert!(!id1.is_empty(), "Sandbox ID should not be empty");
     assert!(!id2.is_empty(), "Sandbox ID should not be empty");
 
-    // IDs should be unique
     assert_ne!(id1, id2, "Sandbox IDs should be unique");
 
-    // IDs should be suitable for logging (no special chars)
     assert!(
         id1.chars()
             .all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
@@ -56,7 +45,6 @@ fn test_sandbox_has_traceable_id() {
     );
 }
 
-/// Test: Platform should be identifiable
 #[test]
 fn test_platform_identifiable() {
     let sandbox = crate::common::builder()
@@ -66,14 +54,12 @@ fn test_platform_identifiable() {
 
     let platform = sandbox.platform();
 
-    // Should be one of known platforms
     assert!(
         ["linux", "macos", "windows"].contains(&platform),
         "Unknown platform: {}",
         platform
     );
 
-    // Should match actual OS
     #[cfg(target_os = "linux")]
     assert_eq!(platform, "linux");
 
@@ -84,13 +70,11 @@ fn test_platform_identifiable() {
     assert_eq!(platform, "windows");
 }
 
-/// Test: Exit codes should be accurately captured
 #[test]
 #[cfg(unix)]
 fn test_exit_code_accuracy() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Test various exit codes
     for expected_code in [0, 1, 42, 127, 255] {
         let result = sandbox
             .run("sh", &["-c", &format!("exit {}", expected_code)])
@@ -103,13 +87,8 @@ fn test_exit_code_accuracy() {
     }
 }
 
-/// Test: Signal information should be captured
-///
-/// On Linux, the sandboxed command runs as PID 2 under a tiny init shim
-/// (PID 1 of its own namespace) that relays signals to it -- see
-/// `child.rs` -- so `sh -c "kill -9 $$"` works like it would anywhere
-/// else. Exercise our own wall_time_limit kill here instead, sent from
-/// outside the namespace: it's the one path every build goes through.
+/// On Linux the command runs under an init shim that relays signals, so exercise our own
+/// wall_time_limit kill, sent from outside the namespace: the one path every build shares.
 #[test]
 #[cfg(unix)]
 fn test_signal_capture() {
@@ -125,7 +104,6 @@ fn test_signal_capture() {
     assert_eq!(result.signal, Some(9), "Should be SIGKILL (9)");
 }
 
-/// Test: Timeout flag should be accurate
 #[test]
 #[cfg(unix)]
 fn test_timeout_flag_accuracy() {
@@ -135,11 +113,9 @@ fn test_timeout_flag_accuracy() {
         .build()
         .unwrap();
 
-    // Command that doesn't timeout
     let result = sandbox.run("true", &[]).unwrap();
     assert!(!result.killed_by_timeout, "true should not timeout");
 
-    // Command that does timeout
     let result = sandbox.run("sleep", &["10"]).unwrap();
     assert!(
         result.killed_by_timeout,
@@ -147,7 +123,6 @@ fn test_timeout_flag_accuracy() {
     );
 }
 
-/// Test: Stdout and stderr should be properly separated
 #[test]
 #[cfg(unix)]
 fn test_output_separation() {
@@ -177,7 +152,6 @@ fn test_output_separation() {
     );
 }
 
-/// Test: Resource metrics structure is present (even if values are None)
 #[test]
 #[cfg(unix)]
 fn test_resource_metrics_structure() {
@@ -189,19 +163,13 @@ fn test_resource_metrics_structure() {
 
     let result = sandbox.run("echo", &["test"]).unwrap();
 
-    // These fields should exist (even if None currently)
     let _ = result.peak_memory;
     let _ = result.cpu_time;
     let _ = result.killed_by_oom;
-
-    // Once implemented, they should have values
-    // For now, just verify the structure exists
 }
 
-/// Test: a normal (unrestricted) run gets its own private /proc. The
-/// AppArmor-restricted case (`proc_isolated == false`) isn't covered here --
-/// forcing that sysctl mid-suite isn't something a single test can do
-/// safely; see docs/platform-linux.md.
+/// A normal run gets its own private /proc. The AppArmor-restricted case isn't covered;
+/// see docs/platform-linux.md.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_proc_isolated_true_outside_apparmor_restriction() {
@@ -213,13 +181,11 @@ fn test_proc_isolated_true_outside_apparmor_restriction() {
     assert!(result.proc_isolated);
 }
 
-/// Test: Duration should be accurate for various execution times
 #[test]
 #[cfg(unix)]
 fn test_duration_accuracy() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Short command
     let result = sandbox.run("true", &[]).unwrap();
     assert!(
         result.duration < Duration::from_secs(1),
@@ -227,7 +193,6 @@ fn test_duration_accuracy() {
         result.duration
     );
 
-    // Medium command
     let result = sandbox.run("sleep", &["0.2"]).unwrap();
     assert!(
         result.duration >= Duration::from_millis(150),
@@ -241,7 +206,6 @@ fn test_duration_accuracy() {
     );
 }
 
-/// Test: Multiple runs should each have independent metrics
 #[test]
 #[cfg(unix)]
 fn test_independent_metrics() {
@@ -255,7 +219,6 @@ fn test_independent_metrics() {
         })
         .collect();
 
-    // Each should have different durations
     for (i, result) in results.iter().enumerate() {
         assert!(
             result.stdout.trim() == i.to_string(),
@@ -263,20 +226,17 @@ fn test_independent_metrics() {
         );
     }
 
-    // Durations should be roughly increasing
     assert!(
         results[0].duration < results[2].duration,
         "Durations should reflect sleep time"
     );
 }
 
-/// Test: Error output should be captured completely
 #[test]
 #[cfg(unix)]
 fn test_error_output_capture() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Generate multi-line error
     let result = sandbox
         .run(
             "sh",
@@ -298,7 +258,6 @@ fn test_error_output_capture() {
     assert!(result.stderr.contains("Error line 3"));
 }
 
-/// Test: Large output should be captured (within limits)
 #[test]
 #[cfg(unix)]
 fn test_large_output_capture() {
@@ -308,7 +267,6 @@ fn test_large_output_capture() {
         .build()
         .unwrap();
 
-    // Generate ~50KB of output (simpler command)
     let result = sandbox.run("sh", &["-c",
         "i=1; while [ $i -le 500 ]; do echo \"Line $i: This is test content\"; i=$((i+1)); done"
     ]).unwrap();
@@ -334,13 +292,11 @@ fn test_large_output_capture() {
     );
 }
 
-/// Test: Binary output should not corrupt results
 #[test]
 #[cfg(unix)]
 fn test_binary_output_handling() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Output some binary data
     let result = sandbox
         .run(
             "sh",
@@ -354,7 +310,6 @@ fn test_binary_output_handling() {
         )
         .unwrap();
 
-    // Should not crash, text should be present
     assert!(
         result.stdout.contains("text after binary"),
         "Text after binary should be captured"

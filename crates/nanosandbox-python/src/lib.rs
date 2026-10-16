@@ -1,10 +1,7 @@
 //! Python bindings for nanosandbox, built with PyO3.
 //!
-//! Mirrors `nanosandbox::SandboxBuilder`/`Sandbox`/`ExecutionResult` method
-//! for method; see the Rust crate's docs for behavior. Builder setters
-//! consume `self` in Rust, so each one here takes the wrapped builder out of
-//! `Option` and hands back a new wrapper -- that's what makes
-//! `Sandbox.builder().read_only(...).memory_limit(...)` chain in Python too.
+//! Mirrors `nanosandbox::SandboxBuilder`/`Sandbox`/`ExecutionResult`; see the Rust docs.
+//! Setters take the wrapped builder out of its `Option` and return a new wrapper so Python chains.
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -64,8 +61,6 @@ impl SandboxBuilder {
         Self::wrap(nanosandbox::Sandbox::builder())
     }
 
-    // ===== Filesystem =====
-
     fn read_only(&mut self, path: String) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.read_only(path)))
     }
@@ -114,8 +109,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.rootfs(path)))
     }
 
-    // ===== Resource limits =====
-
     fn memory_limit(&mut self, bytes: u64) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.memory_limit(bytes)))
     }
@@ -154,8 +147,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.max_output(bytes)))
     }
 
-    // ===== Network =====
-
     fn no_network(&mut self) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.no_network()))
     }
@@ -172,8 +163,6 @@ impl SandboxBuilder {
     fn allow_private_destinations(&mut self) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.allow_private_destinations()))
     }
-
-    // ===== Security =====
 
     #[cfg(target_os = "linux")]
     fn seccomp(&mut self, enabled: bool) -> PyResult<Self> {
@@ -200,14 +189,11 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.host_gid(gid)))
     }
 
-    /// macOS only: whether /tmp and the other system temp directories stay
-    /// writable (the host's own). `False` leaves only the private `$TMPDIR`.
+    /// macOS only: whether the host's /tmp etc. stay writable; `False` leaves only private `$TMPDIR`.
     #[cfg(target_os = "macos")]
     fn shared_tmp(&mut self, shared: bool) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.shared_tmp(shared)))
     }
-
-    // ===== Environment =====
 
     fn env(&mut self, key: String, value: String) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.env(key, value)))
@@ -221,8 +207,6 @@ impl SandboxBuilder {
     fn hostname(&mut self, name: String) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.hostname(name)))
     }
-
-    // ===== Build =====
 
     fn build(&mut self) -> PyResult<Sandbox> {
         let inner = self.take()?.build().map_err(to_py_err)?;
@@ -277,10 +261,7 @@ impl Sandbox {
         stdin: Option<Vec<u8>>,
     ) -> PyResult<ExecutionResult> {
         let args_ref: Vec<&str> = args.iter().map(String::as_str).collect();
-        // A run can take anywhere from milliseconds to its whole
-        // wall_time_limit; without releasing the GIL here, every other
-        // Python thread -- including ones a concurrent framework needs to
-        // make progress while this one blocks -- is frozen for that long.
+        // Release the GIL: a run can last up to wall_time_limit and would freeze every other Python thread.
         let inner = py
             .allow_threads(|| self.inner.run_with_input(&cmd, &args_ref, stdin.as_deref()))
             .map_err(to_py_err)?;
@@ -296,9 +277,7 @@ impl Sandbox {
     }
 }
 
-/// See `nanosandbox::ExecutionResult`. Getters read straight from the real
-/// Rust value, and `success`/`failure_reason` call its own methods, so this
-/// can't drift from the core crate's definition of either.
+/// See `nanosandbox::ExecutionResult`; `success`/`failure_reason` call the core methods.
 #[pyclass(name = "ExecutionResult")]
 pub struct ExecutionResult {
     inner: nanosandbox::ExecutionResult,

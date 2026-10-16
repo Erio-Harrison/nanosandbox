@@ -1,20 +1,11 @@
-//! P0: Network Security Tests
-//!
-//! Tests for:
-//! - IP bypass prevention (sandboxed process connecting directly via IP)
-//! - Proxy domain validation
-//! - DNS resolution control
+//! Network security: the proxy is the only way out; domain whitelist, CONNECT, private destinations.
 
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: with a domain whitelist, the proxy is the only way out. A client
-/// that skips it (`--noproxy`) must not reach anything, and asking the proxy
-/// for a non-whitelisted address must get a 403.
-///
-/// The target is a local server, so this needs no internet and can count
-/// connections: it must never see one. It used to check `curl -s ... &&`,
-/// which counted the proxy's own 403 page as a successful connection.
+/// With a domain whitelist the proxy is the only way out: a client skipping it (`--noproxy`) reaches nothing,
+/// and a non-whitelisted request gets a 403. A local server counts connections (must see none);
+/// the old `curl -s ... &&` check counted the proxy's own 403 as a connection.
 #[test]
 #[cfg(unix)]
 fn test_ip_bypass_blocked() {
@@ -62,13 +53,11 @@ fn test_ip_bypass_blocked() {
         out.contains("direct=000"),
         "SECURITY: bypassing the proxy reached a host service: {out}"
     );
-    // Loopback is on NO_PROXY, so a program that just follows its environment
-    // goes direct, and finds nothing of the host's there.
+    // Loopback is on NO_PROXY: a program following its environment goes direct and finds nothing.
     assert!(
         out.contains("env=000"),
         "SECURITY: following the environment reached a host service: {out}"
     );
-    // Sent through the proxy on purpose, it's refused.
     assert!(
         out.contains("proxied=403"),
         "proxy didn't refuse a non-whitelisted address: {out}"
@@ -80,7 +69,6 @@ fn test_ip_bypass_blocked() {
     );
 }
 
-/// Test: Connections to non-whitelisted domains should fail through proxy
 #[test]
 #[cfg(unix)]
 fn test_non_whitelisted_domain_blocked() {
@@ -94,7 +82,6 @@ fn test_non_whitelisted_domain_blocked() {
         .build()
         .unwrap();
 
-    // Try to access a non-whitelisted domain through the proxy
     let result = sandbox
         .run(
             "sh",
@@ -117,7 +104,6 @@ fn test_non_whitelisted_domain_blocked() {
         )
         .unwrap();
 
-    // Non-whitelisted domain should be blocked
     let output = result.stdout.trim();
     assert!(
         output.contains("BLOCKED") || output.contains("NO_CURL") || result.exit_code != 0,
@@ -126,7 +112,6 @@ fn test_non_whitelisted_domain_blocked() {
     );
 }
 
-/// Test: Whitelisted domains should work through proxy
 #[test]
 #[cfg(unix)]
 fn test_whitelisted_domain_allowed() {
@@ -140,7 +125,6 @@ fn test_whitelisted_domain_allowed() {
         .build()
         .unwrap();
 
-    // Access whitelisted domain
     let result = sandbox
         .run(
             "sh",
@@ -169,7 +153,6 @@ fn test_whitelisted_domain_allowed() {
 
     let output = result.stdout.trim();
 
-    // Skip if no curl
     if output.contains("NO_CURL") {
         return;
     }
@@ -177,11 +160,9 @@ fn test_whitelisted_domain_allowed() {
     // Accept success, or note the failure without hard assertion (network flaky)
     if !output.contains("SUCCESS") {
         println!("Note: Whitelisted domain test didn't succeed: {}", output);
-        // This can fail due to network issues, not a code bug
     }
 }
 
-/// Test: Wildcard domain matching should work correctly
 #[test]
 #[cfg(unix)]
 fn test_wildcard_domain_matching() {
@@ -195,7 +176,6 @@ fn test_wildcard_domain_matching() {
         .build()
         .unwrap();
 
-    // Test via environment variables (since we can't easily test actual connections)
     let result = sandbox
         .run(
             "sh",
@@ -213,18 +193,14 @@ fn test_wildcard_domain_matching() {
         )
         .unwrap();
 
-    // Proxy should be configured
     assert!(
         result.stdout.contains("PROXY_SET"),
         "Proxy not configured for network whitelist mode"
     );
 }
 
-/// Test: HTTPS (CONNECT) tunneling should respect whitelist
-///
-/// Checks the CONNECT response code itself. The proxy refuses before
-/// connecting anywhere, so this needs no internet. It used to grep `curl -s`
-/// output, but `-s` hides the CONNECT failure, so a refusal read as ALLOWED.
+/// Checks the CONNECT response code itself; the proxy refuses before connecting, so no internet. Grepping
+/// `curl -s` hid the CONNECT failure, so a refusal read as ALLOWED.
 #[test]
 #[cfg(unix)]
 fn test_https_tunnel_respects_whitelist() {
@@ -260,7 +236,6 @@ fn test_https_tunnel_respects_whitelist() {
     );
 }
 
-/// Test: Network mode None should completely block network
 #[test]
 #[cfg(unix)]
 fn test_network_none_blocks_all() {
@@ -271,7 +246,6 @@ fn test_network_none_blocks_all() {
         .build()
         .unwrap();
 
-    // Any network access should fail
     let result = sandbox
         .run(
             "sh",
@@ -293,7 +267,6 @@ fn test_network_none_blocks_all() {
         )
         .unwrap();
 
-    // Network operations should fail
     let output = result.stdout.trim();
     assert!(
         output.contains("EXIT:") && !output.contains("EXIT:0")
@@ -306,7 +279,6 @@ fn test_network_none_blocks_all() {
     );
 }
 
-/// Test: Localhost connections should always work (for proxy)
 #[test]
 #[cfg(unix)]
 fn test_localhost_always_allowed() {
@@ -320,7 +292,6 @@ fn test_localhost_always_allowed() {
         .build()
         .unwrap();
 
-    // Localhost should work (proxy runs there)
     let result = sandbox
         .run(
             "sh",
@@ -340,7 +311,6 @@ fn test_localhost_always_allowed() {
         )
         .unwrap();
 
-    // The connection attempt itself might fail (no service), but shouldn't be blocked
     let output = result.stdout.trim();
     assert!(
         output.contains("NC_EXIT:") || output.contains("NO_NC"),
@@ -349,10 +319,8 @@ fn test_localhost_always_allowed() {
     );
 }
 
-/// Test: an allowed name that resolves to loopback (or another non-public
-/// address) is refused unless allow_private_destinations() says otherwise.
-/// The proxy connects from the host's network, so this is the host's own
-/// localhost: its databases, dev servers, cloud metadata.
+/// An allowed name resolving to loopback or another non-public address is refused unless
+/// allow_private_destinations() says otherwise: the proxy connects from the host's network.
 #[test]
 #[cfg(unix)]
 fn test_private_destinations_refused_by_default() {
@@ -409,9 +377,7 @@ fn test_private_destinations_refused_by_default() {
     assert!(hits.load(Ordering::SeqCst) > 0);
 }
 
-/// Test: a POST through the proxy reaches the server with its body. The
-/// proxy used to forward only the headers, so every plain-HTTP upload hung
-/// until the server gave up waiting for the body.
+/// A POST through the proxy reaches the server with its body (only headers used to be forwarded, so uploads hung).
 #[test]
 #[cfg(unix)]
 fn test_post_body_reaches_server_through_proxy() {
@@ -465,7 +431,7 @@ fn test_post_body_reaches_server_through_proxy() {
     assert_eq!(body, "payload=12345");
 }
 
-/// Test: the run's result lists the hosts the proxy refused it.
+/// The run's result lists the hosts the proxy refused it.
 #[test]
 #[cfg(unix)]
 fn test_blocked_hosts_reported() {

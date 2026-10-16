@@ -1,14 +1,9 @@
-//! P0: Resource Limits Enforcement Tests
-//!
-//! Tests for:
-//! - setrlimit actually being called (macOS)
-//! - cgroup cleanup after execution (Linux)
-//! - OOM detection from cgroup events (Linux)
+//! Resource limit enforcement: memory (polled on macOS, cgroup on Linux), rlimits, CPU, OOM, cgroup cleanup.
 
 use nanosandbox::Sandbox;
 use std::time::Duration;
 
-/// Test: Memory limit is enforced on macOS by polling the process group footprint
+/// macOS enforces memory_limit by polling the process group footprint.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_memory_limit_enforced() {
@@ -34,7 +29,7 @@ fn test_macos_memory_limit_enforced() {
     assert!(!result.killed_by_timeout);
 }
 
-/// Test: A child that leaves the process group still counts toward the memory limit
+/// A child that leaves the process group still counts toward the memory limit.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_memory_limit_counts_escaped_child() {
@@ -45,7 +40,6 @@ fn test_macos_memory_limit_counts_escaped_child() {
         .build()
         .unwrap();
 
-    // A variable length keeps perl from folding the allocation into the parent at compile time.
     let script = "use POSIX; if (fork() == 0) { POSIX::setsid(); $n = 200_000_000; $x = 'a' x $n; sleep 5; exit 0 } sleep 6;";
     let result = sandbox.run("perl", &["-e", script]).unwrap();
     assert!(
@@ -55,12 +49,8 @@ fn test_macos_memory_limit_counts_escaped_child() {
     assert!(result.duration < Duration::from_secs(4));
 }
 
-/// Test: memory_limit counts a daemonized descendant too -- not just one
-/// that left the process group while its parent is still alive (the
-/// previous test), but one orphaned to launchd by a double fork, the
-/// classic daemonize pattern. The live polling check used to walk the
-/// process tree by parent links, which a reparented process isn't in;
-/// confirmed for real, it finished clean under a 5x-over allocation.
+/// memory_limit also counts a daemonized descendant, orphaned to launchd by a double fork: the live polling
+/// check walked parent links and missed it (a 5x-over allocation finished clean).
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_memory_limit_counts_daemonized_descendant() {
@@ -101,7 +91,7 @@ print('top-level done', flush=True)
     );
 }
 
-/// Test: The timeout kill also reaches a child that left the process group
+/// The timeout kill also reaches a child that left the process group.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_timeout_kills_escaped_child() {
@@ -141,7 +131,7 @@ fn test_macos_timeout_kills_escaped_child() {
     assert!(!alive, "escaped child survived the timeout kill");
 }
 
-/// Test: A rejected setrlimit names the setting instead of a bare errno
+/// A rejected setrlimit names the setting instead of a bare errno.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_rejected_rlimit_names_the_setting() {
@@ -162,11 +152,8 @@ fn test_macos_rejected_rlimit_names_the_setting() {
     );
 }
 
-/// Test: Max processes limit on macOS
-///
-/// RLIMIT_NPROC on macOS counts every process the user has, not just the
-/// sandbox's, so it can't be used, and there's nothing else: build()
-/// refuses max_pids rather than accept it and not enforce it.
+/// max_pids is refused on macOS: RLIMIT_NPROC counts all the user's processes and nothing else works,
+/// so build() refuses it rather than accept and not enforce it.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_max_pids_refused() {
@@ -177,7 +164,7 @@ fn test_macos_max_pids_refused() {
     ));
 }
 
-/// Test: Max open files limit should be enforced via setrlimit
+/// Max open files is enforced via setrlimit.
 #[test]
 #[cfg(unix)]
 fn test_max_open_files_enforced() {
@@ -188,21 +175,16 @@ fn test_max_open_files_enforced() {
         .build()
         .unwrap();
 
-    // Check ulimit value
     let result = sandbox.run("sh", &["-c", "ulimit -n"]).unwrap();
     let output = result.stdout.trim();
 
-    // Should show our limit
     if output != "unlimited" {
         let limit: u32 = output.parse().unwrap_or(0);
         assert!(limit <= 20, "RLIMIT_NOFILE should be 20, got {}", limit);
     }
 }
 
-/// Test: Cgroup directories should be cleaned up after execution (Linux)
-///
-/// Current bug: cgroups accumulate in /sys/fs/cgroup/nanosandbox-*
-/// Expected: Cgroup directory deleted after sandbox exits
+/// Cgroup directories are deleted after the sandbox exits (they used to accumulate in /sys/fs/cgroup/nanosandbox-*).
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_cgroup_cleanup() {
@@ -210,7 +192,6 @@ fn test_linux_cgroup_cleanup() {
 
     let cgroup_base = "/sys/fs/cgroup";
 
-    // Count existing nanosandbox cgroups
     let count_nanosandbox_cgroups = || -> usize {
         if let Ok(entries) = fs::read_dir(cgroup_base) {
             entries
@@ -224,7 +205,6 @@ fn test_linux_cgroup_cleanup() {
 
     let initial_count = count_nanosandbox_cgroups();
 
-    // Run several sandboxes
     for _ in 0..5 {
         let sandbox = Sandbox::builder()
             .working_dir("/tmp")
@@ -235,7 +215,6 @@ fn test_linux_cgroup_cleanup() {
         let _ = sandbox.run("echo", &["hello"]);
     }
 
-    // Wait for cleanup
     std::thread::sleep(Duration::from_millis(500));
 
     let final_count = count_nanosandbox_cgroups();
@@ -249,13 +228,9 @@ fn test_linux_cgroup_cleanup() {
     );
 }
 
-/// Test: cpu_time_limit counts the whole cgroup, not just one process.
-/// RLIMIT_CPU (set per process too) wouldn't catch a program that forks:
-/// each child gets its own copy of the same limit, so N children could use
-/// close to N times the configured budget before any one of them, on its
-/// own, used enough to hit it. Confirmed for real: 10 busy-loop children
-/// under a 2s limit finished in well under a second once the cgroup-wide
-/// check was added, each individually nowhere near its own 2s.
+/// cpu_time_limit counts the whole cgroup: per-process RLIMIT_CPU gives each forked child its own full budget,
+/// so N children could use ~N times the limit (10 busy-loop children under 2s finished well under a second
+/// once the cgroup-wide check existed).
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_cpu_time_limit_counts_the_whole_cgroup() {
@@ -280,13 +255,8 @@ fn test_linux_cpu_time_limit_counts_the_whole_cgroup() {
     );
 }
 
-/// Test: a single process over cpu_time_limit is still caught by
-/// RLIMIT_CPU, same as before the cgroup-wide check above was added.
-///
-/// The kernel sends the SIGKILL straight to the command (PID 2, under the
-/// init shim -- see child.rs), not to anything wait.rs controls, so the
-/// shim is the one reporting it onward: exit code 128+9, and the signal
-/// itself over its pipe.
+/// A single process over cpu_time_limit is still caught by RLIMIT_CPU. The kernel SIGKILLs the command
+/// (PID 2 under the init shim, see child.rs), so the shim reports it: exit 128+9 and the signal over its pipe.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_cpu_time_limit_single_process_unaffected() {
@@ -308,10 +278,8 @@ fn test_linux_cpu_time_limit_single_process_unaffected() {
     assert!(!result.killed_by_cpu_limit, "{result:?}");
 }
 
-/// Test: going over memory_limit ends in an OOM kill, reported as one,
-/// soon. It used to end as a timeout more often than not: memory.high, at
-/// 90% of the limit, throttled the program instead, and swap let it go past
-/// the limit.
+/// Going over memory_limit ends in a prompt OOM kill reported as one (it used to end as a timeout:
+/// memory.high throttled at 90% and swap let it past the limit).
 #[test]
 #[cfg(target_os = "linux")]
 fn test_linux_oom_detection() {
@@ -347,10 +315,7 @@ fn test_linux_oom_detection() {
     );
 }
 
-/// Test: Peak memory should be collected (Linux via cgroup, macOS via rusage)
-///
-/// Current bug: peak_memory is always None
-/// Expected: peak_memory contains actual peak RSS
+/// Peak memory is collected (cgroup on Linux, rusage on macOS).
 #[test]
 #[cfg(unix)]
 fn test_peak_memory_collection() {
@@ -361,7 +326,6 @@ fn test_peak_memory_collection() {
         .build()
         .unwrap();
 
-    // Allocate known amount of memory
     let result = sandbox
         .run(
             "sh",
@@ -378,14 +342,12 @@ fn test_peak_memory_collection() {
 
     assert_eq!(result.exit_code, 0);
 
-    // Peak memory should be populated
     assert!(
         result.peak_memory.is_some(),
         "peak_memory should be collected, got None"
     );
 
     if let Some(peak) = result.peak_memory {
-        // Should be at least a few MB (shell + dd overhead)
         assert!(
             peak > 1024 * 1024,
             "peak_memory seems too low: {} bytes",
@@ -394,10 +356,7 @@ fn test_peak_memory_collection() {
     }
 }
 
-/// Test: CPU time should be collected
-///
-/// Current bug: cpu_time is always None
-/// Expected: cpu_time contains actual CPU time used
+/// CPU time is collected.
 #[test]
 #[cfg(unix)]
 fn test_cpu_time_collection() {
@@ -407,7 +366,6 @@ fn test_cpu_time_collection() {
         .build()
         .unwrap();
 
-    // Do some CPU work
     let result = sandbox
         .run(
             "sh",
@@ -427,14 +385,12 @@ fn test_cpu_time_collection() {
 
     assert_eq!(result.exit_code, 0);
 
-    // CPU time should be populated
     assert!(
         result.cpu_time.is_some(),
         "cpu_time should be collected, got None"
     );
 
     if let Some(cpu_time) = result.cpu_time {
-        // Should have used some CPU time
         assert!(
             cpu_time > Duration::from_micros(100),
             "cpu_time seems too low: {:?}",

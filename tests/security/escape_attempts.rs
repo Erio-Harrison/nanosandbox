@@ -1,6 +1,4 @@
-//! Sandbox escape attempt tests
-//!
-//! These tests verify sandbox isolation
+//! Sandbox escape attempts: isolation of files, PIDs, mounts, devices, env, and writable areas.
 
 #[cfg(target_os = "linux")]
 use nanosandbox::Permission;
@@ -8,7 +6,6 @@ use nanosandbox::Sandbox;
 #[cfg(target_os = "macos")]
 use std::time::Duration;
 
-/// Test that sandbox cannot read sensitive host files
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_read_host_etc_shadow() {
@@ -16,22 +13,18 @@ fn test_cannot_read_host_etc_shadow() {
 
     let result = sandbox.run("cat", &["/etc/shadow"]).unwrap();
 
-    // Should fail or read sandbox's own file (not host)
     assert!(result.exit_code != 0 || !result.stdout.contains("root:"));
 }
 
-/// Test PID namespace isolation
 #[test]
 #[cfg(target_os = "linux")]
 fn test_pid_namespace_isolation() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // PID 1 in sandbox should be sandbox's init, not host's systemd
     let result = sandbox.run("cat", &["/proc/1/cmdline"]).unwrap();
     assert!(!result.stdout.contains("systemd"));
 }
 
-/// Test process isolation
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_see_host_processes() {
@@ -43,12 +36,10 @@ fn test_cannot_see_host_processes() {
 
     let result = sandbox.run("ps", &["aux"]).unwrap();
 
-    // Should only see sandbox processes (very few)
     let lines: Vec<&str> = result.stdout.lines().collect();
     assert!(lines.len() < 15);
 }
 
-/// Test mount operations blocked
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_mount_filesystems() {
@@ -60,7 +51,6 @@ fn test_cannot_mount_filesystems() {
     assert!(result.exit_code != 0);
 }
 
-/// Test device node creation blocked
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cannot_create_device_nodes() {
@@ -70,19 +60,15 @@ fn test_cannot_create_device_nodes() {
     assert!(result.exit_code != 0);
 }
 
-/// Test user namespace isolation
 #[test]
 #[cfg(target_os = "linux")]
 fn test_user_namespace_isolation() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Should appear as root inside sandbox
     let result = sandbox.run("id", &[]).unwrap();
-    // May or may not be uid=0 depending on configuration
     assert!(result.success() || result.exit_code != 0);
 }
 
-/// macOS: Network isolation test
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_network_blocked() {
@@ -100,26 +86,20 @@ fn test_macos_network_blocked() {
         )
         .unwrap();
 
-    // Should fail due to network restrictions
     assert!(result.exit_code != 0);
 }
 
-/// macOS: File restriction test
 #[test]
 #[cfg(target_os = "macos")]
 fn test_macos_file_restriction() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
-    // Try to access sensitive directory
     let result = sandbox.run("ls", &["/private/var/root"]).unwrap();
     assert!(result.exit_code != 0);
-    // May succeed to list but content access restricted
 }
 
-/// Test environment isolation
 #[test]
 fn test_environment_isolation() {
-    // Set a variable in parent that should NOT leak to sandbox
     // TODO: Audit that the environment access only happens in single-threaded code.
     unsafe { std::env::set_var("SECRET_VAR", "secret_value") };
 
@@ -135,7 +115,6 @@ fn test_environment_isolation() {
     #[cfg(not(target_os = "windows"))]
     {
         let result = sandbox.run("sh", &["-c", "echo $SECRET_VAR"]).unwrap();
-        // Should be empty or not contain the secret
         assert!(!result.stdout.contains("secret_value"));
     }
 
@@ -143,9 +122,8 @@ fn test_environment_isolation() {
     unsafe { std::env::remove_var("SECRET_VAR") };
 }
 
-/// Without a rootfs, a mount goes over the host's own path, inside the
-/// sandbox only: writes there land in the mount's source, and the host's
-/// copy of the target is untouched.
+/// Without a rootfs a mount goes over the host's path inside the sandbox only: writes land in the
+/// mount's source, the host's target is untouched.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_working_directory_confinement() {
@@ -168,8 +146,7 @@ fn test_working_directory_confinement() {
     assert!(!target.path().join("file.txt").exists());
 }
 
-/// Without a rootfs there's nowhere to create a missing target, so build()
-/// says so instead of the mount silently not happening.
+/// Without a rootfs a missing mount target can't be created, so build() says so.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_mount_target_must_exist_without_rootfs() {
@@ -191,7 +168,6 @@ fn test_mount_target_must_exist_without_rootfs() {
     }
 }
 
-/// Test working directory confinement on macOS
 #[test]
 #[cfg(target_os = "macos")]
 fn test_working_directory_confinement_macos() {
@@ -206,20 +182,16 @@ fn test_working_directory_confinement_macos() {
         .build()
         .unwrap();
 
-    // Should be able to write in workspace
     let file_path = format!("{}/file.txt", tmpdir_path);
     let result = sandbox
         .run("sh", &["-c", &format!("echo test > {}", file_path)])
         .unwrap();
     assert!(result.success());
 
-    // File should exist in temp dir
     assert!(tmpdir.path().join("file.txt").exists());
 }
 
-/// Test: a ReadOnly working directory stays read-only. On macOS the working
-/// directory used to be writable just by being one, so code_judge's code
-/// could change its own directory.
+/// A ReadOnly working directory stays read-only (on macOS it used to be writable just by being one).
 #[test]
 #[cfg(unix)]
 fn test_code_judge_cannot_write_its_code_dir() {
@@ -238,9 +210,8 @@ fn test_code_judge_cannot_write_its_code_dir() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-/// Test: by default, nothing outside the temp directories is writable. On
-/// macOS the default working directory, "/", used to make all of it
-/// writable; on Linux without a rootfs, everything the user could write was.
+/// By default nothing outside the temp directories is writable (macOS's default workdir "/" and
+/// Linux without a rootfs used to allow it).
 #[test]
 #[cfg(unix)]
 fn test_default_sandbox_cannot_write_host_files() {
@@ -254,10 +225,8 @@ fn test_default_sandbox_cannot_write_host_files() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
-/// Test: what programs need to write to still works by default, and a
-/// ReadWrite mount of a host directory onto itself makes it writable. That
-/// needs no actual mount, so it works under AppArmor's userns restriction
-/// too.
+/// Paths programs need to write still work by default, and a ReadWrite mount of a host dir onto itself
+/// makes it writable without a real mount, so it works under AppArmor's userns restriction.
 #[test]
 #[cfg(unix)]
 fn test_writable_places_still_writable() {
@@ -289,9 +258,7 @@ fn test_writable_places_still_writable() {
     );
 }
 
-/// Test: run as root, the sandbox runs as nobody, without root's groups.
-/// It used to keep root's ids, so it could read and write root's files as
-/// their owner, capabilities or not. Only runs as root.
+/// As root the sandbox runs as nobody without root's groups (it used to keep root's ids). Root only.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_root_caller_runs_as_nobody() {
@@ -300,8 +267,7 @@ fn test_root_caller_runs_as_nobody() {
         eprintln!("skipping: not root");
         return;
     }
-    // A root-owned directory anyone may enter, inside the default writable
-    // area: only the file permissions decide.
+    // Root-owned, enterable, in the default writable area: only file permissions decide.
     let dir = tempfile::tempdir_in("/var/tmp").unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let secret = dir.path().join("root-only");
@@ -322,10 +288,8 @@ fn test_root_caller_runs_as_nobody() {
     assert!(out.contains("groups=1"), "supplementary groups kept: {out}");
 }
 
-/// A root caller's sandbox runs as nobody (see `test_root_caller_runs_as_nobody`
-/// above), so a `writable` grant nobody can't actually write to -- the usual
-/// case for a directory a root-run container created -- used to fail deep
-/// inside the sandboxed program's own `EACCES`. `build()` catches it instead.
+/// A root caller's sandbox runs as nobody, so a `writable` grant nobody can't write to is refused
+/// at build() rather than failing with EACCES inside the program.
 #[test]
 #[cfg(unix)]
 fn test_root_caller_writable_unwritable_by_nobody_is_refused_upfront() {
@@ -349,8 +313,7 @@ fn test_root_caller_writable_unwritable_by_nobody_is_refused_upfront() {
     assert!(err.to_string().contains("nobody"), "{err}");
 }
 
-/// Same setup, but world-writable: nobody from a root caller's sandbox can
-/// write there, so this must build and run, not be refused.
+/// World-writable: nobody can write there, so it must build and run.
 #[test]
 #[cfg(unix)]
 fn test_root_caller_writable_world_writable_is_accepted() {
@@ -372,9 +335,7 @@ fn test_root_caller_writable_world_writable_is_accepted() {
     assert_eq!(result.exit_code, 0, "{}", result.stderr);
 }
 
-/// A root caller's sandbox runs as nobody unless told otherwise; `host_uid`/
-/// `host_gid` pick the host user instead, so a directory only its owner can
-/// write to (what a root-run container creates for another user) works.
+/// host_uid/host_gid run as the host user instead of nobody, so a directory only its owner can write works.
 #[cfg(target_os = "linux")]
 #[test]
 fn test_root_caller_host_ids_reach_a_directory_nobody_cannot() {
@@ -388,7 +349,6 @@ fn test_root_caller_host_ids_reach_a_directory_nobody_cannot() {
     std::os::unix::fs::chown(dir.path(), Some(OWNER), Some(OWNER)).unwrap();
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
 
-    // Without the ids, refused up front.
     let err = Sandbox::builder()
         .writable(dir.path())
         .build()

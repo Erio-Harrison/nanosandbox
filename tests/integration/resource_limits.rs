@@ -3,7 +3,6 @@
 use nanosandbox::MB;
 use std::time::{Duration, Instant};
 
-/// Wall time limit test - all platforms supported
 #[test]
 fn test_wall_time_limit() {
     let sandbox = crate::common::builder()
@@ -50,7 +49,6 @@ fn test_wall_time_within_limit() {
     }
 }
 
-/// Memory limit test - platform specific
 #[test]
 #[cfg(target_os = "linux")]
 fn test_memory_limit_linux() {
@@ -61,7 +59,6 @@ fn test_memory_limit_linux() {
         .build()
         .unwrap();
 
-    // Try to allocate more memory than allowed
     let result = sandbox.run(
         "python3",
         &[
@@ -70,7 +67,6 @@ fn test_memory_limit_linux() {
         ],
     );
 
-    // Should either fail or be killed (an Err is also acceptable)
     if let Ok(r) = result {
         assert!(!r.success() || r.killed_by_oom);
     }
@@ -91,7 +87,6 @@ fn test_memory_within_limit() {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Check if python3 is available
         let result = sandbox.run(
             "python3",
             &[
@@ -100,7 +95,6 @@ fn test_memory_within_limit() {
             ],
         );
 
-        // An Err means python3 isn't available
         if let Ok(r) = result
             && r.exit_code == 0
         {
@@ -109,7 +103,6 @@ fn test_memory_within_limit() {
     }
 }
 
-/// Process limit test - Linux only
 #[test]
 #[cfg(target_os = "linux")]
 fn test_max_pids_limit() {
@@ -120,12 +113,10 @@ fn test_max_pids_limit() {
         .build()
         .unwrap();
 
-    // Try fork bomb - should be contained
     let start = Instant::now();
     sandbox.run("sh", &["-c", ":(){ :|:& };:"]).unwrap();
     let elapsed = start.elapsed();
 
-    // Should complete within time limit (contained by pids limit)
     assert!(elapsed < Duration::from_secs(6));
 }
 
@@ -154,7 +145,6 @@ fn test_multiple_limits_combined() {
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cpu_limit() {
-    // CPU limit test - verifies it doesn't crash
     let sandbox = crate::common::builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"

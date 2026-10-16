@@ -1,6 +1,4 @@
-//! Error types for nanosandbox
-//!
-//! This module defines all error types used throughout the nanosandbox library.
+//! Error types.
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -14,10 +12,7 @@ pub enum SandboxError {
     #[error("{setting} isn't supported here: {reason}")]
     Unsupported { setting: String, reason: String },
 
-    /// The configuration is inconsistent, such as a bind target that doesn't
-    /// exist. `source` is `Some` only where the problem was detected via an
-    /// underlying error (e.g. a path with a NUL byte); most of these are
-    /// plain validation refusals with nothing to attach.
+    /// The configuration is inconsistent, such as a bind target that doesn't exist.
     #[error("Configuration error: {context}")]
     Config {
         context: String,
@@ -29,12 +24,10 @@ pub enum SandboxError {
     #[error("Path not found: {0}")]
     PathNotFound(PathBuf),
 
-    /// The audit sink refused to record the start of a run, so the command
-    /// was not run: there is no unaudited execution.
+    /// The audit sink refused the run's start; the command did not run.
     #[error("Audit: {0}")]
     Audit(String),
 
-    // Linux
     #[error(
         "Unprivileged user namespaces disabled. Run: sudo sysctl kernel.unprivileged_userns_clone=1"
     )]
@@ -51,14 +44,7 @@ pub enum SandboxError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    /// `source` is `None` for a plain refusal with no underlying error (an
-    /// existing directory the kernel didn't object to, but that we don't
-    /// recognize as our own), and for the couple of sites where one exists
-    /// but was already flattened to a `String` upstream to make a cached,
-    /// `Clone`-able result possible (see `compute_own_scope` and
-    /// `relocate_into_delegated_scope` in cgroup.rs) -- a trait-object
-    /// source can't be `Clone`, so there's nothing left to attach by the
-    /// time it reaches here.
+    /// `source` is `None` for plain refusals, and where the cause was already flattened to a `String` (the result must stay `Clone`).
     #[error("Failed to create cgroup: {context}")]
     CgroupCreation {
         context: String,
@@ -75,15 +61,12 @@ pub enum SandboxError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    // macOS
     #[error("sandbox-exec not available")]
     SandboxExecUnavailable,
 
-    // Windows
     #[error("Failed to create job object: {0}")]
     JobObjectCreation(String),
 
-    // Running the program
     #[error("Command not found: {0}")]
     CommandNotFound(String),
 

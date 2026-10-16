@@ -69,18 +69,15 @@ fn test_readwrite_mount_and_tmpfs() {
     );
 }
 
-/// A tmpfs nested inside a bind's target (no rootfs): the bind, being the
-/// shallower mount, has to land first, or the tmpfs mounted at the literal
-/// host path gets shadowed once the bind covers it. Mounting tmpfs before
-/// all binds unconditionally (instead of by depth) broke exactly this.
+/// A tmpfs nested in a bind's target (no rootfs): the shallower bind must mount first or it shadows the tmpfs.
+/// Mounting all tmpfs before binds (not by depth) broke this.
 #[test]
 #[cfg(unix)]
 fn test_tmpfs_nested_inside_a_bind_target() {
     if skip_without_userns_privileges() {
         return;
     }
-    // Not under /tmp, which private_tmp (on by default) covers with its
-    // own tmpfs.
+    // Not under /tmp, which private_tmp covers with its own tmpfs.
     let source = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     if crate::common::skip_if_unreachable_by_nobody(source.path()) {
         return;
@@ -90,8 +87,7 @@ fn test_tmpfs_nested_inside_a_bind_target() {
     std::fs::write(source.path().join("other"), "from source").unwrap();
 
     let target = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
-    // Must exist on the host already: check_mounts requires every tmpfs
-    // target to, the same as a bind target.
+    // Must already exist on the host: check_mounts requires it of every tmpfs target, as of a bind.
     std::fs::create_dir(target.path().join("scratch")).unwrap();
 
     let sandbox = Sandbox::builder()
@@ -118,7 +114,6 @@ fn test_tmpfs_nested_inside_a_bind_target() {
         "{}",
         result.stdout
     );
-    // The tmpfs, not the bind's own scratch/sentinel, is what's there.
     assert!(
         result.stdout.contains("scratch:cat:") || result.stdout.contains("No such file"),
         "the bind's scratch content was still visible: {}",
@@ -127,8 +122,7 @@ fn test_tmpfs_nested_inside_a_bind_target() {
     assert!(result.stdout.contains("write:ok"), "{}", result.stdout);
 }
 
-/// Every sandbox used to pivot_root through one shared `<rootfs>/old_root`
-/// directory, so concurrent runs on the same rootfs failed setup.
+/// Sandboxes used to pivot_root through one shared `<rootfs>/old_root`, so concurrent runs failed setup.
 #[test]
 #[cfg(unix)]
 fn test_concurrent_sandboxes_share_rootfs() {
@@ -167,9 +161,8 @@ fn test_concurrent_sandboxes_share_rootfs() {
     }
 }
 
-/// Commands are looked up in the rootfs, not on the host. They used to be
-/// resolved against the host's PATH first: a command only the rootfs had
-/// wasn't found, and one only the host had was run from the rootfs's path.
+/// Commands are looked up in the rootfs, not the host (they used to resolve against the host's PATH first,
+/// missing rootfs-only commands and running host-only ones).
 #[test]
 #[cfg(unix)]
 fn test_path_lookup_happens_in_the_rootfs() {
@@ -198,9 +191,8 @@ fn test_path_lookup_happens_in_the_rootfs() {
     ));
 }
 
-/// A root caller's sandbox runs as nobody, so a writable bind whose host
-/// source nobody can't write to is refused at build(), rootfs or not --
-/// the check used to be skipped entirely with a rootfs.
+/// A root caller's sandbox runs as nobody, so a writable bind nobody can't write to is refused at build(),
+/// rootfs or not (the check used to be skipped with a rootfs).
 #[test]
 #[cfg(unix)]
 fn test_root_caller_unwritable_bind_source_is_refused_with_a_rootfs() {

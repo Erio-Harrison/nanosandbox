@@ -1,7 +1,5 @@
-//! A `read_only` path inside a writable one (the workspace, say) is read-only
-//! again: on Linux a read-only mount, on macOS a deny rule. It can't be
-//! written, replaced, renamed or removed, nor can the directories above it be
-//! moved out of the way, while the rest of the workspace stays writable.
+//! A `read_only` path inside a writable one is read-only again (read-only mount on Linux, deny rule on macOS):
+//! it can't be written, replaced, renamed or removed, nor its parents moved, while the rest stays writable.
 
 use nanosandbox::Sandbox;
 use std::path::Path;
@@ -15,8 +13,7 @@ fn workspace() -> tempfile::TempDir {
     std::fs::write(root.join(".dc/settings.json"), "SAFE").unwrap();
     std::fs::write(root.join(".dc/other.json"), "other").unwrap();
     std::fs::write(root.join(".git/hooks/pre-commit"), "hook").unwrap();
-    // The sandbox's user (nobody, for a root caller) has to be able to
-    // write what the tests then expect to be refused.
+    // The sandbox's user (nobody for root) must be able to write what the tests expect refused.
     for p in [".dc", ".git", ".git/hooks"] {
         crate::common::chmod_open(&root.join(p));
     }
@@ -50,8 +47,7 @@ fn test_read_only_inside_writable_cannot_be_changed_or_moved() {
     }
     let sandbox = sandbox(&root).unwrap();
 
-    // None of these may get through. Each one's result is checked on the
-    // host after, not from what the shell says.
+    // Each result is checked on the host afterwards, not from the shell's output.
     for attack in [
         "echo EVIL > .dc/settings.json",
         "echo EVIL >> .dc/settings.json",
@@ -80,7 +76,6 @@ fn test_read_only_inside_writable_cannot_be_changed_or_moved() {
     assert!(root.join(".git").is_dir() && !root.join(".git.bak").exists());
     assert!(root.join(".git/hooks").is_dir() && !root.join(".git/hooks.bak").exists());
 
-    // The rest of the workspace is still writable.
     let out = sh(
         &sandbox,
         "echo ok > newfile.txt && echo ok > .dc/other.json && echo ok > .dc/brandnew.json \
@@ -91,8 +86,7 @@ fn test_read_only_inside_writable_cannot_be_changed_or_moved() {
     assert_eq!(read(".dc/brandnew.json").as_deref(), Some("ok\n"));
 }
 
-/// Without mounting, Linux can't take writing away inside a writable area:
-/// it says so at build(), rather than leaving the path writable.
+/// Without mounting Linux can't take writing away inside a writable area: build() says so.
 #[cfg(target_os = "linux")]
 #[test]
 fn test_read_only_inside_writable_is_refused_where_it_cannot_be_enforced() {
@@ -112,9 +106,8 @@ fn test_read_only_inside_writable_is_refused_where_it_cannot_be_enforced() {
     );
 }
 
-/// The workspace itself may sit in a writable directory (macOS's shared
-/// /tmp, say): then it can be moved away and a fake put in its place, with
-/// a symlink for `.dc` pointing at a file the sandbox may write.
+/// The workspace may sit in a writable directory (macOS's shared /tmp): it can then be moved away and
+/// a fake put in its place, with `.dc` a symlink to a file the sandbox may write.
 #[test]
 fn test_the_workspace_itself_cannot_be_swapped_out() {
     if crate::common::skip_without_userns_privileges() {

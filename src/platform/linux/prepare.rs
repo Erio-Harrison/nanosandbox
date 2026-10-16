@@ -1,7 +1,5 @@
-//! Host-side preparation for `execute()`, run before clone(): building
-//! what the child needs so it never has to itself (see child.rs). Nothing
-//! here is under that constraint -- it's all ordinary pre-clone Rust,
-//! running in the parent.
+//! Host-side preparation for `execute()`, before clone(): builds what the child needs so it
+//! never has to (see child.rs). Ordinary Rust, runs in the parent.
 
 use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
@@ -17,11 +15,8 @@ use super::exec_candidates;
 use super::mount::needed_cgroup_controllers;
 use super::namespace;
 
-/// The pipes `execute()` wires up to the child: stdout, stderr, a stdin
-/// pipe if there's input to feed, and a "ready" pipe the parent uses to
-/// release the child once its uid/gid mapping and cgroup membership are
-/// set up. Owned, so that any early return closes them; they used to be
-/// raw fds that every error path leaked.
+/// The pipes `execute()` wires to the child: stdout, stderr, optional stdin, and a "ready"
+/// pipe releasing the child after uid/gid mapping and cgroup join. Owned, so early returns close them.
 pub(super) struct Pipes {
     pub(super) stdout_read_fd: OwnedFd,
     pub(super) stdout_write_fd: OwnedFd,
@@ -29,9 +24,8 @@ pub(super) struct Pipes {
     pub(super) stderr_write_fd: OwnedFd,
     pub(super) ready_read_fd: OwnedFd,
     pub(super) ready_write_fd: OwnedFd,
-    /// The init shim writes one byte here, the number of the signal that
-    /// killed the command, so the host can report it as `signal`: the shim
-    /// itself can only exit with a status, not die by that signal.
+    /// The init shim writes one byte here: the signal that killed the command, reported as
+    /// `signal` (the shim can only exit with a status).
     pub(super) signal_read_fd: OwnedFd,
     pub(super) signal_write_fd: OwnedFd,
     pub(super) stdin_read_fd: Option<OwnedFd>,
@@ -39,11 +33,8 @@ pub(super) struct Pipes {
 }
 
 impl Pipes {
-    /// Close-on-exec, so no sandboxed program inherits them. Without it, a
-    /// run on another thread that clone()s while these are open hands them
-    /// to its own program: it could read this run's stdin, write into its
-    /// output, and hold its stdin open so it never sees EOF. dup2() onto
-    /// 0/1/2 in the child clears the flag on those.
+    /// Close-on-exec, so a concurrent clone() on another thread doesn't hand these to its
+    /// program. dup2() onto 0/1/2 in the child clears the flag.
     pub(super) fn create(stdin: Option<&[u8]>, owner: (u32, u32)) -> Result<Self> {
         use nix::fcntl::OFlag;
         use nix::unistd::pipe2;
@@ -66,10 +57,8 @@ impl Pipes {
             None => (None, None),
         };
 
-        // As root, the sandbox runs as nobody, or the host ids chosen (see
-        // namespace::runs_as_root), and a pipe belongs to whoever made it,
-        // mode 0600: so it couldn't reopen its own stdout through
-        // /dev/stdout. Give them to `owner`.
+        // As root the sandbox runs as nobody (or chosen ids; see namespace::runs_as_root) and a
+        // 0600 pipe belongs to its maker, so it couldn't reopen /dev/stdout. Give them to `owner`.
         if namespace::runs_as_root() {
             for fd in [
                 Some(stdout_write_fd.as_raw_fd()),
@@ -100,17 +89,12 @@ impl Pipes {
     }
 }
 
-/// Creates and configures the cgroup leaf for this run, *before* clone(),
-/// so a failure here (rootless with no delegated subtree, a missing
-/// controller...) never leaves a half-started child stuck on the ready
-/// pipe. Adding the process to it is the only step that needs child_pid,
-/// so it's the only cgroup step `execute()` still does after clone().
+/// Creates and configures the cgroup leaf before clone(), so a failure never strands a child
+/// on the ready pipe. Adding the process is the only step needing child_pid.
 pub(super) fn prepare_cgroup(config: &SandboxConfig) -> Result<Option<CgroupManager>> {
     let controllers = needed_cgroup_controllers(config);
-    // cpu_time_limit alone doesn't need a controller enabled: cpu.stat's
-    // usage_usec, read in wait.rs, is populated regardless (confirmed for
-    // real against a cgroup with none enabled) -- it just needs the
-    // cgroup to exist.
+    // cpu_time_limit needs no enabled controller: cpu.stat's usage_usec (read in wait.rs) works
+    // as long as the cgroup exists.
     if controllers.is_empty() && config.cpu_time_limit.is_none() {
         return Ok(None);
     }
@@ -128,12 +112,9 @@ pub(super) fn prepare_cgroup(config: &SandboxConfig) -> Result<Option<CgroupMana
     Ok(Some(cg))
 }
 
-/// The sandboxed program's environment. `clear_env(false)` (the default)
-/// starts from this process's own environment, with `config.env` on top;
-/// `clear_env(true)` starts empty. `TMPDIR` and, if nothing else gave it
-/// one, `HOME` point at `private_tmp_path` if private_tmp is on, proxy env
-/// vars are added when `proxy_active`, and `PATH` gets a default if the
-/// caller didn't set one.
+/// The sandboxed program's environment: this process's env (unless `clear_env(true)`) plus
+/// `config.env`. `TMPDIR`, and `HOME` if unset, point at `private_tmp_path` when on; proxy
+/// vars when `proxy_active`; default `PATH` if unset.
 pub(super) fn prepare_env(
     config: &SandboxConfig,
     proxy_active: bool,
@@ -153,11 +134,8 @@ pub(super) fn prepare_env(
             .into_owned();
         env.entry("TMPDIR".to_string())
             .or_insert_with(|| dir.clone());
-        // Without a HOME, npm, pip, git and the like look the user up in the
-        // password database: on macOS that finds the real home, which the
-        // sandbox can't write (npm fails with EPERM); on Linux the sandbox's
-        // uid has no entry at all (Node throws ENOENT). The private
-        // directory is somewhere they can keep caches for the run.
+        // Without HOME, npm/pip/git consult the password database: macOS finds the real home (EPERM
+        // on write), Linux has no entry for the uid (ENOENT). The private dir gives them a cache.
         env.entry("HOME".to_string()).or_insert(dir);
     }
 
@@ -176,11 +154,7 @@ pub(super) fn prepare_env(
     env
 }
 
-/// Applied with raw setrlimit() in the child; built here for the same
-/// no-allocation-after-clone() reason as everything in child.rs. These
-/// used to be silently ignored on Linux -- confirmed for real: `ulimit -n`
-/// reported 1024 under max_open_files(20), and cpu_time_limit (the
-/// code_judge preset's main limit) wasn't applied at all.
+/// Applied with raw setrlimit() in the child; built here to avoid allocating after clone().
 pub(super) fn prepare_rlimits(config: &SandboxConfig) -> Vec<(u32, u64, &'static [u8])> {
     let mut rlimits = Vec::new();
     if let Some(n) = config.max_open_files {
@@ -207,12 +181,8 @@ pub(super) fn prepare_rlimits(config: &SandboxConfig) -> Vec<(u32, u64, &'static
     rlimits
 }
 
-/// Everything execve() needs in the child, built once here instead of
-/// relying on nix's execve() wrapper to build a NUL-terminated pointer
-/// array from scratch on every call -- an allocation that, unlike an
-/// error path, sits on the ordinary success path too. Built, the child's
-/// own execve call is just two pointer derefs and a raw syscall, no
-/// allocation at all.
+/// Everything execve() needs, built once: nix's wrapper would allocate a pointer array on the
+/// success path; here the child's execve is two pointer derefs and a raw syscall.
 pub(super) struct ExecBuffers {
     pub(super) cmd_cstr: CString,
     /// Kept alive for `args_ptrs`, which points into these buffers.
@@ -225,41 +195,25 @@ pub(super) struct ExecBuffers {
 }
 
 impl ExecBuffers {
-    /// `cmd_cstr`/`args_cstr` are built separately, before `env` (see
-    /// `execute()`): they don't need it, and building them first means a
-    /// NUL byte in the command or an argument is caught before private_tmp
-    /// or the cgroup leaf even exist, not after.
+    /// `cmd_cstr`/`args_cstr` are built before `env` so a NUL byte is caught before private_tmp
+    /// or the cgroup leaf exist.
     pub(super) fn build(
         cmd: &str,
         cmd_cstr: CString,
         args_cstr: Vec<CString>,
         env: &HashMap<String, String>,
     ) -> Result<Self> {
-        // Built here, before clone(), and just used as-is in the child --
-        // not with std::env::set_var/remove_var there. clone() copies this
-        // whole (multi-threaded) process's memory, but only the calling
-        // thread continues in the child; if another thread here happened
-        // to be inside std::env's internal lock at that exact instant, the
-        // child inherits it frozen "locked", and its own env mutation
-        // later waits forever on a thread that doesn't exist in this
-        // process. Confirmed for real under enough concurrent sandbox
-        // creation: the child hangs there, or execs with a stale/corrupted
-        // environment. A NUL byte in a variable is an error too; it used
-        // to be dropped.
+        // Built before clone(), not via set_var/remove_var in the child: clone() copies a
+        // multi-threaded process, so a std::env lock held by another thread at that instant stays
+        // locked forever in the child (hang or stale env under concurrent creation). NUL bytes error.
         let envp_cstr: Vec<CString> = env
             .iter()
             .map(|(k, v)| CString::new(format!("{k}={v}")))
             .collect::<std::result::Result<_, _>>()?;
         let exec_paths = exec_candidates(cmd, env.get("PATH").map(String::as_str).unwrap_or(""))?;
 
-        // execve's own nix wrapper builds a NUL-terminated pointer array
-        // from these each time it's called -- an allocation that, unlike
-        // the ones above, sits on the ordinary success path too, not just
-        // an error branch. Building it here instead, once, means the
-        // child's own execve call is just two pointer derefs and a raw
-        // syscall, no allocation at all. args_cstr/envp_cstr are kept
-        // alongside these in `ChildSetup` (see child.rs) so the strings
-        // they point into stay alive for the call.
+        // args_cstr/envp_cstr are kept in `ChildSetup` (see child.rs) so the strings the pointer
+        // arrays reference stay alive.
         let mut args_ptrs: Vec<*const libc::c_char> =
             args_cstr.iter().map(|c| c.as_ptr()).collect();
         args_ptrs.push(std::ptr::null());

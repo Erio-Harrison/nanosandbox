@@ -1,13 +1,10 @@
-//! Performance benchmarks for nanosandbox
-//!
-//! Run with: cargo bench
+//! Sandbox benchmarks. Run with: cargo bench
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use nanosandbox::{MB, Sandbox, SandboxBuilder};
 use std::time::Duration;
 
-/// Without the one-time install, a Windows sandbox can only use the host's
-/// network.
+/// Without the one-time install, a Windows sandbox can only use the host's network.
 fn builder() -> SandboxBuilder {
     let builder = Sandbox::builder();
     if cfg!(windows) {
@@ -76,7 +73,6 @@ fn bench_sandbox_creation(c: &mut Criterion) {
 fn bench_command_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("command_execution");
 
-    // Pre-create sandbox for execution benchmarks
     let sandbox = builder()
         .working_dir(if cfg!(windows) {
             "C:\\Windows\\Temp"

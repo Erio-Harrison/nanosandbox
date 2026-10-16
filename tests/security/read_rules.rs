@@ -1,6 +1,5 @@
-//! What a sandbox can't read: credentials in the home directory by default,
-//! `deny_read` paths, and the whole home directory with `hide_home`, except
-//! what `read_only`/`writable` name inside them.
+//! What a sandbox can't read: home credentials by default, `deny_read` paths, and the whole home with
+//! `hide_home`, except what `read_only`/`writable` name inside them.
 
 use nanosandbox::Sandbox;
 
@@ -57,13 +56,11 @@ fn test_hide_home_except_what_is_named() {
     assert!(!can_read(&sandbox, &hidden.path().join("f")));
     assert!(can_read(&sandbox, &shown.path().join("f")));
 
-    // Without hide_home, the home directory is readable.
     let sandbox = Sandbox::builder().build().unwrap();
     assert!(can_read(&sandbox, &hidden.path().join("f")));
 }
 
-/// SSH keys and the like can't be read by default. Only checked where the
-/// user has a ~/.ssh with a file in it.
+/// SSH keys can't be read by default; checked only where ~/.ssh has a file.
 #[test]
 #[cfg(unix)]
 fn test_credentials_unreadable_by_default() {

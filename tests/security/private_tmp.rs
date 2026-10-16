@@ -1,7 +1,5 @@
-//! private_tmp(size), on by default, gives each run a private, size-limited
-//! temp directory that's gone afterwards: a tmpfs at /tmp on Linux where
-//! mounting works, a private directory elsewhere (macOS, and Linux under
-//! AppArmor's userns restriction). Programs find it through $TMPDIR.
+//! private_tmp(size), on by default, gives each run a private, size-limited temp dir that's gone afterwards:
+//! a tmpfs at /tmp on Linux where mounting works, a private directory elsewhere. Found via $TMPDIR.
 
 use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
@@ -15,8 +13,7 @@ fn sandbox(size: u64) -> Sandbox {
         .unwrap()
 }
 
-/// A file one run leaves in its /tmp isn't there for the next run, nor on
-/// the host afterwards.
+/// A file left in a run's /tmp isn't there for the next run or on the host.
 #[test]
 #[cfg(unix)]
 fn test_private_tmp_is_per_run_and_removed() {
@@ -37,8 +34,7 @@ fn test_private_tmp_is_per_run_and_removed() {
     assert_eq!(second.stdout.trim(), "missing", "the next run saw it");
 }
 
-/// Writing more than the size fails the run: with ENOSPC on a real tmpfs,
-/// by being killed where it's emulated.
+/// Writing past the size fails the run: ENOSPC on a real tmpfs, a kill where emulated.
 #[test]
 #[cfg(unix)]
 fn test_private_tmp_size_is_limited() {
@@ -80,9 +76,8 @@ fn test_no_private_tmp() {
     assert_eq!(result.stdout.trim(), "[]");
 }
 
-/// Two runs on one machine: one can't read, list into, write, remove or
-/// rename the other's private directory, which (where it isn't a tmpfs)
-/// used to sit in the temp directory, writable by every sandbox.
+/// One run can't read, list into, write, remove or rename another's private dir (which, where not
+/// a tmpfs, used to sit in the world-writable temp directory).
 #[test]
 #[cfg(unix)]
 fn test_a_run_cannot_reach_another_runs_private_tmp() {
@@ -90,8 +85,7 @@ fn test_a_run_cannot_reach_another_runs_private_tmp() {
     let a = sandbox(16 * MB);
     let (tx, rx) = mpsc::channel();
     let victim = std::thread::spawn(move || {
-        // Writes a secret, says where it is, keeps running so its directory
-        // stays, then checks the secret is as it was.
+        // Writes a secret, keeps running so its directory stays, then checks the secret is unchanged.
         let out = a
             .run(
                 "sh",
@@ -106,8 +100,7 @@ fn test_a_run_cannot_reach_another_runs_private_tmp() {
         let _ = tx.send(());
         out
     });
-    // The victim's $TMPDIR, read from the host side: its directory appears
-    // under the container.
+    // The victim's $TMPDIR, read from the host: its directory appears under the container.
     let container = {
         let t = std::env::temp_dir();
         let t = t.canonicalize().unwrap_or(t);
@@ -132,8 +125,7 @@ fn test_a_run_cannot_reach_another_runs_private_tmp() {
             break p;
         }
         if std::time::Instant::now() > deadline {
-            // A tmpfs (Linux with mounting): nothing of it is on the host,
-            // and another sandbox can't see it at all.
+            // A tmpfs: nothing on the host, invisible to other sandboxes.
             let _ = std::fs::write(container.join("go"), "");
             eprintln!("skipping: the private directory is not a directory on the host");
             return;

@@ -1,7 +1,5 @@
-//! Cgroup v2 management for Linux.
-//!
-//! Root writes directly under the real cgroup root. A non-root caller needs
-//! a *delegated* subtree instead — see `ensure_own_scope`.
+//! Cgroup v2 management. Root writes under the real root; non-root needs a delegated
+//! subtree (`ensure_own_scope`).
 
 use crate::error::{Result, SandboxError};
 use std::fs;
@@ -18,14 +16,8 @@ const NANOSANDBOX_CGROUP: &str = "nanosandbox";
 
 static LEAF_ID: AtomicU64 = AtomicU64::new(0);
 
-/// A per-process random value, mixed into every self-owned cgroup/scope name
-/// alongside our pid. Names keyed on pid alone can collide with a leftover
-/// from a dead process that happened to have the same (recycled) pid and
-/// hasn't been swept yet -- not just a narrow timing window, since sweeping
-/// is opportunistic, not continuous. Mixing in this nonce doesn't narrow
-/// that race, it removes the collision as a possible outcome at all: two
-/// different process lifetimes never produce the same name, regardless of
-/// pid reuse or sweep timing.
+/// Per-process random value mixed into self-owned cgroup/scope names with the pid, so a
+/// recycled pid's unswept leftover can never collide.
 fn process_nonce() -> u32 {
     static NONCE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *NONCE.get_or_init(|| {
@@ -72,8 +64,7 @@ pub struct CgroupManager {
 }
 
 impl CgroupManager {
-    /// Create a new cgroup leaf for a sandbox run, enabling only `needed`
-    /// controllers.
+    /// Creates a sandbox cgroup leaf, enabling only `needed` controllers.
     pub fn create(sandbox_id: &str, needed: &[&str]) -> Result<Self> {
         let base = ensure_base(needed)?;
         let path = base.join(sandbox_id);
@@ -84,8 +75,7 @@ impl CgroupManager {
         Ok(Self { path })
     }
 
-    /// Dry run for `check_support()`: fails the same way `create()` would,
-    /// but before `build()` returns instead of after `clone()`.
+    /// Dry run for `check_support()`: fails as `create()` would, but before clone().
     pub fn ensure_support(needed: &[&str]) -> Result<()> {
         ensure_base(needed).map(|_| ())
     }
@@ -100,12 +90,8 @@ impl CgroupManager {
             source: Box::new(e),
         })?;
 
-        // No memory.high: it used to be set to 90% of the limit, where the
-        // kernel throttles the cgroup instead of killing it, so a program
-        // using too much mostly ended as a timeout, not an OOM. And no swap:
-        // with it, the limit could be exceeded by swapping and the OOM kill
-        // never came. Not every kernel has swap accounting; without it,
-        // there's no swap to limit here either.
+        // No memory.high (throttles instead of OOM-killing, so overruns became timeouts) and no
+        // swap (swapping would evade the limit).
         let swap = self.path.join("memory.swap.max");
         if swap.exists() {
             fs::write(&swap, "0").map_err(|e| SandboxError::CgroupSetting {
@@ -218,21 +204,14 @@ impl CgroupManager {
         Ok(result)
     }
 
-    /// Check if any process in the cgroup was killed by OOM. A read failure
-    /// here is treated the same as the sibling `get_memory_stats`/
-    /// `get_cpu_stats` calls at this same call site (mod.rs): reported as
-    /// the "nothing happened" value rather than failing the whole run over
-    /// what's normally just a best-effort stats read.
+    /// Whether any process was OOM-killed. A read failure reports false, like the sibling stats reads.
     pub fn was_oom_killed(&self) -> bool {
         self.get_memory_events()
             .map(|e| e.oom_kill > 0 || e.oom_group_kill > 0)
             .unwrap_or(false)
     }
 
-    /// Get all PIDs in this cgroup. `kill_all`/`cleanup` read this in a
-    /// retry loop and stop as soon as it's confirmed empty. `None` means
-    /// unknown (a non-ENOENT read error), not empty -- a caller treating
-    /// that as empty would stop retrying while processes are still alive.
+    /// All PIDs, or None if unknown (non-ENOENT read error); None is not empty, or retry loops stop early.
     fn get_pids(&self) -> Option<Vec<u32>> {
         let procs_path = self.path.join("cgroup.procs");
         match fs::read_to_string(&procs_path) {
@@ -356,9 +335,7 @@ fn ensure_base(needed: &[&str]) -> Result<PathBuf> {
         sweep::kill_cgroup_atomically,
     ); // Drop doesn't run on SIGKILL/process::exit
 
-    // Last, not first: the sweeps above still need a stale pid's lock file
-    // to exist to confirm it via owner_is_gone — removing it any earlier in
-    // this same pass would erase that evidence before it's used.
+    // Last: the sweeps above need a stale pid's lock file to confirm owner_is_gone.
     sweep::sweep_locks_if_due();
 
     Ok(base)
@@ -385,9 +362,8 @@ fn only_us_or_empty(procs: &str) -> bool {
         .all(|pid| pid == us)
 }
 
-/// From `DelegateControllers`, not `Delegate` (`Delegate=pids` reports
-/// `true` but only delegates `pids`) or `cgroup.controllers` (shows what
-/// the kernel allows, not what was delegated).
+/// From `DelegateControllers`: `Delegate` is true for `Delegate=pids`, and
+/// `cgroup.controllers` shows kernel-allowed, not delegated.
 fn read_controller_list(path: &Path) -> Result<Vec<String>> {
     let content = fs::read_to_string(path).map_err(|e| SandboxError::CgroupCreation {
         context: format!("cannot read {}: {e}", path.display()),
@@ -402,20 +378,11 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
         return Ok(());
     }
 
-    // Concurrent callers in this process most often target the very same
-    // shared scope, each independently reading then writing
-    // cgroup.subtree_control on its own. With enough of them running at
-    // once there's effectively always a write in flight, so a short
-    // per-call retry alone keeps losing that race -- confirmed for real:
-    // under 20-way concurrency, about half the runs still failed even after
-    // 5 retries each. Serializing this process's own callers removes that
-    // self-inflicted contention entirely; the retry below still covers
-    // genuine cross-process contention (another nanosandbox process
-    // sharing this same delegated scope).
+    // Serialize in-process callers: concurrent read-modify-write of a shared scope's
+    // subtree_control kept losing the race (~half failed at 20-way). The retry below covers
+    // cross-process contention.
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    // See sweep_due above: a panic elsewhere while holding this lock must
-    // not poison every later caller -- there's no shared data here to be
-    // left inconsistent by it, only serialization.
+    // Poison ignored: the lock guards no data.
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let subtree_path = dir.join("cgroup.subtree_control");
@@ -434,12 +401,7 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // The kernel serializes subtree_control writes on this cgroup; one
-    // landing while another (ours or a concurrent thread/process sharing
-    // this same scope) is still being applied can transiently fail with
-    // EBUSY, not because anything is actually wrong. Confirmed for real
-    // under concurrent sandbox creation sharing one delegated scope. Retry
-    // briefly instead of surfacing that as a hard failure.
+    // Concurrent subtree_control writes can transiently fail with EBUSY; retry briefly.
     let mut last_err = None;
     for attempt in 0..5 {
         if attempt > 0 {
@@ -461,8 +423,7 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             }
         }
     }
-    // EBUSY here usually means the no-internal-process rule: something sits
-    // directly in `dir` itself. Name it, so the error says who.
+    // EBUSY usually means the no-internal-process rule: name the process in `dir`.
     let procs = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
     let described: Vec<String> = procs
         .split_whitespace()

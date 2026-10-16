@@ -1,8 +1,7 @@
 //! Helpers shared by the test binaries.
 
-/// `Sandbox::builder()`, for tests about something other than the network.
-/// Without the one-time install, a Windows sandbox can only use the host's
-/// network, so there it says so; elsewhere it's the plain builder.
+/// `Sandbox::builder()` for tests not about the network; on Windows it opts into the host
+/// network, the only one available without the one-time install.
 #[allow(dead_code)]
 pub fn builder() -> nanosandbox::SandboxBuilder {
     let builder = nanosandbox::Sandbox::builder();
@@ -13,15 +12,8 @@ pub fn builder() -> nanosandbox::SandboxBuilder {
     }
 }
 
-/// Ubuntu 23.10+ confines a fresh user namespace created by an unprivileged,
-/// unconfined process to AppArmor's `unprivileged_userns` profile, which
-/// denies the capabilities nanosandbox needs inside it (mounting, bringing up
-/// a network namespace's loopback). Mirrors the library's own check, which
-/// then refuses rootfs/mount/tmpfs and allow_network at build(), and skips
-/// the private /proc.
-///
-/// Prints why and returns true when that applies, so a test that needs
-/// those can return early instead of failing on the environment.
+/// True (after printing why) on Ubuntu 23.10+, where AppArmor confines unprivileged userns and
+/// denies mounts and netns loopback. Tests needing those return early.
 #[allow(dead_code)]
 pub fn skip_without_userns_privileges() -> bool {
     #[cfg(target_os = "linux")]
@@ -43,9 +35,7 @@ pub fn skip_without_userns_privileges() -> bool {
     false
 }
 
-/// A temp directory the sandbox can use even when the caller is root, whose
-/// sandbox runs as `nobody` (see `host_uid`): `tempfile` makes it mode 0700,
-/// owned by the caller, which nobody can't enter, let alone write to.
+/// A temp dir the sandbox can use even as root: its `nobody` can't enter tempfile's 0700 dir (see `host_uid`).
 #[cfg(unix)]
 #[allow(dead_code)]
 pub fn sandbox_tempdir_in(parent: impl AsRef<std::path::Path>) -> tempfile::TempDir {
@@ -61,12 +51,8 @@ pub fn sandbox_tempdir() -> tempfile::TempDir {
     sandbox_tempdir_in(std::env::temp_dir())
 }
 
-/// A root caller's sandbox runs as `nobody`, which can't enter a directory
-/// unless every ancestor allows "others" to traverse it -- not so for a
-/// checkout under a 0750 home, or for `/root`. Prints why and returns true
-/// when that applies, so a test that needs the sandbox to reach `path` can
-/// return early instead of failing on the environment. Never true for a
-/// non-root caller, whose sandbox runs as itself.
+/// True (after printing why) when a root caller's `nobody` sandbox can't traverse to `path`
+/// (e.g. a 0750 home, `/root`). Tests needing it return early.
 #[cfg(unix)]
 #[allow(dead_code)]
 pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
@@ -89,8 +75,7 @@ pub fn skip_if_unreachable_by_nobody(path: &std::path::Path) -> bool {
     false
 }
 
-/// World-writable, so the sandbox's user can write where it's allowed to and
-/// the test can then tell that what it was denied really was.
+/// World-writable, so the sandbox's user can write only where allowed.
 #[cfg(unix)]
 #[allow(dead_code)]
 pub fn chmod_open(path: &std::path::Path) {

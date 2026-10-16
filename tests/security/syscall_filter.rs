@@ -3,9 +3,8 @@
 use nanosandbox::{MB, Sandbox};
 use std::time::Duration;
 
-/// Calls each syscall from inside the sandbox through python's ctypes and
-/// prints `name=errno` (0 on success). The numbers come from the libc crate,
-/// so they're right for whichever architecture this runs on.
+/// Calls each syscall inside the sandbox via python ctypes and prints `name=errno` (0 on success);
+/// numbers come from the libc crate, so they fit any architecture.
 fn probe(sandbox: &Sandbox) -> Option<String> {
     let cases: &[(&str, libc::c_long, &[libc::c_long])] = &[
         (
@@ -153,14 +152,11 @@ fn test_filter_blocks_kernel_entry_points() {
             "{name} wasn't blocked:\n{out}"
         );
     }
-    // Flags it can't see, or a number it doesn't know: "not implemented",
-    // so libc falls back, rather than the process being killed.
+    // Unseen flags or unknown numbers: "not implemented", so libc falls back instead of the process dying.
     assert_eq!(errno_of(&out, "clone3"), libc::ENOSYS, "{out}");
     assert_eq!(errno_of(&out, "unknown"), libc::ENOSYS, "{out}");
-    // Not namespaces, so not blocked.
     assert_eq!(errno_of(&out, "unshare_fs"), 0, "{out}");
     assert_eq!(errno_of(&out, "ptrace_traceme"), 0, "{out}");
-    // Only AF_UNIX is denied; other address families are untouched.
     assert_eq!(errno_of(&out, "socket_inet"), 0, "{out}");
 }
 
@@ -206,11 +202,8 @@ fn test_filter_keeps_ordinary_programs_working() {
     }
 }
 
-/// Denying `socket(AF_UNIX, ...)` shouldn't break ordinary programs that
-/// never deliberately reach for a Unix socket. DNS resolution is the one
-/// to worry about: glibc's resolver can go through `nscd` over a Unix
-/// socket at `/var/run/nscd/socket` on some systems, and must fall back
-/// to resolving directly instead of erroring when that's unreachable.
+/// Denying `socket(AF_UNIX, ...)` mustn't break ordinary programs; notably glibc's resolver may use nscd over
+/// /var/run/nscd/socket and must fall back to direct resolution when it's unreachable.
 #[test]
 fn test_denying_af_unix_sockets_does_not_break_dns_or_compilation() {
     let sandbox = Sandbox::builder()

@@ -1,5 +1,4 @@
-//! Mount namespace planning: what to mount where, built before clone() so
-//! the child (which applies the plan) only issues raw syscalls.
+//! Mount namespace plan, built before clone() so the child issues only raw syscalls.
 
 use crate::builder::{Mount, Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
@@ -9,14 +8,9 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
-/// Whether a process with uid `uid` and gid `gid` (and no other groups)
-/// could write to `path`, going by its owner/group/other mode bits the
-/// ordinary way a permission check would. Not a full simulation (no ACLs, no
-/// parent directory traversal) -- good enough to catch the common case: a
-/// root caller's `writable`/`bind(ReadWrite)` target that a root-owned,
-/// non-world-writable directory (the usual case for anything a root-run
-/// container created) would otherwise fail on at run time, deep inside
-/// `exec`, with nothing but `EACCES` to go on.
+/// Whether uid/gid (no other groups) could write `path` by its owner/group/other mode bits.
+/// Not a full simulation (no ACLs, no parent traversal); catches a root caller's writable/bind
+/// target that a root-owned directory would fail on at run time with only `EACCES`.
 fn can_write(path: &Path, uid: u32, gid: u32) -> std::io::Result<bool> {
     let meta = std::fs::metadata(path)?;
     let mode = meta.mode();
@@ -44,21 +38,16 @@ pub(super) fn needed_cgroup_controllers(config: &SandboxConfig) -> Vec<&'static 
     needed
 }
 
-/// One mount-namespace setup step, with every path and option string
-/// already built -- see `MountPlan`.
+/// One mount-ns setup step with all paths/options prebuilt (see `MountPlan`).
 enum MountStep {
-    /// `mkdir`, EEXIST ignored. Issued per path component, in order with the
-    /// mounts, so a target nested inside an earlier mount is created inside
-    /// that mount, same as `create_dir_all` right before each mount was.
+    /// `mkdir`, EEXIST ignored. Issued per component in order with the mounts, so a target nested
+    /// in an earlier mount is created inside it.
     Mkdir(CString),
-    /// Create an empty file to bind a file onto, if there's nothing there.
+    /// Create an empty file to bind a file onto, if absent.
     Touch(CString),
-    /// `readonly` holds the source's locked flags (nosuid/nodev/noexec) to
-    /// repeat on the read-only remount: in a user namespace, a remount that
-    /// drops a locked flag fails with EPERM.
-    /// `tree` is the detached copy of `source` that `apply` takes before
-    /// mounting anything, so a source inside a path a tmpfs then covers
-    /// (anything under /tmp, with private_tmp) is still there to bind.
+    /// `readonly` holds the source's locked flags (nosuid/nodev/noexec) to repeat on the read-only
+    /// remount (dropping one fails with EPERM in a userns). `tree` is the detached copy of `source`
+    /// taken before any mounting, so sources under a later tmpfs (e.g. /tmp) are still bindable.
     Bind {
         source: CString,
         target: CString,
@@ -71,34 +60,25 @@ enum MountStep {
     },
 }
 
-/// open_tree(2): a detached copy of the mount at a path (non-recursive, like
-/// MS_BIND without MS_REC).
+/// open_tree(2): a detached, non-recursive copy of the mount at a path (like MS_BIND without MS_REC).
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 /// move_mount(2): the source is the fd itself.
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 
-/// Everything the child needs to set up its mount namespace, built before
-/// clone() so the child only issues raw syscalls -- the same
-/// no-allocation-after-clone() rule as envp_cstr/working_dir_cstr.
+/// Everything the child needs to set up its mount ns, built before clone() (no allocation after).
 ///
-/// With a rootfs, targets are created under it and the child pivots into it.
-/// Without one, mounts go straight over the host's own paths, inside the
-/// child's private mount namespace, so the host never sees them. Such a
-/// target must already exist (an unprivileged child can't create one in a
-/// host directory like `/`), which `check_mounts` enforces at build() time.
-/// Without a rootfs these used to be silently ignored.
+/// With a rootfs, targets are created under it and the child pivots into it. Without one, mounts
+/// go over the host's paths inside the child's private mount ns; targets must already exist
+/// (`check_mounts` enforces it at build()).
 pub(super) struct MountPlan {
     rootfs: Option<CString>,
     steps: Vec<MountStep>,
-    /// Where a fresh procfs goes, so `/proc` shows the sandbox's own pid
-    /// namespace instead of every host process. Confirmed for real:
-    /// `ps aux` listed host processes before.
+    /// Where a fresh procfs goes, so `/proc` shows the sandbox's own pid namespace.
     proc_target: CString,
 }
 
 impl MountPlan {
-    /// `restricted`: AppArmor denies mounting (see
-    /// `userns_restricted_by_apparmor`), so private_tmp isn't a tmpfs.
+    /// `restricted`: AppArmor denies mounting (see `userns_restricted_by_apparmor`), so private_tmp isn't a tmpfs.
     pub(super) fn new(config: &SandboxConfig, restricted: bool) -> Result<Self> {
         let rootfs = config.rootfs.as_deref();
         let tmpfs = Self::tmpfs_mounts(config, restricted);
@@ -108,13 +88,9 @@ impl MountPlan {
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
             .collect();
 
-        // A read-only mount inside a writable area makes the path itself
-        // unwritable, but not the directories above it: `mv dir dir.bak`
-        // moves it away, and a new `dir` (or a symlink) takes its place,
-        // writable. A mount point can't be renamed or removed, so each
-        // directory above it that the sandbox could move is mounted onto
-        // itself too: all of those inside any writable area, the area's own
-        // directory included, since that may sit in another writable one.
+        // A read-only mount in a writable area protects the path but not its parents: `mv dir dir.bak`
+        // then a new `dir` is writable. Mount points can't be renamed, so each movable parent directory
+        // (the area's own directory included) is mounted onto itself too.
         let mut pins: Vec<Mount> = Vec::new();
         if rootfs.is_none() {
             let areas: Vec<PathBuf> = super::landlock::writable_areas(config)
@@ -147,11 +123,8 @@ impl MountPlan {
             }
         }
 
-        // One combined order, shallowest target first: a mount has to be in
-        // place before anything mounts under it, whichever kind either one
-        // is. Grouping "all tmpfs, then all binds" instead used to shadow a
-        // tmpfs nested inside a bind's target, while fixing the opposite,
-        // bind-inside-a-tmpfs case -- confirmed for real.
+        // One order, shallowest target first: a mount must exist before anything mounts under it.
+        // Grouping tmpfs before binds shadowed a tmpfs nested in a bind target.
         enum Item<'a> {
             Tmpfs(&'a Path, u64),
             Bind(&'a Mount),
@@ -205,15 +178,10 @@ impl MountPlan {
         })
     }
 
-    /// The caller's tmpfs mounts, plus private_tmp's at /tmp where it can be
-    /// mounted, plus a private tmpfs over `/var/tmp` and `/dev/shm` where
-    /// one can -- both are in `landlock::DEFAULT_WRITABLE` unconditionally
-    /// (not tied to `private_tmp`), so without this they're the host's
-    /// real, shared, persistent paths: writable by every sandbox and the
-    /// host alike, with nothing scoping them to one run. Skipped, like a
-    /// caller's own `tmpfs_mounts`, where `restricted` rules out mounting
-    /// at all (same residual gap private_tmp already has there -- a
-    /// program reaching either path *by name* still reaches the host's).
+    /// Caller tmpfs mounts, private_tmp's at /tmp where mountable, and private tmpfs over
+    /// `/var/tmp` and `/dev/shm`: both are unconditionally in `landlock::DEFAULT_WRITABLE`, so
+    /// unscoped they'd be the host's shared paths. Skipped where `restricted` rules out mounting
+    /// (same residual gap as private_tmp).
     pub(super) fn tmpfs_mounts(config: &SandboxConfig, restricted: bool) -> Vec<(PathBuf, u64)> {
         let mut tmpfs = config.tmpfs_mounts.clone();
         if let Some(size) = config.private_tmp.filter(|_| !restricted) {
@@ -222,15 +190,9 @@ impl MountPlan {
         if !restricted {
             for path in ["/var/tmp", "/dev/shm"] {
                 let path = Path::new(path);
-                // An explicit read_only/writable/bind naming this exact
-                // path is the caller deliberately asking for the host's
-                // real one instead -- that choice wins over the default.
+                // An explicit read_only/writable/bind of this path means the caller wants the host's: that wins.
                 let explicitly_mounted = config.mounts.iter().any(|m| m.target == path);
-                // Mounting needs the target to exist; a tmpfs/bind caller
-                // asked for would be refused over this (see check_mounts),
-                // but this isn't something the caller chose -- a minimal
-                // system missing one of these shouldn't fail sandboxes
-                // that never mentioned it.
+                // Not caller-chosen, so a minimal system missing the target mustn't fail unrelated sandboxes.
                 if path.is_dir() && !explicitly_mounted && !tmpfs.iter().any(|(p, _)| p == path) {
                     tmpfs.push((path.to_path_buf(), crate::DEFAULT_PRIVATE_TMP_SIZE));
                 }
@@ -239,12 +201,9 @@ impl MountPlan {
         tmpfs
     }
 
-    /// Whether a read_only/writable/bind path needs an actual bind mount.
-    /// Without a rootfs, a host path at its own path is already there, and
-    /// Landlock decides whether it's writable (see landlock.rs), with no
-    /// mount at all. It still needs one if it's elsewhere (bind()), under a
-    /// tmpfs that would hide it, or read-only inside a writable area, where
-    /// Landlock can't take writing away again.
+    /// Whether a read_only/writable/bind path needs a real bind mount. Without a rootfs a host path
+    /// at its own path needs none (Landlock decides), unless it's elsewhere, under a hiding tmpfs,
+    /// or read-only inside a writable area (Landlock can't take writing away).
     fn needs_bind(config: &SandboxConfig, tmpfs: &[(PathBuf, u64)], m: &Mount) -> bool {
         if config.rootfs.is_some() {
             return true;
@@ -261,11 +220,9 @@ impl MountPlan {
                 .any(|area| area != m.target.as_path() && m.target.starts_with(area))
     }
 
-    /// The full path to mount at. Under a rootfs, also queues a mkdir for
-    /// each component of it. Without one, the target must already exist,
-    /// unless it's inside one of `tmpfs`: those start empty, so the part
-    /// below the tmpfs is created in it. `is_dir`: whether the last
-    /// component is a directory, or a file to bind a file onto.
+    /// The path to mount at. Under a rootfs also queues a mkdir per component; without one the
+    /// target must exist unless inside a `tmpfs` (empty; created in it). `is_dir`: last component
+    /// is a directory rather than a file to bind onto.
     fn target(
         steps: &mut Vec<MountStep>,
         rootfs: Option<&Path>,
@@ -300,14 +257,12 @@ impl MountPlan {
         path_cstring(&path)
     }
 
-    /// Whether there's anything to mount here (a rootfs, a bind, a tmpfs),
-    /// as opposed to just the `/proc` this plan always adds.
+    /// Whether there's anything to mount besides the `/proc` always added.
     pub(super) fn requested(&self) -> bool {
         self.rootfs.is_some() || !self.steps.is_empty()
     }
 
-    /// Runs in the child between clone() and exec(): raw syscalls only.
-    /// The error names the step that failed, as a static string.
+    /// Child, between clone() and exec(): raw syscalls only.
     pub(super) fn apply(&self) -> std::result::Result<(), &'static str> {
         let null = std::ptr::null();
         unsafe {
@@ -387,10 +342,8 @@ impl MountPlan {
                         if moved != 0 {
                             return Err("bind mount");
                         }
-                        // MS_RDONLY is ignored when a bind mount is created;
-                        // it only takes effect on a remount. Confirmed for
-                        // real: a ReadOnly mount without this was writable,
-                        // and the write landed on the host directory.
+                        // MS_RDONLY is ignored at bind creation, only taking effect on remount (a ReadOnly mount
+                        // without it was writable on the host).
                         if let Some(locked) = readonly {
                             let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | locked;
                             if libc::mount(null, target.as_ptr(), null, flags, null as _) != 0 {
@@ -411,10 +364,8 @@ impl MountPlan {
         Ok(())
     }
 
-    /// Mounts the fresh procfs. Best effort: a failure here is logged by the
-    /// child but doesn't stop the run. Must happen before `enter_rootfs`: the
-    /// kernel only allows a new proc mount while a fully visible one is still
-    /// in the mount namespace, and pivoting drops the host's.
+    /// Mounts a fresh procfs; best effort. Must precede `enter_rootfs`: the kernel needs a fully
+    /// visible proc in the mount ns, and pivoting drops the host's.
     pub(super) fn mount_proc(&self) -> bool {
         let target = self.proc_target.as_ptr();
         unsafe {
@@ -434,12 +385,8 @@ impl MountPlan {
         };
         let rootfs = rootfs.as_ptr();
         unsafe {
-            // pivot_root(".", ".") then detaching "." stacks the old root on
-            // the new one and drops it, with no put_old directory. Every
-            // sandbox used to share one `<rootfs>/old_root`, so concurrent
-            // runs on the same rootfs raced creating, pivoting into, and
-            // removing it -- confirmed for real as "Mount setup failed" under
-            // 20 concurrent runs. Same approach as runc.
+            // pivot_root(".", ".") then detaching stacks and drops the old root with no put_old dir; a
+            // shared `<rootfs>/old_root` raced under concurrent runs. Same approach as runc.
             if libc::chdir(rootfs) != 0 {
                 return Err("chdir into rootfs");
             }
@@ -457,14 +404,9 @@ impl MountPlan {
     }
 }
 
-/// A root caller's sandbox runs as nobody, or the host ids it chose (see
-/// namespace::runs_as_root), so a writable grant only works if that user can
-/// actually write there -- typically not true for nobody on a directory a
-/// root-run container created (root-owned, not world-writable). Catch it at
-/// build() time, instead of an EACCES from deep inside the sandboxed
-/// program. The source's permissions are what count, even when the target
-/// sits inside a tmpfs or a rootfs: the bind brings the host's own directory
-/// along.
+/// A root caller's sandbox runs as nobody or the chosen ids (see namespace::runs_as_root), so a
+/// writable grant needs that user to be able to write there. Catch it at build(), not as EACCES
+/// in the program. The source's permissions count: the bind brings the host directory along.
 fn check_writable_by_sandbox(config: &SandboxConfig) -> Result<()> {
     if !super::namespace::runs_as_root() {
         return Ok(());
@@ -495,8 +437,7 @@ fn check_writable_by_sandbox(config: &SandboxConfig) -> Result<()> {
     Ok(())
 }
 
-/// Refuses, at build() time, mount setups that can only fail or silently do
-/// something other than asked once the sandbox runs.
+/// Refuses mount setups that can only fail or misbehave at run time.
 pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
     let restricted = super::userns_restricted_by_apparmor();
     let plan = MountPlan::new(config, restricted)?;

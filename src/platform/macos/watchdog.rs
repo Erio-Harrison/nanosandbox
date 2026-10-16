@@ -1,44 +1,27 @@
-//! Kills a run's process group if the host process dies before the run
-//! finishes. macOS has nothing like Linux's `PR_SET_PDEATHSIG`; this is the
-//! substitute.
+//! Kills a run's process group if the host dies first (macOS has no `PR_SET_PDEATHSIG`).
 //!
-//! A pipe's write end, held open only by this process (`O_CLOEXEC`, so
-//! nothing we spawn gets a copy). The kernel closes it, with every other fd
-//! this process holds, the moment this process exits for any reason --
-//! crash or `SIGKILL` included. A plain `/bin/sh`, given the read end as its
-//! stdin, blocks reading a line from it; losing the write end unblocks that
-//! with EOF, and it kills the run's process group and exits. `Drop` closes
-//! the write end on an ordinary run end too (indistinguishable from the host
-//! dying), so the same kill fires then -- harmless, since the group is
-//! already gone.
-//!
-//! The shell is reached by fork then immediate exec, no code of ours in
-//! between: a child running our code first, instead of exec'ing right away,
-//! could hang on a lock another thread held at the moment of the fork (see
-//! `envp_cstr` in `platform/linux/mod.rs`). That's also why this doesn't use
-//! `run_marker`'s `sandbox_check`-based search: that needs calls between
-//! fork and exec that aren't known to be safe there.
+//! The host holds a `O_CLOEXEC` pipe's write end; a `/bin/sh` reading the other end gets EOF
+//! when the host exits for any reason (including SIGKILL) or `Drop` closes it, then kills the group.
+//! The shell is spawned fork+exec with no code in between: running our code after fork could
+//! hang on a lock another thread held (see `envp_cstr` in `platform/linux/mod.rs`), which is
+//! also why this doesn't use `run_marker`.
 
 use crate::error::{Result, SandboxError};
 use std::os::unix::io::OwnedFd;
 use std::process::{Child, Command, Stdio};
 
-/// Guards one run. Dropping it (on every path out of `execute()`, success or
-/// error) closes its pipe and waits for the shell to act on that and exit,
-/// so it's never left as a zombie.
+/// Guards one run; dropping it closes the pipe and reaps the shell.
 pub(super) struct Watchdog {
     write_end: Option<OwnedFd>,
     shell: Child,
 }
 
 impl Watchdog {
-    /// `pgid`: the run's process group -- its first process is its own
-    /// leader (`setpgid(0, 0)` in `pre_exec`), so this is that process's pid.
+    /// `pgid`: the run's process group, i.e. its first process's pid (`setpgid(0, 0)` in `pre_exec`).
     pub(super) fn spawn(pgid: i32) -> Result<Self> {
         let (read_end, write_end) = super::cloexec_pipe("watchdog")?;
 
-        // `read` returns on EOF too, so either way the script moves on to
-        // the kill -- a no-op if the group's already gone.
+        // `read` returns on EOF too; the kill is a no-op if the group is already gone.
         let script = format!("read -r _; kill -KILL -- -{pgid} 2>/dev/null; exit 0");
         let shell = {
             // Held for the fork; see super::FORK_LOCK.
@@ -64,9 +47,7 @@ impl Watchdog {
 
 impl Drop for Watchdog {
     fn drop(&mut self) {
-        // Closing this is what the shell is waiting on; it wakes and exits
-        // right away, so the wait() below is a short, bounded block, not an
-        // open-ended one, and leaves no zombie.
+        // Wakes the shell, so the wait() below is short and leaves no zombie.
         self.write_end.take();
         let _ = self.shell.wait();
     }
@@ -77,16 +58,12 @@ mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
 
-    /// Whether a process is still there. Only ever called on pids this test
-    /// itself spawned, never on a shared or guessed one.
+    /// Only called on pids this test spawned.
     fn alive(pid: i32) -> bool {
         unsafe { libc::kill(pid, 0) == 0 }
     }
 
-    /// A child that is its own process group leader, the way `execute()`'s
-    /// `pre_exec` makes the sandboxed process -- so its pid doubles as its
-    /// pgid, and killing `-pid` reaches only it (and anything it forks),
-    /// never the test process's own group.
+    /// A child that is its own group leader, so killing `-pid` reaches only it.
     fn own_group(script: &str) -> Child {
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg(script).stdout(Stdio::piped());
@@ -101,10 +78,7 @@ mod tests {
         command.spawn().unwrap()
     }
 
-    /// Dropping the Watchdog kills only the pgid it was given, never
-    /// anything else, including a reused pid: a process in an unrelated
-    /// group, spawned after the Watchdog's target has already exited and
-    /// been reaped, survives the drop.
+    /// Dropping kills only the given pgid, not an unrelated group (e.g. a reused pid).
     #[test]
     fn test_drop_touches_only_its_own_pgid() {
         let mut dead_target = own_group("true");
@@ -123,24 +97,20 @@ mod tests {
         let _ = unrelated.wait();
     }
 
-    /// The host process dying is simulated here by dropping the write end
-    /// directly, which is exactly what losing the host does to the shell's
-    /// end of the pipe: it can't tell the two apart.
+    /// Dropping the write end simulates host death; the shell can't tell them apart.
     #[test]
     fn test_losing_the_write_end_kills_the_group() {
         let mut group = own_group("echo ready; sleep 30");
         let pgid = group.id() as i32;
 
         let mut watchdog = Watchdog::spawn(pgid).unwrap();
-        // Wait for the group's process to be running before pulling the
-        // rug out from under it.
+        // Wait until the group's process is running.
         use std::io::Read;
         let mut line = [0u8; 6]; // "ready\n"
         group.stdout.take().unwrap().read_exact(&mut line).unwrap();
 
         watchdog.write_end.take();
-        // try_wait() reaps it as soon as it's dead; kill(pid, 0) can't tell
-        // a zombie from one still running, so it wouldn't do here.
+        // try_wait() reaps; kill(pid, 0) can't tell a zombie from a live process.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut dead = false;
         while std::time::Instant::now() < deadline {
@@ -155,29 +125,12 @@ mod tests {
         assert!(dead, "the group outlived the watchdog's pipe closing");
     }
 
-    /// cloexec_pipe()'s pipe()+fcntl() gap, raced tightly against another
-    /// fork from a different thread that takes FORK_LOCK for reading the
-    /// same way the two production spawn sites do: without that read lock
-    /// in the way, a fork landing in the gap gets a non-cloexec copy of the
-    /// pipe, leaking it into the other process and silently defeating that
-    /// run's watchdog (confirmed separately: about 1 in 5 tries, tight
-    /// loop). Each "other" child reports, via its own stdout, any pipe fd
-    /// in its own `/dev/fd` outside the standard three -- never acting on
-    /// what it finds beyond that.
-    ///
-    /// The racer needs a `pre_exec`: without one, `Command::spawn()` can
-    /// take a `posix_spawn` fast path on macOS that this race doesn't reach.
-    /// `execute()`'s own sandboxed-command spawn always has one (`setpgid`),
-    /// so this matches the real risk, not a weaker one. And the pipe side
-    /// has to keep going for as long as the racer does, not run its own
-    /// fixed count: it's so much cheaper per iteration (no fork at all)
-    /// that a fixed count finished before the racer was even a few forks in,
-    /// leaving almost nothing to actually overlap with.
-    /// Lists which fds (other than 0/1/2) are open pipes in a freshly spawned
-    /// `/bin/sh`, as a baseline: some CI runners hold an ambient pipe fd open
-    /// in every child regardless of anything this crate does (observed on
-    /// GitHub Actions' macOS runner), and that must not be mistaken for a
-    /// leak of the watchdog's own pipe.
+    // Races cloexec_pipe()'s pipe()+fcntl() gap against another thread's fork under FORK_LOCK
+    // (read side, as the production spawn sites take it); without the lock a fork in the gap leaks
+    // the pipe into another run (seen ~1 in 5). The racer needs a `pre_exec`, else spawn() may take
+    // a posix_spawn fast path the race doesn't reach. The pipe side loops as long as the racer.
+    /// Pipe fds (other than 0/1/2) open in a fresh `/bin/sh`: some CI runners (GitHub Actions
+    /// macOS) leak an ambient one, which isn't a watchdog leak.
     fn open_pipe_fds() -> std::collections::HashSet<String> {
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg(
@@ -186,9 +139,6 @@ mod tests {
                [ -p \"$f\" ] && basename \"$f\"; \
              done",
         );
-        // Without a pre_exec, Command::spawn() can take a posix_spawn fast
-        // path on macOS that the fork race below doesn't reach -- see the
-        // comment on test_fork_lock_closes_the_pipe_leak.
         unsafe {
             command.pre_exec(|| Ok(()));
         }

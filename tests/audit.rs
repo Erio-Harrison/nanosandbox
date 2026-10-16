@@ -12,7 +12,6 @@ use std::sync::{Arc, Mutex};
 struct Recorder {
     starts: Mutex<Vec<AuditStart>>,
     ends: Mutex<Vec<AuditEnd>>,
-    /// The order things happened in.
     order: Mutex<Vec<&'static str>>,
 }
 
@@ -28,7 +27,6 @@ impl AuditSink for Recorder {
     }
 }
 
-/// Refuses every run.
 struct Refuses;
 
 impl AuditSink for Refuses {
@@ -126,7 +124,6 @@ fn each_run_of_a_sandbox_has_its_own_number() {
 fn a_run_whose_start_cannot_be_recorded_does_not_run() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
-    // A root caller's sandbox runs as nobody, which has to be able to write it.
     std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
     let proof = dir.join("ran");
     for sink in [
@@ -160,8 +157,7 @@ fn a_sink_that_panics_at_the_end_does_not_lose_the_result() {
     assert_eq!(out.stdout, "still here\n");
 }
 
-/// Nothing from the run, no value from the configuration, and no secret on
-/// the command line is in it.
+/// No run output, config value, or command-line secret is in it.
 #[test]
 #[cfg(unix)]
 fn an_event_holds_no_input_output_environment_value_or_secret_argument() {

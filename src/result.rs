@@ -1,6 +1,4 @@
-//! Execution result types
-//!
-//! This module defines the result types returned from sandbox execution.
+//! Execution result types.
 
 use std::time::Duration;
 
@@ -27,17 +25,10 @@ pub struct ExecutionResult {
     /// Whether the process was killed due to out-of-memory
     pub killed_by_oom: bool,
 
-    /// Whether the process was killed for writing more than `tmpfs("/tmp",
-    /// size)` allows. Only where that is emulated with a private directory
-    /// (macOS, and Linux under AppArmor's userns restriction); a real tmpfs
-    /// fails the write with ENOSPC instead.
+    /// Killed for exceeding `tmpfs("/tmp", size)`. Only where emulated with a private directory (macOS, Linux under AppArmor's userns restriction); a real tmpfs fails with ENOSPC.
     pub killed_by_tmp_limit: bool,
 
-    /// Whether the process was killed for using more than `cpu_time_limit`
-    /// in total, across every process of the run, not just one of them.
-    /// Linux (a cgroup's `cpu.stat`) and Windows (the run's Job Object). On
-    /// Linux and macOS `cpu_time_limit` is also applied per process via
-    /// `RLIMIT_CPU`, which this is on top of.
+    /// Killed for exceeding `cpu_time_limit` summed across all processes (Linux cgroup, Windows Job Object), on top of per-process `RLIMIT_CPU` on Linux/macOS.
     pub killed_by_cpu_limit: bool,
 
     /// Signal that killed the process, if any
@@ -49,20 +40,13 @@ pub struct ExecutionResult {
     /// CPU time consumed (if available)
     pub cpu_time: Option<Duration>,
 
-    /// Whether stdout or stderr went past `max_output`, and the rest of it
-    /// was dropped.
+    /// stdout or stderr exceeded `max_output`; the rest was dropped.
     pub output_truncated: bool,
 
-    /// Whether the sandbox got its own private `/proc`, not the host's.
-    /// Linux only: false when AppArmor's `unprivileged_userns` restriction
-    /// applied (see `docs/platform-linux.md`), which also skips the
-    /// private hostname. Always true elsewhere -- macOS and Windows have
-    /// no PID namespace to begin with.
+    /// Whether the sandbox got its own `/proc`. False only on Linux under AppArmor's `unprivileged_userns` restriction (see `docs/platform-linux.md`), which also skips the private hostname.
     pub proc_isolated: bool,
 
-    /// Hosts the `allow_network` proxy refused during the run, sorted: not
-    /// on the allowlist, or resolving only to non-public addresses. Lets the
-    /// caller see what a program tried to reach, and decide what to allow.
+    /// Hosts the `allow_network` proxy refused, sorted: not allowlisted, or resolving only to non-public addresses.
     pub blocked_hosts: Vec<String>,
 }
 

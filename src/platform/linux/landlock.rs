@@ -1,21 +1,13 @@
-//! Landlock rules that keep a sandbox without a rootfs from writing to the
-//! host's files, and from reading credentials (see platform/read_rules.rs).
+//! Landlock rules that stop a rootfs-less sandbox writing host files or reading credentials
+//! (see platform/read_rules.rs).
 //!
-//! Without a rootfs the sandbox sees the host's file system, and used to be
-//! able to write anything the calling user can: `~/.bashrc`, `~/.ssh`, the
-//! code next to it. Landlock is the kernel's unprivileged access control:
-//! it needs no mounts and no capabilities, so it also works where AppArmor
-//! denies those in user namespaces (Ubuntu's default).
+//! Landlock needs no mounts or capabilities, so it works where AppArmor denies those in user
+//! namespaces (Ubuntu default). Reads are allowed except read_rules paths; directory listing
+//! everywhere (rules cover whole subtrees). Writes only under:
 //!
-//! Reading file contents is allowed everywhere but the paths read_rules
-//! denies; listing directories, everywhere (Landlock rules cover a whole
-//! subtree, so there's no allowing `ls ~` without allowing all of `~`).
-//! Writing (creating, removing, renaming, truncating, opening for writing)
-//! is allowed only under:
-//!
-//! - `ReadWrite` mounts and `tmpfs` mounts,
-//! - `/tmp`, `/var/tmp` and `/dev/shm`, which programs expect to write to,
-//! - `/dev`, for writing to existing devices like `/dev/null` only.
+//! - `ReadWrite` and `tmpfs` mounts,
+//! - `/tmp`, `/var/tmp`, `/dev/shm`,
+//! - `/dev`, existing devices only.
 
 use crate::builder::{Permission, SandboxConfig};
 use crate::error::{Result, SandboxError};
@@ -39,24 +31,20 @@ const ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
 const ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
 const ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
 const ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
-/// ABI 2: renaming or linking a file into another directory. Unless handled,
-/// Landlock always denies that.
+/// ABI 2: rename/link across directories; always denied unless handled.
 const ACCESS_FS_REFER: u64 = 1 << 13;
-/// ABI 3: truncate(2) and friends. Before that, only opening for writing
-/// could be denied.
+/// ABI 3: truncate(2); before that only open-for-write could be denied.
 const ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 
-/// The rights that apply to a file, as opposed to a directory. A rule on a
-/// file may only grant these.
+/// Rights that apply to a file rather than a directory; a file rule may grant only these.
 const FILE_RIGHTS: u64 =
     ACCESS_FS_EXECUTE | ACCESS_FS_WRITE_FILE | ACCESS_FS_READ_FILE | ACCESS_FS_TRUNCATE;
 
 /// Writable for programs whatever the config says, as on macOS.
 const DEFAULT_WRITABLE: [&str; 3] = ["/tmp", "/var/tmp", "/dev/shm"];
 
-/// Where the sandbox may create, change and remove files: the default
-/// places, `writable` paths and tmpfs mounts. (Plus existing files under
-/// `/dev`, and private_tmp's directory where it isn't a tmpfs.)
+/// Where writes are allowed: default places, `writable` paths, tmpfs mounts (plus existing
+/// `/dev` files, and private_tmp's directory where it isn't a tmpfs).
 pub(crate) fn writable_areas(config: &SandboxConfig) -> impl Iterator<Item = &Path> {
     DEFAULT_WRITABLE
         .iter()
@@ -111,8 +99,7 @@ pub(crate) fn check(config: &SandboxConfig) -> Result<()> {
     Ok(())
 }
 
-/// The rules, with every path already built. Built in the parent; the child
-/// only applies them.
+/// The rules, paths prebuilt in the parent; the child only applies them.
 pub(crate) struct WriteRules {
     handled: u64,
     /// (where, rights to grant beneath it)
@@ -123,19 +110,14 @@ pub(crate) struct WriteRules {
 enum Target {
     /// Opened by the child, by path.
     Path(CString),
-    /// Opened here, in the parent, and checked to be where the sandbox was
-    /// built to put it. The rule goes on what this holds, so nothing done to
-    /// the path after it was checked can move it. Whether it is a directory
-    /// is found here too: the child can't ask, since `fstat` on a descriptor
-    /// it inherited can be refused there (AppArmor re-checks it).
+    /// Opened in the parent and checked to be where the sandbox was built to put it; the rule
+    /// goes on this descriptor, so path swaps can't move it. Directory-ness is found here too:
+    /// `fstat` on an inherited fd can be refused in the child (AppArmor).
     Fd(std::os::fd::OwnedFd, bool),
 }
 
-/// Opens `given`, and refuses it unless it is the place `real` that it led
-/// to when the sandbox was built. A writable directory, or one above it,
-/// that a command swapped for a symlink would otherwise be followed, and the
-/// place it led to granted as the writable one. Checking the descriptor,
-/// not the path, leaves no gap between the check and the rule.
+/// Opens `given`, refusing it unless it is `real`. A writable dir swapped for a symlink
+/// would otherwise be followed; checking the descriptor leaves no check-to-rule gap.
 fn open_checked(given: &Path, real: &Path) -> Result<(std::os::fd::OwnedFd, bool)> {
     use std::os::fd::{AsRawFd, FromRawFd};
     let c = CString::new(given.as_os_str().as_bytes()).map_err(|e| SandboxError::Config {
@@ -183,10 +165,8 @@ fn open_checked(given: &Path, real: &Path) -> Result<(std::os::fd::OwnedFd, bool
 }
 
 impl WriteRules {
-    /// `None` with a rootfs: the sandbox then only sees the rootfs, which is
-    /// the caller's own directory to write to. `check` already refused a
-    /// kernel without Landlock.
-    /// `private_tmp`: this run's stand-in for tmpfs("/tmp"), if it has one.
+    /// `None` with a rootfs (it's the caller's own directory); `check` already refused kernels
+    /// without Landlock. `private_tmp` is this run's stand-in for tmpfs("/tmp").
     pub(crate) fn new(config: &SandboxConfig, private_tmp: Option<&Path>) -> Result<Option<Self>> {
         if config.rootfs.is_some() {
             return Ok(None);
@@ -209,8 +189,7 @@ impl WriteRules {
             handled |= ACCESS_FS_TRUNCATE;
         }
 
-        // Reading is only handled when something is denied: then everything
-        // else has to be allowed explicitly.
+        // Reading is handled only when something is denied; then the rest must be allowed explicitly.
         let denied = read_rules::denied(config);
         let read = if denied.is_empty() {
             0
@@ -226,10 +205,8 @@ impl WriteRules {
             })
         };
         let mut paths = vec![(Target::Path(c"/dev".to_owned()), handled & FILE_RIGHTS)];
-        // A directory the caller named is held by descriptor, checked here.
-        // Not the system's own (/tmp, /var/tmp, /dev/shm) or a tmpfs: the
-        // child may mount a fresh one over them, and the rule has to go on
-        // what it sees there, which is only known once it has.
+        // Caller-named dirs are held by descriptor. Not /tmp, /var/tmp, /dev/shm or tmpfs: the
+        // child may mount a fresh one over them, so the rule goes on what it sees there.
         let named = |area: &Path| {
             config.mounts.iter().any(|m| {
                 m.permission == Permission::ReadWrite && m.source == m.target && m.target == area
@@ -257,8 +234,7 @@ impl WriteRules {
         Ok(Some(Self { handled, paths }))
     }
 
-    /// Runs in the child between clone() and exec(): raw syscalls only. The
-    /// error names the step that failed, as a static string.
+    /// Child, between clone() and exec(): raw syscalls only.
     pub(crate) fn apply(&self) -> std::result::Result<(), &'static str> {
         let attr = RulesetAttr {
             handled_access_fs: self.handled,
@@ -281,8 +257,7 @@ impl WriteRules {
                     Target::Path(path) => {
                         let fd = libc::open(path.as_ptr(), libc::O_PATH | libc::O_CLOEXEC);
                         if fd < 0 {
-                            // /var/tmp or /dev/shm may not exist on this system, and
-                            // what this process can't reach it can't use anyway.
+                            // /var/tmp or /dev/shm may not exist; what we can't reach we can't use.
                             if matches!(*libc::__errno_location(), libc::ENOENT | libc::EACCES) {
                                 continue;
                             }

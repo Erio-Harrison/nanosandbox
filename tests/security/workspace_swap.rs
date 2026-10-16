@@ -1,10 +1,6 @@
-//! A command can't redirect the sandbox's writable directory by swapping the
-//! directory, or one above it, for a symlink to somewhere it may not write.
-//!
-//! Each test makes a victim directory the sandbox is never given, lets a
-//! command try the swap, and checks the victim afterwards: the swap itself
-//! may be refused (macOS, where the roots can't be removed), or may go
-//! through (Linux, where the parent is writable) and the next run refuse.
+//! A command can't redirect the sandbox's writable directory by swapping it, or a parent, for a symlink.
+//! Each test checks a victim directory afterwards: the swap may be refused (macOS), or go through
+//! (Linux, writable parent) with the next run refusing.
 
 use nanosandbox::Sandbox;
 use std::path::{Path, PathBuf};
@@ -74,7 +70,6 @@ fn a_command_cannot_swap_its_workspace_for_a_symlink() {
         return;
     }
     let sb = sandbox(Sandbox::builder().working_dir(&l.ws).writable(&l.ws));
-    // Pinning the paths must leave the workspace writable.
     let out = sb
         .run(
             "sh",
@@ -101,8 +96,7 @@ fn a_command_cannot_swap_its_workspace_for_a_symlink() {
     );
 }
 
-/// A workspace inside a directory the sandbox can write, which lets it move
-/// the workspace aside.
+/// A workspace inside a writable directory, which lets the sandbox move it aside.
 #[test]
 #[cfg(unix)]
 fn a_command_cannot_swap_a_workspace_that_sits_in_a_writable_parent() {
@@ -141,7 +135,6 @@ fn a_command_cannot_swap_a_directory_above_its_workspace() {
     for d in [&a, &a.join("b"), &deep] {
         crate::common::chmod_open(d);
     }
-    // The same shape, in the victim, for the swap to land in.
     std::fs::create_dir_all(l.victim.join("b/ws")).unwrap();
     crate::common::chmod_open(&l.victim.join("b"));
     crate::common::chmod_open(&l.victim.join("b/ws"));
@@ -163,8 +156,7 @@ fn a_command_cannot_swap_a_directory_above_its_workspace() {
     );
 }
 
-/// Replaced by someone else, between runs: refused, clearly, and put back
-/// to a real directory it runs again.
+/// Replaced by someone else between runs: refused clearly, and runs again once a real directory is back.
 #[test]
 #[cfg(unix)]
 fn a_workspace_replaced_between_runs_is_refused_and_a_real_one_is_not() {

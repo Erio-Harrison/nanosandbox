@@ -1,17 +1,7 @@
-//! macOS platform implementation
-//!
-//! Uses macOS sandbox-exec (Seatbelt) for sandboxing.
-//!
-//! ## Implementation
-//!
-//! - **Process isolation**: sandbox-exec with SBPL profiles
-//! - **Filesystem**: Sandbox profile file system restrictions
-//! - **Network**: Sandbox profile network restrictions + HTTP proxy for whitelisting
-//! - **Resource limits**: `memory_limit` by polling `rusage` over every
-//!   process of the run (see run_marker.rs); the rest (`max_open_files`,
-//!   `max_file_size`, `cpu_time_limit`) via `setrlimit`. Not `RLIMIT_AS`
-//!   (the kernel rejects it) or `RLIMIT_NPROC` (it counts the whole user,
-//!   not just the sandbox).
+//! macOS backend: sandbox-exec (Seatbelt) with SBPL profiles, plus an HTTP proxy for the
+//! network allowlist. `memory_limit` is enforced by polling rusage over the whole run
+//! (run_marker.rs); other limits use `setrlimit`. No `RLIMIT_AS` (kernel rejects it) or
+//! `RLIMIT_NPROC` (counts the whole user).
 
 use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
@@ -33,17 +23,11 @@ mod wait;
 mod watchdog;
 use watchdog::Watchdog;
 
-/// Guards this crate's own forks against `cloexec_pipe()` below: no atomic
-/// `pipe2(O_CLOEXEC)` on macOS, so a fork landing between `pipe()` and the
-/// `fcntl` that sets close-on-exec inherits a plain copy, leaking it into
-/// an unrelated process. Confirmed for real: leaked ~1 in 5 tries without
-/// this lock. `cloexec_pipe` holds it for writing; every fork here holds
-/// it for reading.
+/// Orders forks against `cloexec_pipe()`: macOS has no `pipe2(O_CLOEXEC)`, so a fork between
+/// `pipe()` and `fcntl` leaks the fds. `cloexec_pipe` writes; every fork here reads.
 static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
-/// A pipe whose fds are `O_CLOEXEC`; see FORK_LOCK. Shared by every pipe
-/// this crate creates for itself, so there's one lock-holding gap to get
-/// right instead of one per call site.
+/// A pipe with `O_CLOEXEC` fds, under FORK_LOCK.
 fn cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd)> {
     let _fork = FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
     let mut fds = [0 as libc::c_int; 2];
@@ -69,18 +53,15 @@ fn cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
-// std's spawn error carries only errno, so the child reports which setrlimit
-// failed through a side pipe as [limit, errno].
+// The child reports which setrlimit failed over a side pipe as [limit, errno].
 const LIMIT_OPEN_FILES: u8 = 1;
 const LIMIT_FILE_SIZE: u8 = 2;
 const LIMIT_CPU_TIME: u8 = 3;
 
-/// Check if sandbox-exec is available
 pub fn is_supported() -> bool {
     std::path::Path::new("/usr/bin/sandbox-exec").exists()
 }
 
-/// macOS sandbox executor using sandbox-exec
 pub struct MacOSExecutor {
     _private: (),
 }
@@ -90,20 +71,15 @@ impl MacOSExecutor {
         Self { _private: () }
     }
 
-    /// Apply resource limits using setrlimit.
-    /// Runs in the child between fork and exec, so it must not allocate.
-    /// `memory_limit` is not applied here: the macOS kernel rejects RLIMIT_AS,
-    /// so `wait_with_timeout` enforces it by polling instead.
+    /// Apply setrlimit limits in the child after fork: must not allocate. `memory_limit` is
+    /// polled in `wait_with_timeout` instead (kernel rejects RLIMIT_AS).
     fn apply_resource_limits(
         max_open_files: Option<u32>,
         max_file_size: Option<u64>,
         cpu_time_limit: Option<Duration>,
         report_fd: libc::c_int,
     ) -> std::io::Result<()> {
-        // NOTE: RLIMIT_NPROC is NOT used on macOS because it limits processes
-        // for the ENTIRE USER, not just the sandbox. This is not useful for
-        // sandboxing and can interfere with other processes.
-        // On Linux, we use cgroups pids controller instead.
+        // No RLIMIT_NPROC: it counts the whole user, not the sandbox.
         if let Some(max_files) = max_open_files {
             Self::set_rlimit(libc::RLIMIT_NOFILE, max_files as u64)
                 .map_err(|e| Self::report_limit_failure(report_fd, LIMIT_OPEN_FILES, e))?;
@@ -134,11 +110,8 @@ impl MacOSExecutor {
         cloexec_pipe("limit report")
     }
 
-    /// Turn a child's report into a message naming the rejected setting,
-    /// and the specific `io::Error` the rejected `setrlimit` call failed
-    /// with (reconstructed from the errno the child sent, not the same
-    /// object as the `Command::spawn()` failure the caller already has --
-    /// but the one that actually explains it).
+    /// Turn a child's report into a message naming the rejected setting, plus the `io::Error`
+    /// rebuilt from the child's errno.
     fn limit_failure(report: OwnedFd, config: &SandboxConfig) -> Option<(String, std::io::Error)> {
         let mut buf = [0u8; 5];
         let n = unsafe {
@@ -188,9 +161,7 @@ impl MacOSExecutor {
     }
 }
 
-/// Whether `cmd` resolves to something executable, the way `execvp` would
-/// search `path_value` (":"-separated): `cmd` itself if it contains '/',
-/// else each directory of `path_value` joined with it.
+/// Whether `cmd` resolves like `execvp` over `path_value`: used as-is if it contains '/'.
 fn executable_in_path(cmd: &str, path_value: &str) -> bool {
     let access_x_ok = |p: &Path| {
         std::ffi::CString::new(p.as_os_str().as_bytes())
@@ -222,8 +193,7 @@ impl PlatformExecutor for MacOSExecutor {
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 
-        // A NUL byte can't be passed to the program: say so the way Linux
-        // does, instead of as a generic spawn failure.
+        // A NUL byte is reported as on Linux, not as a generic spawn failure.
         for s in std::iter::once(cmd).chain(args.iter().copied()).chain(
             config
                 .env
@@ -233,13 +203,8 @@ impl PlatformExecutor for MacOSExecutor {
             std::ffi::CString::new(s)?;
         }
 
-        // Command::spawn() below always succeeds (it spawns sandbox-exec,
-        // which exists); without this, a missing `cmd` only ever surfaced
-        // as sandbox-exec's own exit 71 and stderr wording, which is
-        // Apple's text, not this crate's, and not something to depend on
-        // staying the same. Checked directly against the host's $PATH
-        // instead, which macOS (no rootfs remapping, unlike Linux) also
-        // sees. Matches execvp: a `cmd` containing '/' is used as-is.
+        // spawn() always succeeds (it runs sandbox-exec), and sandbox-exec's exit 71 text is
+        // Apple's, so check `cmd` against the host $PATH like execvp (a '/' is used as-is).
         let path_value = config
             .env
             .get("PATH")
@@ -249,8 +214,7 @@ impl PlatformExecutor for MacOSExecutor {
             return Err(SandboxError::CommandNotFound(cmd.to_string()));
         }
 
-        // private_tmp: a directory for this run, removed when this returns.
-        // See platform/private_tmp.rs.
+        // Private dir for this run, removed on return.
         let mut private_tmp = config
             .private_tmp
             .map(PrivateTmp::create)
@@ -265,9 +229,7 @@ impl PlatformExecutor for MacOSExecutor {
             source: Box::new(e),
         })?;
 
-        // allow_network: a proxy listener for this run alone, on a fresh
-        // loopback port the profile lets only this run reach. It closes when
-        // the run ends; nothing listens between runs.
+        // allow_network: per-run proxy on a fresh loopback port only this run's profile reaches.
         let proxy_run = match proxy {
             Some(proxy) => {
                 let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
@@ -278,7 +240,6 @@ impl PlatformExecutor for MacOSExecutor {
         };
         let proxy_port = proxy_run.as_ref().map(|(port, _)| *port);
 
-        // Generate sandbox profile
         let profile = self.generate_profile(
             config,
             proxy_port,
@@ -289,12 +250,10 @@ impl PlatformExecutor for MacOSExecutor {
         let (report_rd, report_wr) = Self::report_pipe()?;
         let report_fd = report_wr.as_raw_fd();
 
-        // Clone config values for the closure
         let max_open_files = config.max_open_files;
         let max_file_size = config.max_file_size;
         let cpu_time_limit = config.cpu_time_limit;
 
-        // Build command: sandbox-exec -p <profile> -Dkey=value... -- <cmd> <args>
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.arg("-p").arg(&profile.policy);
         for (key, value) in &profile.params {
@@ -304,17 +263,14 @@ impl PlatformExecutor for MacOSExecutor {
         command.arg(cmd);
         command.args(args);
 
-        // Set working directory
         command.current_dir(&config.working_dir);
 
-        // Clear and set environment
         if config.clear_env {
             command.env_clear();
         }
         for (key, value) in &config.env {
             command.env(key, value);
         }
-        // Set default PATH if not provided
         if !config.env.contains_key("PATH") {
             command.env("PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
         }
@@ -323,9 +279,7 @@ impl PlatformExecutor for MacOSExecutor {
         {
             command.env("TMPDIR", tmp.path());
         }
-        // A HOME, in the private directory, unless there's one already (the
-        // caller's, or this process's with clear_env(false)): npm and pip look
-        // the user up otherwise and find a real home the sandbox can't write.
+        // HOME in the private dir unless set; npm/pip otherwise look up a real home.
         if let Some(tmp) = &private_tmp
             && config.clear_env
             && !config.env.contains_key("HOME")
@@ -333,7 +287,6 @@ impl PlatformExecutor for MacOSExecutor {
             command.env("HOME", tmp.path());
         }
 
-        // Set proxy environment variables if proxied network
         if let Some(port) = proxy_port {
             command.envs(ProxiedNetwork::env_vars_for(
                 port,
@@ -341,7 +294,6 @@ impl PlatformExecutor for MacOSExecutor {
             ));
         }
 
-        // Setup stdin/stdout/stderr
         command.stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -350,12 +302,8 @@ impl PlatformExecutor for MacOSExecutor {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
 
-        // CRITICAL: Set up process group and resource limits before exec
-        // This runs in the child process after fork but before exec
         unsafe {
             command.pre_exec(move || {
-                // Create a new process group with this process as leader
-                // This allows us to kill all children with killpg
                 libc::setpgid(0, 0);
 
                 MacOSExecutor::apply_resource_limits(
@@ -367,7 +315,7 @@ impl PlatformExecutor for MacOSExecutor {
             });
         }
 
-        // Held for the fork; see FORK_LOCK on why.
+        // Held for the fork (see FORK_LOCK).
         let spawned = {
             let _fork = FORK_LOCK.read().unwrap_or_else(|e| e.into_inner());
             command.spawn()
@@ -391,23 +339,15 @@ impl PlatformExecutor for MacOSExecutor {
             }
         };
 
-        // Stands in for PR_SET_PDEATHSIG, which macOS doesn't have (see
-        // watchdog.rs). Kept alive for the rest of this call via Drop.
+        // Stands in for PR_SET_PDEATHSIG (watchdog.rs); alive until dropped.
         let pgid = child.id() as i32;
         let _watchdog = Watchdog::spawn(pgid).inspect_err(|_| {
             let _ = child.kill();
             let _ = child.wait();
         })?;
 
-        // stdin is written inside wait_with_timeout's own loop, interleaved
-        // with draining stdout/stderr -- not all upfront here. A program
-        // that echoes input to output as it goes (e.g. `cat`) can block on
-        // writing its own output once enough of it is buffered and unread,
-        // which stops it reading more stdin in turn; writing stdin to
-        // completion before anything drains stdout/stderr deadlocks against
-        // that once either side exceeds one pipe buffer (confirmed for real
-        // with 200KB of stdin, and independently with >64KB of output alone
-        // and no stdin at all).
+        // stdin is written inside wait_with_timeout's loop, interleaved with draining output;
+        // writing it all first deadlocks once either pipe buffer fills.
         let mut result = self.wait_with_timeout(
             &mut child,
             stdin,
@@ -424,8 +364,7 @@ impl PlatformExecutor for MacOSExecutor {
         if !is_supported() {
             return Err(SandboxError::SandboxExecUnavailable);
         }
-        // macOS has no per-sandbox process count or CPU share: RLIMIT_NPROC
-        // counts every process the user has, not the sandbox's.
+        // No per-sandbox process count or CPU share (RLIMIT_NPROC is per-user).
         for (set, setting) in [
             (config.max_pids.is_some(), "max_pids"),
             (config.cpu_limit.is_some(), "cpu_limit"),
@@ -449,7 +388,6 @@ mod tests {
 
     #[test]
     fn test_macos_is_supported() {
-        // On macOS, sandbox-exec should exist
         #[cfg(target_os = "macos")]
         assert!(is_supported());
     }

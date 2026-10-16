@@ -1,7 +1,5 @@
-//! `/var/tmp` and `/dev/shm` are in landlock's `DEFAULT_WRITABLE`
-//! unconditionally (not tied to `private_tmp`), so without their own
-//! private tmpfs they're the host's real, shared, persistent paths --
-//! writable by every sandbox and the host alike. See `MountPlan::tmpfs_mounts`.
+//! /var/tmp and /dev/shm are in landlock's DEFAULT_WRITABLE regardless of private_tmp, so without their own
+//! private tmpfs they'd be the host's shared, persistent paths. See `MountPlan::tmpfs_mounts`.
 
 use nanosandbox::Sandbox;
 use std::time::Duration;
@@ -14,8 +12,7 @@ fn sandbox() -> Sandbox {
         .unwrap()
 }
 
-/// A file left in /var/tmp or /dev/shm isn't visible to another sandbox, or
-/// to the host, and isn't there on the next run either.
+/// A file left in /var/tmp or /dev/shm isn't visible to another sandbox or the host, nor on the next run.
 #[test]
 fn test_var_tmp_and_dev_shm_are_private_per_run() {
     if crate::common::skip_without_userns_privileges() {
@@ -35,7 +32,6 @@ fn test_var_tmp_and_dev_shm_are_private_per_run() {
             .unwrap();
         assert!(out.stdout.contains("wrote"), "{path}: {out:?}");
 
-        // Not visible from a second, independent sandbox...
         let second = sandbox();
         let check = second
             .run(
@@ -52,7 +48,6 @@ fn test_var_tmp_and_dev_shm_are_private_per_run() {
             "{path}: a second sandbox saw the first one's file"
         );
 
-        // ...and not on the real host path either.
         assert!(
             !std::path::Path::new(path).join(&marker).exists(),
             "{path}/{marker} leaked onto the host"
@@ -60,8 +55,7 @@ fn test_var_tmp_and_dev_shm_are_private_per_run() {
     }
 }
 
-/// An explicit `writable()`/`bind()` naming `/var/tmp` or `/dev/shm`
-/// overrides the private default: the caller asked for the real, shared one.
+/// An explicit `writable()`/`bind()` of /var/tmp or /dev/shm overrides the private default.
 #[test]
 fn test_explicit_writable_grant_overrides_the_private_default() {
     if crate::common::skip_without_userns_privileges() {

@@ -1,6 +1,4 @@
-//! Sandbox builder implementation
-//!
-//! Provides a fluent API for configuring and building sandboxes.
+//! Sandbox builder.
 
 use crate::error::{Result, SandboxError};
 use crate::sandbox::Sandbox;
@@ -47,7 +45,6 @@ pub const DEFAULT_PRIVATE_TMP_SIZE: u64 = 256 * 1024 * 1024;
 #[derive(Clone, Debug)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // the Linux-only settings
 pub(crate) struct SandboxConfig {
-    // Filesystem
     pub(crate) mounts: Vec<Mount>,
     /// Linux only: [`SandboxBuilder::tmpfs`].
     pub(crate) tmpfs_mounts: Vec<(PathBuf, u64)>,
@@ -64,7 +61,6 @@ pub(crate) struct SandboxConfig {
     /// [`SandboxBuilder::hide_home`].
     pub(crate) hide_home: bool,
 
-    // Resource limits
     pub(crate) memory_limit: Option<u64>,
     pub(crate) cpu_limit: Option<f64>,
     pub(crate) wall_time_limit: Option<Duration>,
@@ -75,12 +71,10 @@ pub(crate) struct SandboxConfig {
     /// [`SandboxBuilder::max_output`], per stream.
     pub(crate) max_output: u64,
 
-    // Network
     pub(crate) network_mode: NetworkMode,
     /// [`SandboxBuilder::allow_private_destinations`].
     pub(crate) allow_private_destinations: bool,
 
-    // Security
     /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
     pub(crate) seccomp: bool,
     pub(crate) uid: Option<u32>,
@@ -88,7 +82,6 @@ pub(crate) struct SandboxConfig {
     pub(crate) host_gid: Option<u32>,
     pub(crate) gid: Option<u32>,
 
-    // Environment
     pub(crate) env: HashMap<String, String>,
     pub(crate) clear_env: bool,
     pub(crate) hostname: String,
@@ -96,28 +89,19 @@ pub(crate) struct SandboxConfig {
     /// [`SandboxBuilder::audit`].
     pub(crate) audit: Option<crate::audit::AuditHook>,
 
-    /// The paths the configuration names, each with where it resolved to
-    /// when the sandbox was built. See [`SandboxConfig::pin`].
+    /// Paths the configuration names, with where each resolved when built. See [`SandboxConfig::pin`].
     pub(crate) pinned: Vec<(PathBuf, PathBuf)>,
 }
 
 impl SandboxConfig {
-    /// Resolves, once, what the configuration names: where each path leads
-    /// through symlinks. The rules a run is given are made from these, not
-    /// from the file system as it is by then, and [`check_pinned`] refuses a
-    /// run if one has since moved.
-    ///
-    /// Without it, a command could swap the sandbox's own writable
-    /// directory, or one above it, for a symlink to somewhere it may not
-    /// write: the next run would resolve the path through the link, and
-    /// grant that place as the writable one.
+    /// Resolves configured paths through symlinks once at build; runs use these, and
+    /// [`check_pinned`] refuses a run if one has since moved. Otherwise a command could swap the
+    /// writable directory (or a parent) for a symlink and have the next run grant its target.
     ///
     /// [`check_pinned`]: SandboxConfig::check_pinned
     #[cfg(unix)]
     pub(crate) fn pin(&mut self) {
-        // A relative path names a directory as of now: made absolute, so
-        // that the host changing its working directory later doesn't make
-        // it name another one (and fail the check below).
+        // // Absolute now, so a later chdir by the host can't change which directory it names.
         if let Ok(cwd) = std::env::current_dir() {
             let absolute = |p: &mut PathBuf| {
                 if p.is_relative() {
@@ -261,20 +245,12 @@ impl SandboxBuilder {
         self.config
     }
 
-    // ========== Filesystem ==========
-    //
-    // A sandbox can read the system's files, but nothing it hasn't been
-    // given can be written. These are the same on every platform that
-    // isolates the file system (Linux and macOS); Windows refuses them.
-
-    /// Let the sandbox read `path`, a host file or directory, at the same
-    /// path.
+    /// Let the sandbox read `path` at the same path.
     ///
-    /// Inside a path made [`writable`](Self::writable) it takes writing away
-    /// again: the path can't be changed, replaced or moved, and nor can the
-    /// directories above it, up to the writable one. On Linux that's a
-    /// read-only mount, so `build()` refuses it where mounting isn't
-    /// possible (AppArmor's `unprivileged_userns` restriction).
+    /// Inside a [`writable`](Self::writable) path it removes write access: the path and its
+    /// parents up to the writable one can't be changed, replaced or moved. On Linux this is a
+    /// read-only mount, so `build()` refuses it where mounting isn't possible (AppArmor
+    /// `unprivileged_userns`).
     pub fn read_only(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         self.config.mounts.push(Mount {
@@ -285,8 +261,7 @@ impl SandboxBuilder {
         self
     }
 
-    /// Let the sandbox read and write `path`, a host file or directory, at
-    /// the same path. Writes land on the host.
+    /// Let the sandbox read and write `path` at the same path. Writes land on the host.
     pub fn writable(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         self.config.mounts.push(Mount {
@@ -297,16 +272,13 @@ impl SandboxBuilder {
         self
     }
 
-    /// Give each run its own temp directory, empty at the start, removed
-    /// afterwards, and limited to `size_bytes`. On by default, at
-    /// [`DEFAULT_PRIVATE_TMP_SIZE`]; not available on Windows.
+    /// Give each run its own empty temp directory, removed afterwards and limited to
+    /// `size_bytes`. On by default at [`DEFAULT_PRIVATE_TMP_SIZE`]; not on Windows.
     ///
-    /// Programs find it through `$TMPDIR`. On Linux it's a tmpfs mounted at
-    /// `/tmp`, so programs that use `/tmp` by name get it too. Where that
-    /// can't be mounted (macOS, and Linux under Ubuntu's AppArmor userns
-    /// restriction) it's a private directory instead, and `/tmp` by name is
-    /// the host's. Going over the size fails writes on a tmpfs, and kills
-    /// the program elsewhere (see `ExecutionResult::killed_by_tmp_limit`).
+    /// Found via `$TMPDIR`. On Linux it's a tmpfs at `/tmp`; elsewhere (macOS, Linux under
+    /// AppArmor's userns restriction) it's a private directory and `/tmp` by name is the host's.
+    /// Exceeding the size fails writes on a tmpfs and kills the program elsewhere (see
+    /// `ExecutionResult::killed_by_tmp_limit`).
     pub fn private_tmp(mut self, size_bytes: u64) -> Self {
         self.config.private_tmp = Some(size_bytes);
         self
@@ -318,73 +290,57 @@ impl SandboxBuilder {
         self
     }
 
-    /// macOS only: whether the system's temp directories (`/tmp`,
-    /// `/private/tmp`, `/private/var/tmp`, `/private/var/folders`) stay
-    /// writable. On by default.
+    /// macOS only: whether the system temp directories (`/tmp`, `/private/tmp`,
+    /// `/private/var/tmp`, `/private/var/folders`) stay writable. On by default.
     ///
-    /// macOS has no mount namespaces to give a run its own `/tmp`, so with
-    /// this on, a program that writes there by name writes to the host's:
-    /// the file stays after the run, other sandboxes see it, and the program
-    /// can modify the user's other temp files. `shared_tmp(false)` makes them
-    /// read-only; the program then has only [`private_tmp`](Self::private_tmp),
-    /// reached through `$TMPDIR`.
+    /// With it on, a program writing `/tmp` by name writes to the host's. `shared_tmp(false)`
+    /// makes them read-only, leaving [`private_tmp`](Self::private_tmp) via `$TMPDIR` (which
+    /// must be on).
     ///
-    /// Programs that honor `$TMPDIR` (Python, Node, `mktemp "$TMPDIR/x.XXXX"`)
-    /// are unaffected. These break: anything writing to `/tmp` by name;
-    /// `mktemp -t`, which uses the user's own temp directory instead of
-    /// `$TMPDIR`; and Apple's `xcrun` shims in `/usr/bin` (`clang`, `cc`, ...),
-    /// which reset `$TMPDIR` the same way. Run the real binaries by their path
-    /// under `xcode-select -p` instead. Needs a `private_tmp`, which is on
-    /// unless turned off.
+    /// Breaks: anything writing `/tmp` by name, `mktemp -t`, and Apple's `xcrun` shims in
+    /// `/usr/bin` (`clang`, `cc`, ...), which reset `$TMPDIR`; run the real binaries under
+    /// `xcode-select -p` instead.
     #[cfg(target_os = "macos")]
     pub fn shared_tmp(mut self, shared: bool) -> Self {
         self.config.shared_tmp = shared;
         self
     }
 
-    /// Hand one [`AuditEvent`](crate::audit::AuditEvent) to `sink` after each
-    /// run: what ran, under which policy, how it ended. No data from the run
-    /// itself is in it; see [`audit`](crate::audit).
+    /// Hand an [`AuditEvent`](crate::audit::AuditEvent) to `sink` after each run; it holds no
+    /// data from the run. See [`audit`](crate::audit).
     pub fn audit(mut self, sink: std::sync::Arc<dyn crate::audit::AuditSink>) -> Self {
         self.config.audit = Some(crate::audit::AuditHook(sink));
         self
     }
 
-    /// Keep the sandbox from reading `path` (a file, or a directory and
-    /// everything in it), on top of the credentials it can't read by
-    /// default: SSH and GPG keys, cloud and registry credentials, tokens,
-    /// shell histories and browser profiles in the home directory.
-    /// [`read_only`](Self::read_only) and [`writable`](Self::writable)
-    /// inside it still apply.
-    ///
-    /// On Linux, file names stay visible, only their contents aren't.
+    /// Keep the sandbox from reading `path` (a file, or a directory and its contents), on top
+    /// of the credentials hidden by default (SSH/GPG keys, cloud and registry credentials, shell
+    /// histories, browser profiles). [`read_only`](Self::read_only) and
+    /// [`writable`](Self::writable) inside it still apply. On Linux file names stay visible,
+    /// only contents don't.
     pub fn deny_read(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.deny_read.push(path.into());
         self
     }
 
-    /// Keep the sandbox from reading anything in the home directory, except
-    /// what [`read_only`](Self::read_only), [`writable`](Self::writable) or
-    /// [`working_dir`](Self::working_dir) name. For untrusted code that
-    /// needs no more than the system's tools; toolchains installed in the
-    /// home directory (rustup, nvm, pyenv) then need `read_only` too.
+    /// Keep the sandbox from reading anything in the home directory except what
+    /// [`read_only`](Self::read_only), [`writable`](Self::writable) or
+    /// [`working_dir`](Self::working_dir) name. Toolchains in the home directory (rustup, nvm,
+    /// pyenv) then need `read_only`.
     pub fn hide_home(mut self) -> Self {
         self.config.hide_home = true;
         self
     }
 
-    /// The directory the program starts in. It grants no access by itself:
-    /// use [`read_only`](Self::read_only) or [`writable`](Self::writable)
-    /// for that.
+    /// The directory the program starts in. Grants no access by itself.
     pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.config.working_dir = path.into();
         self
     }
 
-    /// Linux only: make `source` on the host visible at `target` in the
-    /// sandbox. Without a [`rootfs`](Self::rootfs), `target` is a host path
-    /// that must already exist, unless it's inside a tmpfs; the bind covers
-    /// it inside the sandbox only.
+    /// Linux only: make `source` visible at `target` in the sandbox. Without a
+    /// [`rootfs`](Self::rootfs), `target` must already exist on the host unless inside a tmpfs;
+    /// the bind applies inside the sandbox only.
     #[cfg(target_os = "linux")]
     pub fn bind(
         mut self,
@@ -400,13 +356,11 @@ impl SandboxBuilder {
         self
     }
 
-    /// Linux only: mount an empty tmpfs (memory filesystem) of `size_bytes`
-    /// at `path`, private to each run. For `/tmp`, use
+    /// Linux only: mount an empty per-run tmpfs of `size_bytes` at `path`. For `/tmp` use
     /// [`private_tmp`](Self::private_tmp).
     ///
-    /// Without a [`rootfs`](Self::rootfs), `path` must already exist on the
-    /// host. Needs mounting, which Ubuntu's AppArmor userns restriction
-    /// denies.
+    /// Without a [`rootfs`](Self::rootfs), `path` must exist on the host. Needs mounting, which
+    /// AppArmor's userns restriction denies.
     #[cfg(target_os = "linux")]
     pub fn tmpfs(mut self, path: impl Into<PathBuf>, size_bytes: u64) -> Self {
         self.config.tmpfs_mounts.push((path.into(), size_bytes));
@@ -420,8 +374,6 @@ impl SandboxBuilder {
         self.config.rootfs = Some(path.into());
         self
     }
-
-    // ========== Resource Limits ==========
 
     /// Set memory limit in bytes
     pub fn memory_limit(mut self, bytes: u64) -> Self {
@@ -465,17 +417,12 @@ impl SandboxBuilder {
         self
     }
 
-    /// Keep at most `bytes` of stdout, and as much of stderr. Default
-    /// [`DEFAULT_MAX_OUTPUT`] (16 MB) each. The output is held in this
-    /// process's memory; past the limit it's still read, so the program
-    /// keeps running, but dropped, and
-    /// `ExecutionResult::output_truncated` is set.
+    /// Keep at most `bytes` of stdout and of stderr (default [`DEFAULT_MAX_OUTPUT`], 16 MB).
+    /// Past the limit output is read but dropped and `ExecutionResult::output_truncated` is set.
     pub fn max_output(mut self, bytes: u64) -> Self {
         self.config.max_output = bytes;
         self
     }
-
-    // ========== Network ==========
 
     /// Disable network access (default)
     pub fn no_network(mut self) -> Self {
@@ -497,29 +444,22 @@ impl SandboxBuilder {
         self
     }
 
-    /// With [`allow_network`](Self::allow_network): let the allowed
-    /// domains lead to loopback, private (10/8, 172.16/12, 192.168/16),
-    /// link-local (including cloud metadata at 169.254.169.254) and other
-    /// non-public addresses, such as an internal API.
+    /// With [`allow_network`](Self::allow_network): let allowed domains resolve to loopback,
+    /// private, link-local (including cloud metadata at 169.254.169.254) and other non-public
+    /// addresses.
     ///
-    /// Off by default: the proxy connects from the host's network, so a
-    /// name resolving there would reach the host's own services and
-    /// internal network, which the sandbox otherwise can't.
+    /// Off by default: the proxy connects from the host, so such names would reach the host's
+    /// own services and internal network.
     pub fn allow_private_destinations(mut self) -> Self {
         self.config.allow_private_destinations = true;
         self
     }
 
-    // ========== Security ==========
-
     /// Turn the Linux syscall filter on or off. On by default.
     ///
-    /// It blocks creating namespaces, mounting, bpf, perf_event_open,
-    /// userfaultfd, io_uring, the keyring, kernel modules and kexec: the
-    /// usual way into a kernel exploit, and nothing ordinary programs need.
-    /// Blocked calls fail with `EPERM`. Turn it off for a program that needs
-    /// one of them, such as Chrome with its own sandbox enabled (or run that
-    /// with `--no-sandbox`).
+    /// Blocks namespaces, mounting, bpf, perf_event_open, userfaultfd, io_uring, keyring, kernel
+    /// modules and kexec with `EPERM`. Turn it off for programs that need one, e.g. Chrome with
+    /// its own sandbox.
     ///
     /// Linux only.
     #[cfg(target_os = "linux")]
@@ -542,15 +482,11 @@ impl SandboxBuilder {
         self
     }
 
-    /// Linux only, for a root caller: the host user the sandbox runs as,
-    /// instead of `nobody` (65534). Permission checks on the host's files
-    /// use this id, not [`uid`](Self::uid), which is only what the program
-    /// sees inside. Set it to the owner of the directories passed to
-    /// [`writable`](Self::writable) when `nobody` can't write to them, e.g.
-    /// ones a root-run container created. Whatever this user can reach on
-    /// the host is then reachable by the program, within the rest of the
-    /// sandbox's limits. 0 is refused, and so is setting this when the
-    /// caller isn't root: an unprivileged caller can only run as itself.
+    /// Linux only, for a root caller: the host user the sandbox runs as instead of `nobody`
+    /// (65534). Host file permission checks use this id, not [`uid`](Self::uid), and everything
+    /// this user can reach on the host is reachable by the program. Set it to the owner of
+    /// [`writable`](Self::writable) directories `nobody` can't write. 0 is refused, as is
+    /// setting it when the caller isn't root.
     #[cfg(target_os = "linux")]
     pub fn host_uid(mut self, uid: u32) -> Self {
         self.config.host_uid = Some(uid);
@@ -564,8 +500,6 @@ impl SandboxBuilder {
         self.config.host_gid = Some(gid);
         self
     }
-
-    // ========== Environment ==========
 
     /// Set an environment variable
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -593,8 +527,6 @@ impl SandboxBuilder {
         self
     }
 
-    // ========== Build ==========
-
     /// Build the sandbox
     pub fn build(self) -> Result<Sandbox> {
         self.validate()?;
@@ -602,10 +534,8 @@ impl SandboxBuilder {
     }
 
     fn validate(&self) -> Result<()> {
-        // Pre-check platform capabilities
         self.pre_check_platform()?;
 
-        // Validate mount paths exist
         for mount in &self.config.mounts {
             if !mount.source.exists() {
                 return Err(SandboxError::PathNotFound(mount.source.clone()));
@@ -662,7 +592,6 @@ impl SandboxBuilder {
             });
         }
 
-        // Validate rootfs if specified
         if let Some(rootfs) = &self.config.rootfs
             && (!rootfs.exists() || !rootfs.is_dir())
         {
@@ -674,16 +603,11 @@ impl SandboxBuilder {
 
     /// Pre-check platform capabilities before building sandbox
     fn pre_check_platform(&self) -> Result<()> {
-        // Linux: no check here. `LinuxExecutor::check_support()` (called right
-        // after this, from `Sandbox::from_builder()`) does the real thing —
-        // including, for resource limits, actually resolving and validating
-        // the cgroup v2 subtree instead of just checking a path exists.
-        // Duplicating a weaker check here previously let `build()` succeed on
-        // configs `check_support()` would immediately reject.
+        // // Linux: no check here; `check_support()` does it for real (including cgroup v2
+        // // resolution), and a weaker duplicate let build() pass configs it then rejected.
 
         #[cfg(target_os = "macos")]
         {
-            // Check sandbox-exec availability
             if !std::path::Path::new("/usr/bin/sandbox-exec").exists() {
                 return Err(SandboxError::Config {
                     context: "sandbox-exec not found at /usr/bin/sandbox-exec".into(),
@@ -691,20 +615,12 @@ impl SandboxBuilder {
                 });
             }
 
-            // Unlike Linux (where working_dir can be a path that only
-            // exists inside the sandbox's own mount namespace, made real by
-            // its own mount setup), sandbox-exec does no remapping -- it
-            // chdirs straight to this real host path. Left unchecked, a bad
-            // one surfaces at run() time as a chdir failure with the same
-            // ErrorKind as a missing command, and was being misreported as
-            // CommandNotFound(cmd) even though cmd exists (confirmed for
-            // real).
+            // // sandbox-exec chdirs straight to this host path; unchecked, a bad one surfaces at
+            // // run() as a chdir failure misreported as CommandNotFound.
             if !self.config.working_dir.is_dir() {
                 return Err(SandboxError::PathNotFound(self.config.working_dir.clone()));
             }
         }
-
-        // Windows: Job Objects are always available, no pre-check needed
 
         Ok(())
     }

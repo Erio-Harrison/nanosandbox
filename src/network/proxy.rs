@@ -1,11 +1,8 @@
 //! HTTP/HTTPS proxy that only lets a domain allowlist through.
 //!
-//! It handles plain HTTP requests in absolute form (`GET http://host/path`)
-//! and HTTPS tunnels (`CONNECT host:port`). Each target host is checked
-//! against the allowlist, resolved once, checked against non-public
-//! addresses (see [`is_public`]), and connected to by address. Then bytes
-//! are relayed both ways until both sides are done, or neither has sent
-//! anything for the idle timeout.
+//! Plain HTTP (absolute form) and `CONNECT` tunnels. Each target is checked against the
+//! allowlist, resolved once, checked for non-public addresses (see [`is_public`]), and
+//! connected to by address.
 
 use std::collections::{BTreeSet, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -18,20 +15,18 @@ use tokio::sync::{Notify, watch};
 /// Connection timeout for proxy connections
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long a relayed connection may go with nothing sent either way. Not a
-/// limit on how long it lasts: a download that keeps going keeps going.
+/// Idle timeout for a relayed connection (not a lifetime limit).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Request line plus headers. The proxy runs in the host process, so a client
-/// that never ends its headers mustn't be able to grow this without bound.
+/// Request line plus headers cap: the proxy runs in the host process, so a client mustn't
+/// grow this unbounded.
 const MAX_HEADER_BYTES: u64 = 64 * 1024;
 
 /// How long a client gets to send its request headers.
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Request headers that only concern the hop between the client and the
-/// proxy, or that the proxy sets itself. Also dropped: any header the
-/// `Connection` header names.
+/// Hop-by-hop request headers and ones the proxy sets itself; also any header `Connection`
+/// names.
 const HOP_BY_HOP: [&str; 7] = [
     "connection",
     "proxy-connection",
@@ -47,10 +42,8 @@ const HOP_BY_HOP: [&str; 7] = [
 pub(crate) struct Policy {
     /// Lowercased; `*.example.com` also matches subdomains.
     domains: HashSet<String>,
-    /// Whether an allowed name may lead to a loopback, private, link-local
-    /// (cloud metadata) or other non-public address. The proxy connects
-    /// from the host's network, so by default it doesn't: that would hand
-    /// the sandbox the host's own services and internal network.
+    /// Whether allowed names may lead to loopback, private, link-local (cloud metadata) or other
+    /// non-public addresses. Off by default: the proxy connects from the host's network.
     allow_private: bool,
     idle_timeout: Duration,
 }
@@ -107,17 +100,12 @@ enum Request<'a> {
 }
 
 impl HttpProxy {
-    /// Create a new HTTP proxy
-    ///
-    /// # Arguments
-    ///
-    /// * `allowed_domains` - List of allowed domains (supports wildcards like `*.example.com`)
-    /// * `port` - Port to listen on (use 0 for random available port)
+    /// Create a proxy for `allowed_domains` (supports `*.example.com`) listening on `port` (0 for
+    /// any).
     pub fn new(allowed_domains: Vec<String>, port: u16) -> Self {
         Self {
             policy: Arc::new(Policy {
-                // Hosts are lowercased and unbracketed before matching, so
-                // patterns must be too.
+                // // Hosts are lowercased before matching, so patterns must be too.
                 domains: allowed_domains
                     .into_iter()
                     .map(|d| {
@@ -145,12 +133,8 @@ impl HttpProxy {
         self.listen_addr
     }
 
-    /// Run the proxy server
-    ///
-    /// This will block until the shutdown signal is received. If `bound` is
-    /// given, the actual listen address (or the bind error) is sent on it as
-    /// soon as the listener is up, before the accept loop starts — so a
-    /// caller never has to guess a port and race a second bind against it.
+    /// Run the proxy until the shutdown signal. If `bound` is given, the listen address (or bind
+    /// error) is sent on it once the listener is up, before the accept loop starts.
     pub async fn run(
         &self,
         mut shutdown: watch::Receiver<bool>,
@@ -225,7 +209,6 @@ impl HttpProxy {
                         }
                     }
                 }
-                // Reap finished ones, so the set doesn't grow with them.
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 _ = &mut stop => break,
             }
@@ -252,9 +235,8 @@ impl HttpProxy {
                 return Ok(());
             }
         };
-        // What the client sent right after its headers, read along with
-        // them: a request body, or the start of a TLS handshake. It goes to
-        // the destination first. It used to be dropped with the reader.
+        // // Bytes the client sent right after its headers (request body or TLS handshake start);
+        // // forwarded to the destination first.
         let early = reader.buffer().to_vec();
         drop(reader);
 
@@ -311,9 +293,8 @@ impl HttpProxy {
         loop {
             let budget = MAX_HEADER_BYTES - all_headers.len() as u64;
             if budget == 0 {
-                // A prior line landed exactly on the cap: take(0) reads 0
-                // bytes same as real EOF, so this must be checked before
-                // read_line, not inferred from its result.
+                // // Checked before read_line: a line landing exactly on the cap makes take(0) read 0 bytes,
+                // // same as EOF.
                 return Ok(None);
             }
             let mut line = String::new();
@@ -323,7 +304,6 @@ impl HttpProxy {
                 return Ok(Some(all_headers));
             }
             if !line.ends_with('\n') {
-                // Either the budget ran out mid-line, or EOF did.
                 let within = (all_headers.len() as u64) < MAX_HEADER_BYTES;
                 return Ok(within.then_some(all_headers));
             }
@@ -332,13 +312,8 @@ impl HttpProxy {
 
     /// The request line's target, or why it can't be served.
     fn parse_request(head: &str) -> Result<Request<'_>, &'static str> {
-        // Obsolete line folding (RFC 7230 §3.2.4): a continuation line is
-        // part of whatever header preceded it, but `forwarded_head` strips
-        // hop-by-hop headers line by line and would let a folded line
-        // through under a kept header's name -- smuggling a client-chosen
-        // Host or Proxy-Authorization past the strip. Refused outright,
-        // the same as this parser already refuses anything else it won't
-        // fully understand; no real client sends this today.
+        // // Obsolete line folding (RFC 7230 3.2.4) is refused: `forwarded_head` strips hop-by-hop
+        // // headers line by line, so a folded line could smuggle Host or Proxy-Authorization past it.
         if head
             .lines()
             .skip(1)
@@ -356,8 +331,7 @@ impl HttpProxy {
             let (host, port) = parse_authority(target, 443).ok_or("Bad Request")?;
             return Ok(Request::Connect { host, port });
         }
-        // Absolute form only: a request with just a path would have to be
-        // routed by its Host header, which the client controls.
+        // // Absolute form only: routing by Host would trust a client-controlled header.
         let rest = target
             .get(..7)
             .filter(|scheme| scheme.eq_ignore_ascii_case("http://"))
@@ -381,12 +355,9 @@ impl HttpProxy {
         })
     }
 
-    /// The request head to send on: the path instead of the URL, `Host` set
-    /// to the URL's (the destination that was checked, whatever the client
-    /// put there), hop-by-hop headers dropped, and `Connection: close`. One
-    /// request per connection: the server closes after answering it, so
-    /// anything else the client sends on the same connection isn't served,
-    /// and nothing needs the proxy to understand request bodies.
+    /// The request head to send on: path instead of URL, `Host` set to the checked URL's,
+    /// hop-by-hop headers dropped, `Connection: close`. One request per connection, so request
+    /// bodies need no parsing.
     fn forwarded_head(
         head: &str,
         method: &str,
@@ -415,7 +386,6 @@ impl HttpProxy {
         let mut out = format!("{method} {path} {version}\r\nHost: {authority}\r\n");
         let mut keep = true;
         for line in headers {
-            // A line starting with whitespace continues the previous header.
             if !line.starts_with([' ', '\t']) {
                 let name = name(line);
                 keep = !HOP_BY_HOP.contains(&name.as_str()) && !named_by_connection.contains(&name);
@@ -429,11 +399,9 @@ impl HttpProxy {
         out
     }
 
-    /// Sends `early` to `remote`, then copies both ways. When one side is
-    /// done sending, the other is told (its write half is shut down) and the
-    /// other direction carries on: a client may finish its request and still
-    /// be waiting for the answer. Ends when both are done, either fails, or
-    /// nothing has gone either way for `idle`.
+    /// Sends `early` to `remote`, then copies both ways. A finished side is half-closed and the
+    /// other direction carries on. Ends when both are done, either fails, or nothing moves for
+    /// `idle`.
     async fn relay(
         client: TcpStream,
         remote: TcpStream,
@@ -481,9 +449,8 @@ impl HttpProxy {
         }
     }
 
-    /// Resolves `host` once and connects to one of the addresses the policy
-    /// allows. Connecting by address, not by name again, means the name
-    /// can't resolve to something else in between (DNS rebinding).
+    /// Resolves `host` once and connects to one of the allowed addresses by address, so the name
+    /// can't re-resolve elsewhere (DNS rebinding).
     async fn connect(host: &str, port: u16, policy: &Policy) -> Result<TcpStream, ConnectError> {
         let attempt = async {
             let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
@@ -538,9 +505,8 @@ impl HttpProxy {
         if allowed.contains(host) {
             return true;
         }
-        // "*.example.com": example.com itself, or anything ending in
-        // ".example.com". Keeping the dot is what stops it matching
-        // "evilexample.com".
+        // // "*.example.com" matches example.com and anything ending in ".example.com"; the dot stops
+        // // "evilexample.com".
         allowed.iter().any(|pattern| {
             pattern.strip_prefix('*').is_some_and(|dot_base| {
                 dot_base.starts_with('.') && (host.ends_with(dot_base) || host == &dot_base[1..])
@@ -565,10 +531,8 @@ impl HttpProxy {
     }
 }
 
-/// `host`, `host:port`, `[v6]` or `[v6]:port`, as the lowercased host
-/// without brackets and the port (`default` if none). `None` for anything
-/// else, including `user@host`: userinfo has no business in a proxy request,
-/// and is an old way to make a URL look like it goes somewhere it doesn't.
+/// `host`, `host:port`, `[v6]` or `[v6]:port` as lowercased host and port (`default` if none).
+/// `None` for anything else, including `user@host` (userinfo can disguise the destination).
 fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
     if authority.contains('@') {
         return None;
@@ -583,8 +547,8 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
             (host, port)
         }
         None => match authority.rsplit_once(':') {
-            // More than one colon without brackets: a bare IPv6 address,
-            // whose last group can't be told from a port.
+            // // More than one colon without brackets: a bare IPv6 address; its last group can't be
+            // // told from a port.
             Some((host, _)) if host.contains(':') => return None,
             Some((host, port)) => (host, Some(port)),
             None => (authority, None),
@@ -600,10 +564,8 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
     Some((host.to_ascii_lowercase(), port))
 }
 
-/// Whether `ip` is on the public internet: not loopback, private, link-local
-/// (where cloud metadata services live), shared (CGNAT), multicast,
-/// reserved or the like. IPv6 addresses that embed an IPv4 one (mapped,
-/// NAT64, 6to4) are judged by it.
+/// Whether `ip` is on the public internet (not loopback, private, link-local, CGNAT,
+/// multicast, reserved...). IPv6 addresses embedding IPv4 are judged by it.
 fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
@@ -739,12 +701,8 @@ mod tests {
         );
     }
 
-    /// A continuation line inherits whatever a plain line-by-line stripper
-    /// decided for the header it follows, with no look at its own content
-    /// -- so a header that's supposed to be stripped could ride through
-    /// folded under one that's kept. Refusing any folded request instead
-    /// closes that off; verified it's refused for both a stripped and a
-    /// kept header being the one folded under.
+    /// Folded lines inherit a line-by-line stripper's decision for the header above them, so a
+    /// stripped header could ride through under a kept one; such requests are refused.
     #[test]
     fn test_line_folding_refused() {
         for head in [
@@ -766,18 +724,14 @@ mod tests {
             Some("GET http://a/ HTTP/1.1\r\nHost: a\r\n\r\n")
         );
 
-        // One endless line, then many short ones: both stop at the cap
-        // instead of buffering everything.
         let long = vec![b'a'; 1024 * 1024];
         assert_eq!(HttpProxy::read_headers(&mut &long[..]).await.unwrap(), None);
         let many = b"X: y\r\n".repeat(100_000);
         assert_eq!(HttpProxy::read_headers(&mut &many[..]).await.unwrap(), None);
     }
 
-    /// A line landing exactly on the cap used to be indistinguishable from
-    /// EOF (`take(0)` also reads 0 bytes), so it was accepted as complete
-    /// instead of rejected -- dropping the real terminator and whatever the
-    /// client sent after it.
+    /// A line landing exactly on the cap used to read as EOF (`take(0)`) and be accepted as
+    /// complete.
     #[tokio::test]
     async fn test_header_line_exactly_at_the_cap_is_still_rejected() {
         let filler = "a".repeat(1024 * 64 - "X: \r\n".len());
@@ -857,8 +811,6 @@ mod tests {
         let port = upstream(move |mut s| {
             let seen_tx = seen_tx.clone();
             async move {
-                // The request until the client's end of it (EOF, since the
-                // proxy relays its half-close), then an answer.
                 let request = read_all(&mut s).await;
                 let _ = seen_tx.send(request);
                 let _ = s
@@ -869,8 +821,6 @@ mod tests {
         .await;
         let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
 
-        // Content-Length and chunked, each sent in one write with its
-        // headers, the way clients do.
         for body in [
             "Content-Length: 5\r\n\r\nHELLO",
             "Transfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n",
@@ -907,12 +857,10 @@ mod tests {
         let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
 
         let mut client = TcpStream::connect(proxy).await.unwrap();
-        // CONNECT and the first bytes for the destination in one write.
         let request = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\nEARLY");
         client.write_all(request.as_bytes()).await.unwrap();
         assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
         client.write_all(b"+LATER").await.unwrap();
-        // Done sending; the answer still has to come back.
         client.shutdown().await.unwrap();
         assert_eq!(read_all(&mut client).await, "got:EARLY+LATER");
     }

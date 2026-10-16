@@ -1,12 +1,6 @@
-//! Windows platform implementation
-//!
-//! Without the one-time install (see `docs/platform-windows.md`), a run is
-//! the calling user's own process in a Job Object: resource limits and
-//! process lifetime only, no file system or network isolation, so `build()`
-//! refuses every setting that would need them.
-//!
-//! - **Job Objects**: every process of a run, with its memory, process
-//!   count, CPU share and CPU time limits; killing the whole run at once.
+//! Windows backend. Without the one-time install (`docs/platform-windows.md`) a run is the
+//! user's own process in a Job Object: resource limits and lifetime only, no fs/network
+//! isolation, so `build()` refuses settings that need them.
 
 mod job;
 mod wait;
@@ -31,8 +25,7 @@ use windows_sys::Win32::System::Threading::{
 
 /// Check if Windows sandboxing is supported
 pub fn is_supported() -> bool {
-    // Job Objects (nested, as needed when the host is itself in one) are
-    // in every supported Windows.
+    // Job Objects are in every supported Windows.
     true
 }
 
@@ -53,9 +46,7 @@ impl Default for WindowsExecutor {
     }
 }
 
-/// Environment variables a Windows program can't do without, passed on
-/// from this process even with `clear_env`: without `SystemRoot`, for one,
-/// Winsock fails to start. None of them is a secret.
+/// Env vars Windows programs need even with `clear_env` (e.g. Winsock needs `SystemRoot`); none secret.
 const SYSTEM_ENV: [&str; 5] = ["SystemRoot", "SystemDrive", "windir", "ComSpec", "PATHEXT"];
 
 impl PlatformExecutor for WindowsExecutor {
@@ -98,9 +89,7 @@ impl PlatformExecutor for WindowsExecutor {
         });
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
-        // Suspended until it's in the Job, so not even its first instruction
-        // runs outside it. No console window of its own, and none shared
-        // with this process: a Ctrl+C meant for the host isn't the run's.
+        // Suspended until in the Job, so nothing runs outside it. Own console: host's Ctrl+C isn't the run's.
         command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
 
         let job = Job::create(&Limits {
@@ -133,7 +122,6 @@ impl PlatformExecutor for WindowsExecutor {
                 })
             });
         if let Err(e) = started {
-            // Never resumed, or never in the Job: it hasn't run.
             let _ = child.kill();
             let _ = child.wait();
             return Err(e);
@@ -142,13 +130,9 @@ impl PlatformExecutor for WindowsExecutor {
         wait::wait(&mut child, &job, stdin, config, start)
     }
 
-    /// Refuses what this executor can't enforce, instead of running the
-    /// program with it silently missing. The process runs as the calling
-    /// user, with the user's own file and network access.
+    /// Refuses what this executor can't enforce rather than silently dropping it.
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {
         if !matches!(config.network_mode, NetworkMode::Host) {
-            // no_network() is the default, so this covers sandboxes that
-            // never mention the network too.
             return Err(SandboxError::Unsupported {
                 setting: "no_network()/allow_network() on Windows".into(),
                 reason: "there's no network isolation; call host_network() to run with the \
@@ -190,18 +174,15 @@ impl PlatformExecutor for WindowsExecutor {
     }
 }
 
-/// Environment variable names are case-insensitive on Windows.
 fn has_env(config: &SandboxConfig, key: &str) -> bool {
     config.env.keys().any(|k| k.eq_ignore_ascii_case(key))
 }
 
-/// The system directories, where Windows actually is.
 fn default_path() -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
     format!(r"{root}\system32;{root};{root}\System32\Wbem;{root}\System32\WindowsPowerShell\v1.0\")
 }
 
-/// Resumes the only thread of a process created suspended.
 fn resume(pid: u32) -> std::io::Result<()> {
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);

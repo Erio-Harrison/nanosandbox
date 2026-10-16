@@ -35,7 +35,6 @@ pub(crate) mod platform;
 pub mod result;
 pub mod sandbox;
 
-// Re-exports
 #[cfg(target_os = "linux")]
 pub use builder::Permission;
 pub use builder::{DEFAULT_MAX_OUTPUT, DEFAULT_PRIVATE_TMP_SIZE, SandboxBuilder};
@@ -43,10 +42,7 @@ pub use error::{Result, SandboxError};
 pub use result::ExecutionResult;
 pub use sandbox::Sandbox;
 
-/// Removes the private temp directories that killed runs left behind, from
-/// this process's temp directory (and `/tmp` on Linux). Only this user's,
-/// only ones nothing holds. Runs on its own as new runs start; this is for a
-/// host that wants it done now, e.g. on exit. Returns how many were removed.
+/// Removes private temp directories left by killed runs (this user's, unheld). Also runs as new runs start; returns the count removed.
 #[cfg(unix)]
 pub fn clean_stale_tmp() -> usize {
     platform::private_tmp::clean_stale()

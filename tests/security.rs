@@ -47,15 +47,12 @@ mod sbpl_rules;
 #[path = "security/job_limits.rs"]
 mod job_limits;
 
-// P0: Process management tests (zombie, process groups, signals)
 #[cfg(unix)]
 #[path = "security/process_management.rs"]
 mod process_management;
 
-// P0: Resource enforcement tests (setrlimit, cgroups, OOM)
 #[path = "security/resource_enforcement.rs"]
 mod resource_enforcement;
 
-// P0: Network security tests (IP bypass, proxy)
 #[path = "security/network_security.rs"]
 mod network_security;

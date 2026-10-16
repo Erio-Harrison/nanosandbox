@@ -1,6 +1,4 @@
-//! Integration tests for nanosandbox
-//!
-//! These tests verify that the sandbox actually works on the current platform.
+//! Integration tests: the sandbox works on the current platform.
 #![cfg_attr(
     not(unix),
     allow(dead_code, unused_imports, unused_variables, unused_mut)
@@ -69,7 +67,6 @@ fn test_exit_code() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Run a command that exits with code 42
     let result = sandbox
         .run("sh", &["-c", "exit 42"])
         .expect("Failed to run command");
@@ -135,7 +132,6 @@ fn test_environment_variables() {
 #[test]
 #[cfg(unix)]
 fn test_python_execution() {
-    // Skip if Python is not available
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .build()
@@ -148,7 +144,6 @@ fn test_python_execution() {
             if r.success() {
                 assert_eq!(r.stdout.trim(), "Hello from Python");
             } else {
-                // Python might not be installed
                 println!("Python not available: {:?}", r.failure_reason());
             }
         }
@@ -185,7 +180,6 @@ fn test_presets() {
     let temp = common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
     let path = temp.path();
 
-    // Just verify presets build without error
     let _sandbox = Sandbox::data_analysis(path, path)
         .build()
         .expect("data_analysis preset failed");
@@ -206,9 +200,6 @@ fn test_presets() {
 #[cfg(target_os = "macos")]
 #[test]
 fn test_macos_sandbox_restrictions() {
-    // On macOS, verify that sandbox-exec is being used
-    // by checking that network access is blocked when configured
-
     let sandbox = Sandbox::builder()
         .working_dir("/tmp")
         .no_network()
@@ -216,16 +207,13 @@ fn test_macos_sandbox_restrictions() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Try to access a network resource - should fail or timeout
     let result = sandbox.run(
         "curl",
         &["-s", "--connect-timeout", "2", "https://example.com"],
     );
 
-    // The command should either fail or return an error
     match result {
         Ok(r) => {
-            // If curl runs, it should fail due to network restrictions
             println!(
                 "curl result: exit_code={}, stdout={}, stderr={}",
                 r.exit_code,
@@ -234,13 +222,10 @@ fn test_macos_sandbox_restrictions() {
             );
         }
         Err(e) => {
-            // Expected - curl might not be able to run or network is blocked
             println!("Expected network error: {:?}", e);
         }
     }
 }
-
-// ========== Network Proxy Tests ==========
 
 #[test]
 fn test_proxied_network_setup() {
@@ -249,7 +234,6 @@ fn test_proxied_network_setup() {
     let mut proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()], false)
         .expect("Failed to setup proxy");
 
-    // Each run's programs are pointed at that run's listener.
     let env_vars = ProxiedNetwork::env_vars(4321);
     for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
         assert!(
@@ -275,7 +259,6 @@ fn test_sandbox_with_proxied_network() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Run a simple command to verify sandbox works with proxy
     let result = sandbox
         .run("echo", &["proxy test"])
         .expect("Failed to run command");
@@ -296,13 +279,11 @@ fn test_proxy_env_vars_in_sandbox() {
         .build()
         .expect("Failed to build sandbox");
 
-    // Verify proxy env vars are set inside sandbox
     let result = sandbox
         .run("sh", &["-c", "echo $HTTP_PROXY"])
         .expect("Failed to run command");
 
     assert!(result.success());
-    // The proxy URL should be set
     assert!(
         result.stdout.contains("127.0.0.1"),
         "HTTP_PROXY should be set: {}",

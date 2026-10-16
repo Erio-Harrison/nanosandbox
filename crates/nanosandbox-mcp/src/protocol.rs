@@ -1,10 +1,8 @@
 //! MCP over JSON-RPC, for a server whose only job is one tool.
 //!
-//! Serves both protocol eras on the same stream, as the spec allows: a
-//! request carrying `_meta["io.modelcontextprotocol/protocolVersion"]` is
-//! stateless and modern (2026-07-28 and later); anything else, `initialize`
-//! included, gets the older handshake-era shapes (2025-11-25 and earlier).
-//! No state is kept between requests either way.
+//! Serves both protocol eras on one stream: a request with
+//! `_meta["io.modelcontextprotocol/protocolVersion"]` is stateless/modern
+//! (2026-07-28+); anything else, `initialize` included, gets the older handshake.
 
 use serde_json::{Map, Value, json};
 use std::collections::HashSet;
@@ -25,8 +23,7 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 
-/// What one `run_command` produced. Mirrors `nanosandbox::ExecutionResult`
-/// without depending on it, so the protocol layer tests without a sandbox.
+/// What one `run_command` produced; mirrors `nanosandbox::ExecutionResult` without depending on it.
 #[derive(Debug, Clone, Default)]
 pub struct RunOutput {
     pub stdout: String,
@@ -74,8 +71,7 @@ pub struct Call {
 
 pub struct Server<R: Runner> {
     runner: R,
-    /// Appended to the tool description: what the operator allowed, so the
-    /// model isn't left guessing at its limits.
+    /// Appended to the tool description: what the operator allowed.
     summary: String,
     gate: Gate,
     cancelled: Mutex<HashSet<String>>,
@@ -578,13 +574,11 @@ mod tests {
     #[test]
     fn modern_requests_must_carry_their_metadata() {
         let s = server();
-        // Version without capabilities.
         let r = respond(
             &s,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}"#,
         );
         assert_eq!(r["error"]["code"], INVALID_PARAMS);
-        // Version of the wrong type.
         let r = respond(
             &s,
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":5,"io.modelcontextprotocol/clientCapabilities":{}}}}"#,
@@ -608,7 +602,6 @@ mod tests {
         assert!(supported.contains(&json!("2025-11-25")));
     }
 
-    /// The tool takes no parameter that widens what the sandbox may do.
     #[test]
     fn the_tool_schema_exposes_only_what_to_run() {
         let r = respond(
@@ -765,7 +758,6 @@ mod tests {
             r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#,
         );
         assert!(s.execute_call(c).is_none());
-        // The mark is spent: the same id can be used again.
         let r = call(
             &s,
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"x"}}}"#,

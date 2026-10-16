@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-// Finds the prebuilt binary for this platform (installed as an optional
-// dependency) and runs it with this process's stdio, so an MCP client talks
-// to the server directly.
+// Runs the prebuilt platform binary (optional dependency) with this process's stdio.
 "use strict";
 
 const { spawn } = require("node:child_process");

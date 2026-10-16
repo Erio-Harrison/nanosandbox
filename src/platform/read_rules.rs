@@ -1,19 +1,11 @@
-//! What a sandbox may not read: credentials in the calling user's home
-//! directory by default, anything `deny_read` adds, and the whole home
-//! directory with `hide_home`. Paths the config grants (`read_only`,
-//! `writable`, the working directory) stay readable even inside those.
-//!
-//! The rest of the file system stays readable: toolchains, package caches
-//! and the user's projects live in the home directory too, and a sandbox
-//! that can't build a project isn't much use to a coding agent. What can
-//! leave the sandbox is limited by the network settings instead.
+//! What a sandbox may not read: home-directory credentials by default, `deny_read` paths, and
+//! all of home with `hide_home`. Config-granted paths stay readable inside those. The rest of
+//! the fs stays readable so toolchains and projects work; the network settings limit egress.
 
 use crate::builder::SandboxConfig;
 use std::path::{Path, PathBuf};
 
-/// Under the home directory: credentials, tokens and keys of common tools,
-/// shell histories (which collect secrets typed on the command line), and
-/// browser profiles. Files and directories alike.
+/// Under home: credentials, tokens, keys, shell histories and browser profiles.
 const SECRETS: &[&str] = &[
     ".ssh",
     ".gnupg",
@@ -48,7 +40,6 @@ const SECRETS: &[&str] = &[
     "Library/Safari",
 ];
 
-/// The calling user's home directory: `$HOME`, or the password database's.
 pub(crate) fn home_dir() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
         return Some(PathBuf::from(home));
@@ -73,8 +64,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes())))
 }
 
-/// The paths this run may not read, as they exist right now: resolved, and
-/// only the ones that exist.
+/// Existing paths this run may not read, resolved.
 pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
     let mut denied = Vec::new();
     if let Some(home) = home_dir() {
@@ -82,8 +72,7 @@ pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
             denied.push(home);
         } else {
             denied.extend(SECRETS.iter().map(|s| home.join(s)));
-            // Shell, REPL and database client histories: .bash_history,
-            // .zsh_history, .python_history, .psql_history, ...
+            // Shell, REPL and DB client histories.
             if let Ok(entries) = std::fs::read_dir(&home) {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
@@ -98,8 +87,7 @@ pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
         }
     }
     denied.extend(config.deny_read.iter().cloned());
-    // Other runs' private temp directories; a run's own comes back by its
-    // own rule (see platform/private_tmp.rs).
+    // Other runs' private temp dirs; a run's own comes back by its own rule.
     denied.push(super::private_tmp::container_location());
     let mut denied: Vec<PathBuf> = denied
         .iter()
@@ -110,9 +98,7 @@ pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
     denied
 }
 
-/// Paths inside `denied` that are readable anyway, because the config names
-/// them. A path above a denied one (the default working directory, `/`, or
-/// `writable(home)`) doesn't make it readable again.
+/// Paths inside `denied` the config names and so stay readable; a granted ancestor doesn't count.
 pub(crate) fn granted(config: &SandboxConfig, denied: &[PathBuf]) -> Vec<PathBuf> {
     config
         .mounts
@@ -124,11 +110,9 @@ pub(crate) fn granted(config: &SandboxConfig, denied: &[PathBuf]) -> Vec<PathBuf
         .collect()
 }
 
-/// Paths whose subtrees together cover the whole file system except
-/// `denied`, for an allow-list (Landlock) to express "everything but these".
-/// Descends only along the way to each denied path, allowing every sibling
-/// of it at each level. Symlinks there aren't followed: a link pointing into
-/// a denied directory would otherwise allow it.
+/// Roots covering the whole fs except `denied`, for allow-list (Landlock) use: walks only
+/// toward denied paths, allowing siblings; symlinks aren't followed (a link into a denied dir
+/// would allow it).
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn allowed_roots(denied: &[PathBuf]) -> Vec<PathBuf> {
     fn walk(dir: &Path, denied: &[PathBuf], out: &mut Vec<PathBuf>) {
@@ -172,7 +156,6 @@ mod tests {
         assert!(allowed.contains(&root.join("a/file")));
         assert!(!allowed.iter().any(|p| p == &root.join("a/link")));
         assert!(!allowed.iter().any(|p| root.join("a/secret").starts_with(p)));
-        // Everything outside is still covered, at the shallowest level.
         assert!(allowed.contains(&PathBuf::from("/usr")) || !Path::new("/usr").exists());
     }
 

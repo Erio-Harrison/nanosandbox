@@ -1,6 +1,4 @@
-//! Feeding stdin, collecting stdout/stderr, and waiting for the sandboxed
-//! process to finish or hit a limit. Runs entirely in the parent, after
-//! clone() has already returned.
+//! Feeding stdin, collecting output and waiting for the sandboxed process (parent side).
 
 use crate::error::{Result, SandboxError};
 use crate::platform::output::Captured;
@@ -10,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use super::{CgroupManager, read_raw, write_raw};
 
-/// See the comment at its one use site, in `wait_with_timeout`'s cpu_limit
-/// check.
+/// See the cpu_limit check in `wait_with_timeout`.
 const CPU_LIMIT_GRACE_USEC: u64 = 200_000;
 
 /// How the sandboxed process ended, from `wait_with_timeout`.
@@ -35,8 +32,7 @@ pub(super) struct ChildReads {
     pub(super) signal: OwnedFd,
 }
 
-/// The signal the init shim reported on `fd`, if it did: one byte, written
-/// just before it exited, so already there once the process is gone.
+/// The signal the init shim reported on `fd`, if any (one byte written just before exit).
 fn reported_signal(fd: RawFd) -> Option<i32> {
     let mut byte = [0u8; 1];
     match read_raw(fd, &mut byte) {
@@ -45,8 +41,7 @@ fn reported_signal(fd: RawFd) -> Option<i32> {
     }
 }
 
-/// Reads what's available on `fd` into `out`, until it would block. False
-/// once the writers are all gone (EOF) or it fails.
+/// Reads from `fd` until it would block. False on EOF or error.
 fn drain(fd: RawFd, out: &mut Captured) -> bool {
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -60,14 +55,10 @@ fn drain(fd: RawFd, out: &mut Captured) -> bool {
     }
 }
 
-/// Feeds stdin, collects stdout/stderr and waits for the process, killing
-/// it on `timeout`, when `private_tmp` goes over its size, or (`cpu_limit`)
-/// when the whole cgroup goes over `cpu_time_limit` in total CPU time --
-/// `RLIMIT_CPU` alone only catches one process over it, not the group.
+/// Feeds stdin, collects output and waits, killing on `timeout`, `private_tmp` over size, or
+/// (`cpu_limit`) cgroup CPU time over `cpu_time_limit` (RLIMIT_CPU only catches one process).
 ///
-/// Waits in poll() on the pipes, and reads each one until it's empty when
-/// it has data. It used to read 4 KB per stream every 10 ms, about 400 KB/s:
-/// a program printing 10 MB took 25 s, and ran out a 10 s time limit.
+/// Polls the pipes and drains each when ready; fixed 4 KB reads per 10 ms starved large output.
 pub(super) fn wait_with_timeout(
     pid: nix::unistd::Pid,
     reads: ChildReads,
@@ -88,11 +79,8 @@ pub(super) fn wait_with_timeout(
     let mut open = [true, true];
     let mut killed_by_timeout = false;
     let mut killed_by_tmp_limit = false;
-    // Total across the whole cgroup, not just `pid` itself: RLIMIT_CPU
-    // (set in the child) is per process, so a program that forks could use
-    // close to N times cpu_time_limit before any one of them individually
-    // hit it. cpu.stat's usage_usec works without the "cpu" controller
-    // enabled (confirmed for real), so this needs only a cgroup to exist.
+    // Whole-cgroup total: RLIMIT_CPU is per process, so forking evades it. cpu.stat works
+    // without the cpu controller.
     let mut killed_by_cpu_limit = false;
     let kill = || {
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
@@ -113,8 +101,7 @@ pub(super) fn wait_with_timeout(
     }
 
     loop {
-        // Wait up to 10 ms for output, or for room to write stdin; the
-        // wait4/timeout checks below run at least that often.
+        // Up to 10 ms; the timeout checks below run at least that often.
         let mut polled: Vec<libc::pollfd> = fds
             .iter()
             .zip(open)
@@ -136,21 +123,14 @@ pub(super) fn wait_with_timeout(
             libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, 10);
         }
 
-        // Write more stdin, non-blocking, interleaved with draining
-        // stdout/stderr below — not all upfront. A program that echoes
-        // input to output as it goes (e.g. `cat`) can block on writing its
-        // own output once enough of it is buffered and unread, which stops
-        // it reading more stdin in turn; writing stdin to completion
-        // before anything reads stdout/stderr deadlocks against exactly
-        // that, confirmed for real with input over the output pipe's size.
+        // Interleaved with draining: writing all stdin first deadlocks against a program (e.g.
+        // `cat`) blocked on its full output pipe.
         if let Some((fd, data)) = &mut stdin {
             if !data.is_empty() {
                 match write_raw(fd.as_raw_fd(), data) {
                     Ok(n) if n > 0 => *data = &data[n..],
                     Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EINTR) => {}
-                    // Either wrote 0 (shouldn't happen for non-empty data)
-                    // or the reader's gone (e.g. EPIPE) — nothing more to
-                    // usefully write either way.
+                    // Wrote 0 or reader gone (EPIPE): stop.
                     _ => *data = &[],
                 }
             }
@@ -165,8 +145,7 @@ pub(super) fn wait_with_timeout(
             }
         }
 
-        // wait4, not waitpid: its rusage is where cpu_time/peak_memory come
-        // from when there's no cgroup to read them from.
+        // wait4 for rusage: the cpu_time/peak_memory source without a cgroup.
         let mut status: libc::c_int = 0;
         let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
         let ret = unsafe { libc::wait4(pid.as_raw(), &mut status, libc::WNOHANG, &mut rusage) };
@@ -183,15 +162,13 @@ pub(super) fn wait_with_timeout(
         let exited = ret == pid.as_raw() && libc::WIFEXITED(status);
         let signaled = ret == pid.as_raw() && libc::WIFSIGNALED(status);
         if exited || signaled {
-            // What's left in the pipes. A descendant that inherited them can
-            // keep them open, so not to EOF: only what's there now.
+            // Drain what's there now; a descendant may hold the pipes open, so not to EOF.
             for i in 0..2 {
                 if open[i] {
                     drain(fds[i], &mut captured[i]);
                 }
             }
             let (code, signal) = if exited {
-                // Died to a signal inside the sandbox? The shim says so.
                 (
                     libc::WEXITSTATUS(status),
                     reported_signal(signal_pipe.as_raw_fd()),
@@ -227,20 +204,14 @@ pub(super) fn wait_with_timeout(
             && !killed_by_cpu_limit
         {
             let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
-            // Margin past limit_usec so RLIMIT_CPU (same threshold, kernel
-            // side) wins for a single process; this check is for what it
-            // can't catch, many processes each under budget. Without the
-            // margin this poll can race ahead of RLIMIT_CPU under load --
-            // confirmed for real.
+            // Margin so RLIMIT_CPU wins for a single process; without it this poll races ahead under load.
             if used > limit_usec + CPU_LIMIT_GRACE_USEC {
                 kill();
                 killed_by_cpu_limit = true;
             }
         }
         if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {
-            // The child is init of its PID namespace: when it dies, the
-            // kernel kills everything else in there. The process group is
-            // killed too, just in case.
+            // Child is PID-ns init: its death kills the rest. Kill the group too, just in case.
             kill();
             killed_by_timeout = true;
         }

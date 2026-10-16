@@ -1,9 +1,4 @@
-//! P1: Concurrency Tests
-//!
-//! Tests for:
-//! - Thread-safe sandbox ID generation
-//! - Parallel execution safety
-//! - Cgroup name collision prevention (Linux)
+//! Concurrency: unique IDs, parallel runs, cgroup names, proxy ports, fd isolation.
 
 use nanosandbox::Sandbox;
 use std::collections::HashSet;
@@ -11,14 +6,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Test: Sandbox IDs should be unique across threads
 #[test]
 #[cfg(unix)]
 fn test_sandbox_id_unique_across_threads() {
     let ids: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
     let mut handles = vec![];
 
-    // Spawn 20 threads, each creating 5 sandboxes
     for _ in 0..20 {
         let _ids_clone = Arc::clone(&ids);
         let handle = thread::spawn(move || {
@@ -32,7 +25,6 @@ fn test_sandbox_id_unique_across_threads() {
         handles.push(handle);
     }
 
-    // Collect all IDs
     for handle in handles {
         let local_ids = handle.join().unwrap();
         let mut ids_guard = ids.lock().unwrap();
@@ -45,18 +37,15 @@ fn test_sandbox_id_unique_across_threads() {
         }
     }
 
-    // Should have 100 unique IDs
     assert_eq!(ids.lock().unwrap().len(), 100);
 }
 
-/// Test: Parallel sandbox execution should not interfere with each other
 #[test]
 #[cfg(unix)]
 fn test_parallel_execution_isolation() {
     let results: Arc<Mutex<Vec<(usize, String)>>> = Arc::new(Mutex::new(vec![]));
     let mut handles = vec![];
 
-    // Run 10 sandboxes in parallel, each outputting a unique value
     for i in 0..10 {
         let results_clone = Arc::clone(&results);
         let handle = thread::spawn(move || {
@@ -75,12 +64,10 @@ fn test_parallel_execution_isolation() {
         handles.push(handle);
     }
 
-    // Wait for all to complete
     for handle in handles {
         handle.join().unwrap();
     }
 
-    // Verify each sandbox got its own unique value
     let results = results.lock().unwrap();
     for (expected, actual) in results.iter() {
         assert_eq!(
@@ -93,7 +80,6 @@ fn test_parallel_execution_isolation() {
     }
 }
 
-/// Test: Cgroup names should not conflict between parallel sandboxes (Linux)
 #[test]
 #[cfg(target_os = "linux")]
 fn test_cgroup_no_conflicts() {
@@ -101,7 +87,6 @@ fn test_cgroup_no_conflicts() {
 
     let mut handles = vec![];
 
-    // Run sandboxes with memory limits (which create cgroups) in parallel
     for i in 0..10 {
         let handle = thread::spawn(move || {
             let sandbox = Sandbox::builder()
@@ -114,14 +99,12 @@ fn test_cgroup_no_conflicts() {
                 let result = sandbox.run("echo", &[&i.to_string()]);
                 result.is_ok()
             } else {
-                // Cgroup creation might fail without root
                 true
             }
         });
         handles.push(handle);
     }
 
-    // All should complete without cgroup conflicts
     let mut successes = 0;
     for handle in handles {
         if handle.join().unwrap() {
@@ -129,14 +112,12 @@ fn test_cgroup_no_conflicts() {
         }
     }
 
-    // At least some should succeed (might fail without cgroup permissions)
     assert!(
         successes >= 1 || !Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
         "No sandboxes succeeded with cgroups"
     );
 }
 
-/// Test: Concurrent proxy operations should not conflict
 #[test]
 #[cfg(unix)]
 fn test_concurrent_proxy_no_conflicts() {
@@ -145,7 +126,6 @@ fn test_concurrent_proxy_no_conflicts() {
     }
     let mut handles = vec![];
 
-    // Run multiple sandboxes with proxied network in parallel
     for _ in 0..5 {
         let handle = thread::spawn(move || {
             let sandbox = Sandbox::builder()
@@ -156,20 +136,15 @@ fn test_concurrent_proxy_no_conflicts() {
 
             match sandbox {
                 Ok(s) => {
-                    // Just verify proxy setup works
                     let result = s.run("sh", &["-c", "echo $http_proxy"]);
                     result.is_ok() && result.unwrap().stdout.contains("127.0.0.1")
                 }
-                Err(_) => {
-                    // Proxy port might conflict - this is what we're testing
-                    false
-                }
+                Err(_) => false,
             }
         });
         handles.push(handle);
     }
 
-    // Collect results
     let mut successes = 0;
     for handle in handles {
         if handle.join().unwrap() {
@@ -177,14 +152,12 @@ fn test_concurrent_proxy_no_conflicts() {
         }
     }
 
-    // All should succeed (each gets unique proxy port)
     assert_eq!(
         successes, 5,
         "Some concurrent proxy setups failed - possible port conflict"
     );
 }
 
-/// Test: Rapid creation and destruction should not cause races
 #[test]
 #[cfg(unix)]
 fn test_rapid_create_destroy() {
@@ -199,12 +172,10 @@ fn test_rapid_create_destroy() {
                 .unwrap();
 
             let _ = sandbox.run("true", &[]);
-            // Sandbox drops here
         });
         handles.push(handle);
     }
 
-    // All should complete without panic
     for handle in handles {
         handle
             .join()
@@ -212,7 +183,6 @@ fn test_rapid_create_destroy() {
     }
 }
 
-/// Test: Shared state (if any) should be properly synchronized
 #[test]
 #[cfg(unix)]
 fn test_no_data_races() {
@@ -238,7 +208,6 @@ fn test_no_data_races() {
         handle.join().unwrap();
     }
 
-    // All should succeed
     assert_eq!(
         success_count.load(Ordering::SeqCst),
         20,
@@ -246,7 +215,6 @@ fn test_no_data_races() {
     );
 }
 
-/// Test: Timeout handling should work correctly under contention
 #[test]
 #[cfg(unix)]
 fn test_timeout_under_contention() {
@@ -254,11 +222,7 @@ fn test_timeout_under_contention() {
 
     for _ in 0..10 {
         let handle = thread::spawn(|| {
-            // 1s, not the tighter 200ms this used to be: 10 of these poll
-            // loops competing for CPU on a loaded, shared CI runner need
-            // more scheduling margin than a quiet dev machine does. Still
-            // two orders of magnitude under the 10s `sleep`, so it still
-            // catches a real "timeout not enforced at all" regression.
+            // 1s, not 200ms: 10 polling loops on a loaded CI runner need margin; still far under the 10s sleep.
             let sandbox = Sandbox::builder()
                 .working_dir("/tmp")
                 .wall_time_limit(Duration::from_secs(1))
@@ -284,13 +248,11 @@ fn test_timeout_under_contention() {
     }
 }
 
-/// Test: Process cleanup should work when many sandboxes run in parallel
 #[test]
 #[cfg(unix)]
 fn test_parallel_cleanup() {
     use std::process::Command;
 
-    // Run a few sandboxes and verify they don't leave zombies
     let mut handles = vec![];
 
     for _ in 0..10 {
@@ -311,9 +273,7 @@ fn test_parallel_cleanup() {
         handle.join().unwrap();
     }
 
-    // Poll for cleanup rather than a single fixed sleep: a loaded, shared CI
-    // runner can take longer to reap than a dev machine, and this only cares
-    // that it finishes eventually, not how fast.
+    // Poll for cleanup: a loaded CI runner reaps slower; only eventual completion matters.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let zombies = loop {
         let output = Command::new("ps").args(["aux"]).output().unwrap();
@@ -337,9 +297,7 @@ fn test_parallel_cleanup() {
     );
 }
 
-/// Test: a sandboxed program gets only its own stdin/stdout/stderr, even
-/// while other runs on other threads have their pipes open. They used to
-/// leak in, letting one sandbox read and write another's I/O.
+/// A run gets only its own stdin/stdout/stderr while other threads' pipes are open; they used to leak in.
 #[test]
 #[cfg(target_os = "linux")]
 fn test_no_fds_leak_between_concurrent_runs() {
@@ -351,11 +309,8 @@ fn test_no_fds_leak_between_concurrent_runs() {
             .unwrap(),
     );
 
-    // Baseline, run once up front rather than hardcoding ["0","1","2","3"]:
-    // some CI runners hold an ambient fd open in every child regardless of
-    // anything this crate does (observed on GitHub Actions' Linux runner,
-    // consistently the same fd numbers every time), and that must not be
-    // mistaken for cross-talk between concurrent runs.
+    // Baseline measured up front: some CI runners (GitHub Actions Linux) hold an ambient fd in every
+    // child, which isn't cross-talk.
     let baseline = sandbox
         .run_with_input(
             "sh",

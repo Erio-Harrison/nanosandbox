@@ -1,19 +1,15 @@
-//! Gets the proxy into a Proxied sandbox's own network namespace: a
-//! socketpair made before clone(), handed to the child side, which binds
-//! the listener there and sends it back for the parent's proxy to accept on.
+//! Hands the proxy a listener bound inside the sandbox's netns, via a socketpair made before clone().
 
 use crate::builder::{NetworkMode, SandboxConfig};
 use crate::error::{Result, SandboxError};
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-/// Refuses, at build() time, mount setups that can only fail or silently do
-/// something other than asked once the sandbox runs.
+/// Refuses mount setups that can only fail or misbehave at run time.
 pub(super) fn check_network(config: &SandboxConfig) -> Result<()> {
     if matches!(config.network_mode, NetworkMode::Proxied { .. })
         && super::userns_restricted_by_apparmor()
     {
-        // Falling back to the host network would make the whitelist
-        // advisory again: any program ignoring HTTP_PROXY gets straight out.
+        // Host-network fallback would make the whitelist advisory.
         return Err(SandboxError::Unsupported {
             setting: "allow_network()".into(),
             reason: "it needs to bring up loopback in the sandbox's own network namespace, \
@@ -26,11 +22,8 @@ pub(super) fn check_network(config: &SandboxConfig) -> Result<()> {
     Ok(())
 }
 
-/// Gets the proxy into a Proxied sandbox's own network namespace, where
-/// nothing else is reachable. The child binds the listener in there -- the
-/// parent can't enter that namespace without CAP_SYS_ADMIN in its own --
-/// and hands it back over a socketpair made before clone(). The parent's
-/// proxy then accepts on it, while connecting out from its own network.
+/// Gets the proxy into a Proxied sandbox's netns. The child binds the listener there (the
+/// parent lacks CAP_SYS_ADMIN in it) and returns it over a socketpair made before clone().
 pub(super) struct ProxyLink {
     port: u16,
     parent: OwnedFd,
@@ -44,9 +37,7 @@ pub(super) struct ProxyLinkChild {
     fd: RawFd,
 }
 
-/// Fits one cmsghdr carrying a single fd (CMSG_SPACE(sizeof(int)) is 24 on
-/// 64-bit Linux), aligned like one. A stack buffer, so building or reading
-/// it never allocates.
+/// One cmsghdr carrying a single fd (24 bytes on 64-bit Linux); stack buffer, no allocation.
 #[repr(C, align(8))]
 struct FdControl([u8; 32]);
 
@@ -79,14 +70,12 @@ impl ProxyLink {
         }
     }
 
-    /// Parent, right after clone(): drop our copy of the child's end, so
-    /// `receive` sees EOF if the child exits or execs without sending.
+    /// Parent, after clone(): drops the child's end so `receive` sees EOF if the child dies silently.
     pub(super) fn close_child_end(&mut self) {
         self.child = None;
     }
 
-    /// The child's listener, or None if it never sent one -- it failed, and
-    /// its stderr says why.
+    /// The child's listener, or None if it never sent one (see its stderr).
     pub(super) fn receive(&self) -> Option<std::net::TcpListener> {
         let mut byte = 0u8;
         let mut iov = libc::iovec {
@@ -125,8 +114,7 @@ impl ProxyLink {
 }
 
 impl ProxyLinkChild {
-    /// Runs in the child between clone() and exec(): raw syscalls only.
-    /// The error names the step that failed, as a static string.
+    /// Child, between clone() and exec(): raw syscalls only.
     pub(super) fn bind_and_send(self) -> std::result::Result<(), &'static str> {
         unsafe {
             // A new network namespace's loopback starts down.

@@ -86,9 +86,7 @@ fn test_stdin_input() {
     }
 }
 
-/// HOME points at the run's private temp directory, so programs that keep
-/// caches and config under it (npm, pip, git, ...) have somewhere to write
-/// instead of looking the user up and finding a home they can't use.
+/// HOME is the run's private temp dir, so npm/pip/git have somewhere to write.
 #[test]
 #[cfg(unix)]
 fn test_home_is_the_private_temp_directory() {
@@ -111,10 +109,8 @@ fn test_home_is_the_private_temp_directory() {
     assert_eq!(lines[2], "writable");
 }
 
-/// A command killed by a signal reports 128 + signal as its exit code and
-/// the signal itself, the same on every platform (macOS used to say -1, and
-/// Linux, with its init shim, left `signal` out). A program that only exits
-/// with that number isn't mistaken for one.
+/// A signal-killed command reports 128 + signal as exit code plus `signal`, on every platform;
+/// a program merely exiting with that number isn't mistaken for it.
 #[test]
 #[cfg(unix)]
 fn test_killed_by_a_signal_reports_128_plus_the_signal() {
@@ -250,7 +246,6 @@ fn test_binary_output() {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Output some binary data
         let result = sandbox
             .run("sh", &["-c", "printf '\\x00\\x01\\x02'"])
             .unwrap();
@@ -280,9 +275,7 @@ fn test_clear_env() {
     assert_eq!(result.stdout.trim(), "from-host set");
 }
 
-/// A lot of output comes back quickly, and past max_output it's cut off,
-/// flagged, while the program still runs to the end. It used to be read at
-/// about 400 KB/s on Linux, with no limit.
+/// Fast, large output is cut at max_output and flagged while the program runs to the end.
 #[test]
 #[cfg(unix)]
 fn test_large_output_fast_and_capped() {
@@ -290,7 +283,6 @@ fn test_large_output_fast_and_capped() {
         .wall_time_limit(std::time::Duration::from_secs(30))
         .build()
         .unwrap();
-    // 24 MB on stdout, past the 16 MB default.
     let start = std::time::Instant::now();
     let result = sandbox
         .run(
@@ -301,10 +293,7 @@ fn test_large_output_fast_and_capped() {
             ],
         )
         .unwrap();
-    // Generous margin: this is checking that capped output doesn't create
-    // backpressure that stalls the producer, not a tight perf budget -- a
-    // real regression here would be orders of magnitude slower, not just a
-    // loaded CI runner's variance.
+    // Generous margin: checks capped output doesn't stall the producer, not a perf budget.
     assert!(
         start.elapsed() < std::time::Duration::from_secs(25),
         "{:?}",
@@ -339,15 +328,10 @@ fn test_sigpipe_default() {
     assert_eq!(result.stderr, "", "SIGPIPE ignored in the sandbox");
 }
 
-// A missing command: see test_error_command_not_found in
-// tests/integration/error_handling.rs, which asserts the actual public
-// contract (Err(SandboxError::CommandNotFound), not Ok() with exit 127 --
-// that was itself the bug this file's version of the test used to assert).
+// Missing command: see test_error_command_not_found in error_handling.rs.
 
-/// With no stdin given, the command gets /dev/null, not this process's own
-/// stdin: it could otherwise read it, and a flag it set on it (node puts
-/// its stdin in non-blocking mode) would apply to this process's reads too,
-/// since they share the open file description.
+/// No stdin means /dev/null, not this process's stdin: a flag set on a shared one
+/// (node's non-blocking mode) would leak into our reads.
 #[test]
 #[cfg(unix)]
 fn test_the_command_does_not_get_the_hosts_stdin() {
