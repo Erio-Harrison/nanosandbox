@@ -188,7 +188,7 @@ pub fn hide_home(self) -> Self
 By default the sandbox can read everything except credentials in the home
 directory: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`,
 `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`,
-`~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials*`, shell and
+`~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.env`, shell and
 REPL histories, keyrings and browser profiles. Toolchains, package caches and
 projects in the home directory stay readable, so builds work.
 

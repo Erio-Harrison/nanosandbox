@@ -26,6 +26,7 @@ const SECRETS: &[&str] = &[
     ".gem/credentials",
     ".terraform.d/credentials.tfrc.json",
     ".vault-token",
+    ".env",
     ".password-store",
     ".local/share/keyrings",
     ".mozilla",
