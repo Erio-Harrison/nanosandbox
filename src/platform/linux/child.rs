@@ -60,6 +60,13 @@ pub(super) struct ChildSetup {
 }
 
 impl ChildSetup {
+    /// The command will see the host's `/proc`: say so on stderr and to the host, which then
+    /// reports `proc_isolated: false` (see wait::read_reports).
+    fn report_no_private_proc(&self) {
+        let _ = write_raw(2, b"Failed to mount /proc\n");
+        let _ = write_raw(self.signal_write, &[0]);
+    }
+
     /// Runs in the child between clone() and exec(): see the module doc.
     pub(super) fn run(&self) -> isize {
         // New session (and so process group, for killpg): no controlling terminal, so the command
@@ -150,12 +157,10 @@ impl ChildSetup {
             };
             match plan.apply() {
                 Err(step) if plan.requested() => return fatal(step),
-                Err(_) => {
-                    let _ = write_raw(2, b"Failed to mount /proc\n");
-                }
+                Err(_) => self.report_no_private_proc(),
                 Ok(()) => {
                     if !plan.mount_proc() {
-                        let _ = write_raw(2, b"Failed to mount /proc\n");
+                        self.report_no_private_proc();
                     }
                     if let Err(step) = plan.enter_rootfs() {
                         return fatal(step);

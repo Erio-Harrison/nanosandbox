@@ -117,6 +117,12 @@ that's not what this protects. Run them in separate sandboxes.
 
 ### Known gaps
 
+- Where a fresh procfs can't be mounted (under the AppArmor restriction
+  below, or in a container that masks parts of its own `/proc`), the
+  command sees the host's `/proc`: other processes and, for the same user,
+  their `/proc/<pid>/environ`. The run still goes ahead, and
+  `ExecutionResult::proc_isolated` is `false`, so a caller that needs the
+  isolation can refuse the result.
 - Where AppArmor's `unprivileged_userns` profile applies (Ubuntu 23.10+,
   unprivileged and unconfined caller), nothing can be mounted, so
   `/var/tmp` and `/dev/shm` remain the host's real, shared, persistent

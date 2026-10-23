@@ -369,6 +369,7 @@ impl PlatformExecutor for LinuxExecutor {
             killed_by_tmp_limit,
             killed_by_cpu_limit,
             signal,
+            proc_mount_failed,
             rusage,
             output_truncated,
         } = wait_with_timeout(
@@ -437,7 +438,7 @@ impl PlatformExecutor for LinuxExecutor {
             cpu_time,
             blocked_hosts,
             output_truncated,
-            proc_isolated: !userns_restricted,
+            proc_isolated: !userns_restricted && !proc_mount_failed,
         })
     }
 

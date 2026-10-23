@@ -22,7 +22,11 @@ fn test_pid_namespace_isolation() {
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
 
     let result = sandbox.run("cat", &["/proc/1/cmdline"]).unwrap();
-    assert!(!result.stdout.contains("systemd"));
+    // Where a private /proc can't be mounted, the result has to say the host's is visible.
+    assert!(
+        !result.stdout.contains("systemd") || !result.proc_isolated,
+        "host's /proc visible but proc_isolated is true"
+    );
 }
 
 #[test]

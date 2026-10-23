@@ -20,6 +20,8 @@ pub(super) struct Waited {
     pub(super) killed_by_tmp_limit: bool,
     pub(super) killed_by_cpu_limit: bool,
     pub(super) signal: Option<i32>,
+    /// The init shim reported that it couldn't mount a private `/proc`.
+    pub(super) proc_mount_failed: bool,
     pub(super) rusage: libc::rusage,
     pub(super) output_truncated: bool,
 }
@@ -32,13 +34,18 @@ pub(super) struct ChildReads {
     pub(super) signal: OwnedFd,
 }
 
-/// The signal the init shim reported on `fd`, if any (one byte written just before exit).
-fn reported_signal(fd: RawFd) -> Option<i32> {
-    let mut byte = [0u8; 1];
-    match read_raw(fd, &mut byte) {
-        Ok(1) if (1..=64).contains(&byte[0]) => Some(i32::from(byte[0])),
-        _ => None,
-    }
+/// What the init shim reported on `fd`: a 0 byte if it couldn't mount a private `/proc`
+/// (before exec), then a signal number if the command died by one (just before exit).
+fn read_reports(fd: RawFd) -> (Option<i32>, bool) {
+    let mut bytes = [0u8; 8];
+    let n = read_raw(fd, &mut bytes).unwrap_or(0);
+    let bytes = &bytes[..n];
+    let signal = bytes
+        .iter()
+        .rev()
+        .find(|b| (1..=64).contains(*b))
+        .map(|&b| i32::from(b));
+    (signal, bytes.contains(&0))
 }
 
 /// Reads from `fd` until it would block. False on EOF or error.
@@ -168,11 +175,9 @@ pub(super) fn wait_with_timeout(
                     drain(fds[i], &mut captured[i]);
                 }
             }
+            let (reported, proc_mount_failed) = read_reports(signal_pipe.as_raw_fd());
             let (code, signal) = if exited {
-                (
-                    libc::WEXITSTATUS(status),
-                    reported_signal(signal_pipe.as_raw_fd()),
-                )
+                (libc::WEXITSTATUS(status), reported)
             } else {
                 let sig = libc::WTERMSIG(status);
                 (128 + sig, Some(sig))
@@ -187,6 +192,7 @@ pub(super) fn wait_with_timeout(
                 killed_by_tmp_limit,
                 killed_by_cpu_limit,
                 signal,
+                proc_mount_failed,
                 rusage,
                 output_truncated,
             });
@@ -215,5 +221,25 @@ pub(super) fn wait_with_timeout(
             kill();
             killed_by_timeout = true;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reports(bytes: &[u8]) -> (Option<i32>, bool) {
+        let (read, write) = nix::unistd::pipe().unwrap();
+        nix::unistd::write(&write, bytes).unwrap();
+        drop(write);
+        read_reports(read.as_raw_fd())
+    }
+
+    #[test]
+    fn test_reports_carry_a_failed_proc_mount_and_the_signal() {
+        assert_eq!(reports(&[]), (None, false));
+        assert_eq!(reports(&[15]), (Some(15), false));
+        assert_eq!(reports(&[0]), (None, true));
+        assert_eq!(reports(&[0, 9]), (Some(9), true));
     }
 }

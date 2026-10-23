@@ -43,7 +43,7 @@ pub struct ExecutionResult {
     /// stdout or stderr exceeded `max_output`; the rest was dropped.
     pub output_truncated: bool,
 
-    /// Whether the sandbox got its own `/proc`. False only on Linux under AppArmor's `unprivileged_userns` restriction (see `docs/platform-linux.md`), which also skips the private hostname.
+    /// Whether the sandbox got its own `/proc`. False on Linux under AppArmor's `unprivileged_userns` restriction (see `docs/platform-linux.md`), which also skips the private hostname, or where mounting a fresh procfs failed (e.g. a container that masks parts of its `/proc`); the command then sees the host's.
     pub proc_isolated: bool,
 
     /// Hosts the `allow_network` proxy refused, sorted: not allowlisted, or resolving only to non-public addresses.

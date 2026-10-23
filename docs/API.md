@@ -412,7 +412,7 @@ pub struct ExecutionResult {
     pub cpu_time: Option<Duration>,    // user + system
     pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
     pub output_truncated: bool,        // stdout or stderr went past max_output
-    pub proc_isolated: bool,           // Linux: false under AppArmor's userns restriction
+    pub proc_isolated: bool,           // Linux: false where the sandbox sees the host's /proc
 }
 ```
 
