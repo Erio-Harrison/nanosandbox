@@ -201,6 +201,12 @@ linked out from under the rule either. On Linux that takes a mount over it
 where AppArmor denies mounting, like `read_only` inside a writable directory;
 a path the config names inside such a denied path is refused too.
 
+`.git/hooks` inside a `writable` directory is kept read-only the same way, so a
+command can't plant a hook the host's git would run later (resolving a `.git`
+file's `gitdir:` pointer for worktrees). `allow_vcs_hook_writes()` turns this
+off. On Linux it needs a mount, so it's absent under the AppArmor restriction;
+on macOS it always applies.
+
 #### `working_dir`
 
 ```rust

@@ -131,3 +131,71 @@ fn test_credentials_unreadable_by_default() {
         file.display()
     );
 }
+
+/// `.git/hooks` in a writable directory can't be written, replaced or moved out of the way, so a
+/// hook can't be planted for the host's git to run; the rest of the workspace stays writable.
+/// `allow_vcs_hook_writes()` turns it off.
+#[test]
+#[cfg(unix)]
+fn test_git_hooks_in_a_writable_dir_are_protected() {
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(dir.path()) {
+        return;
+    }
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
+    std::fs::write(ws.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+    std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
+
+    // On Linux the protection is a read-only mount; where mounting is refused (AppArmor) it's
+    // best-effort and absent, so there's nothing to check there.
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .working_dir(ws)
+        .writable(ws)
+        .build()
+        .unwrap();
+    for cmd in [
+        "echo x > .git/hooks/pre-commit",
+        "echo x > .git/hooks/post-merge",
+        "rm .git/hooks/pre-commit",
+        "mv .git/hooks .git/hooks.bak",
+        "mv .git h && echo x > h/hooks/evil",
+    ] {
+        let r = sandbox.run("sh", &["-c", cmd]).unwrap();
+        assert!(
+            !r.success(),
+            "{cmd}: succeeded (exit {})\n{}",
+            r.exit_code,
+            r.stderr
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(ws.join(".git/hooks/pre-commit")).unwrap(),
+        "#!/bin/sh\n"
+    );
+    // The workspace outside .git/hooks is still writable.
+    let r = sandbox
+        .run(
+            "sh",
+            &["-c", "echo ok > file && echo y >> .git/config && cat file"],
+        )
+        .unwrap();
+    assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
+
+    let off = Sandbox::builder()
+        .working_dir(ws)
+        .writable(ws)
+        .allow_vcs_hook_writes()
+        .build()
+        .unwrap();
+    let r = off
+        .run(
+            "sh",
+            &["-c", "echo x > .git/hooks/pre-commit && echo wrote"],
+        )
+        .unwrap();
+    assert_eq!(r.stdout.trim(), "wrote", "{}", r.stderr);
+}

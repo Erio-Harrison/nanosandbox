@@ -144,15 +144,22 @@ impl MacOSExecutor {
         }
 
         // A read_only path in a writable root loses write again (later deny wins); it and its
-        // ancestors can't be removed or renamed, or a symlink could stand in for it.
-        let mut narrowed = String::from("; read_only inside a writable root\n");
-        let mut n = 0;
-        for m in config
+        // ancestors can't be removed or renamed, or a symlink could stand in for it. `.git/hooks`
+        // is protected the same way, so a hook can't be written for the host's git to run.
+        let narrow: Vec<PathBuf> = config
             .mounts
             .iter()
             .filter(|m| m.permission == Permission::ReadOnly)
-        {
-            let path = resolve(&m.target);
+            .map(|m| resolve(&m.target))
+            .chain(
+                read_rules::vcs_protected_paths(config)
+                    .iter()
+                    .map(|p| resolve(p)),
+            )
+            .collect();
+        let mut narrowed = String::from("; read_only inside a writable root\n");
+        let mut n = 0;
+        for path in narrow {
             if !roots.iter().any(|r| path != *r && path.starts_with(r)) {
                 continue;
             }

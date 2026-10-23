@@ -2,7 +2,7 @@
 //! all of home with `hide_home`. Config-granted paths stay readable inside those. The rest of
 //! the fs stays readable so toolchains and projects work; the network settings limit egress.
 
-use crate::builder::SandboxConfig;
+use crate::builder::{Permission, SandboxConfig};
 use std::path::{Path, PathBuf};
 
 /// Under home: credentials, tokens, keys, shell histories and browser profiles.
@@ -137,6 +137,47 @@ pub(crate) fn allowed_roots(denied: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     walk(Path::new("/"), denied, &mut out);
     out
+}
+
+/// Existing `.git/hooks` directories inside writable, caller-named dirs, which the sandbox is
+/// kept from writing unless `allow_vcs_hook_writes`. A hook written there runs on the host the
+/// next time the user runs git. `.git` may be a file pointing elsewhere (worktree/submodule).
+pub(crate) fn vcs_protected_paths(config: &SandboxConfig) -> Vec<PathBuf> {
+    if !config.protect_vcs_hooks {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for m in &config.mounts {
+        if m.permission != Permission::ReadWrite || m.source != m.target {
+            continue;
+        }
+        // Rooted at the mount target as given, so it lines up with the writable areas each backend
+        // compares against (Linux: raw; macOS resolves both).
+        if let Some(git_dir) = resolve_git_dir(&m.target) {
+            let hooks = git_dir.join("hooks");
+            if hooks.is_dir() && !out.contains(&hooks) {
+                out.push(hooks);
+            }
+        }
+    }
+    out
+}
+
+/// The git directory for `workspace`: `<workspace>/.git` if a directory, or the `gitdir:` it
+/// points at if a file (git worktrees and submodules use a `.git` file).
+fn resolve_git_dir(workspace: &Path) -> Option<PathBuf> {
+    let dot_git = workspace.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    let pointer = std::fs::read_to_string(&dot_git).ok()?;
+    let target = pointer.lines().next()?.strip_prefix("gitdir:")?.trim();
+    let target = Path::new(target);
+    Some(if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        workspace.join(target)
+    })
 }
 
 #[cfg(test)]

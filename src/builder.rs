@@ -60,6 +60,8 @@ pub(crate) struct SandboxConfig {
     pub(crate) deny_read: Vec<PathBuf>,
     /// [`SandboxBuilder::hide_home`].
     pub(crate) hide_home: bool,
+    /// [`SandboxBuilder::allow_vcs_hook_writes`]: protect `.git/hooks` in writable dirs.
+    pub(crate) protect_vcs_hooks: bool,
 
     pub(crate) memory_limit: Option<u64>,
     pub(crate) cpu_limit: Option<f64>,
@@ -189,6 +191,7 @@ impl Default for SandboxConfig {
             // Windows has no file system isolation to make it private with.
             private_tmp: (!cfg!(windows)).then_some(DEFAULT_PRIVATE_TMP_SIZE),
             shared_tmp: true,
+            protect_vcs_hooks: true,
             working_dir: PathBuf::from("/"),
             rootfs: None,
             deny_read: Vec::new(),
@@ -329,6 +332,15 @@ impl SandboxBuilder {
     /// pyenv) then need `read_only`.
     pub fn hide_home(mut self) -> Self {
         self.config.hide_home = true;
+        self
+    }
+
+    /// Let the sandbox write `.git/hooks` inside a [`writable`](Self::writable) directory. Off by
+    /// default: a command that writes a hook there would otherwise run on the host the next time
+    /// the user runs `git`. On Linux the protection is a read-only mount, so it's absent where
+    /// mounting isn't possible (AppArmor `unprivileged_userns`); on macOS it always applies.
+    pub fn allow_vcs_hook_writes(mut self) -> Self {
+        self.config.protect_vcs_hooks = false;
         self
     }
 
