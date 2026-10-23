@@ -121,6 +121,19 @@ that's not what this protects. Run them in separate sandboxes.
 - `.git/hooks` protection inside a writable directory is a read-only mount, so
   under the AppArmor restriction (where nothing can be mounted) it's absent and
   a command can write there. macOS, which doesn't need a mount, is unaffected.
+- Without a mount (so: no `rootfs`, or under the AppArmor restriction), a
+  command can change the metadata -- mode, owner, timestamps, xattrs -- of
+  files outside its writable areas that its uid owns or may change. Landlock
+  has no right for these and seccomp can't see the path, so only a read-only
+  mount (which needs mounting) stops them; `chmod -R`, say, could widen the
+  caller's own files. The contents still can't be written. macOS denies these
+  by default (its writes are default-deny).
+- Without a mount, the host's `/dev` is the sandbox's: a command can see and,
+  for device nodes its uid may write, write to them, including another of the
+  caller's own terminals (`/dev/pts/N`). It cannot inject input into them
+  (`TIOCSTI` needs a controlling terminal, which the new session drops). A
+  private `/dev` with its own `devpts` needs mounting; macOS's profile scopes
+  device access instead.
 - Where a fresh procfs can't be mounted (under the AppArmor restriction
   below, or in a container that masks parts of its own `/proc`), the
   command sees the host's `/proc`: other processes and, for the same user,
