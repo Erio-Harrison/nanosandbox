@@ -601,7 +601,8 @@ pub(crate) fn invalid_allowlist_entry(entry: &str) -> Option<&'static str> {
 }
 
 /// This machine's own interface addresses: a service bound to all interfaces answers on them
-/// just as on loopback, so they count as non-public.
+/// just as on loopback, so they count as non-public. Enumerated only on Unix; elsewhere this is
+/// always false (loopback and the private ranges are still caught by `is_public`).
 fn is_own_address(ip: IpAddr) -> bool {
     #[cfg(unix)]
     if let Ok(addrs) = nix::ifaddrs::getifaddrs() {
@@ -725,6 +726,9 @@ mod tests {
 
     #[test]
     fn test_own_and_platform_addresses_are_not_public() {
+        // getifaddrs is unix-only; elsewhere own-address isn't enumerated (loopback and the
+        // other non-public ranges are still refused by is_public).
+        #[cfg(unix)]
         assert!(is_own_address("127.0.0.1".parse().unwrap()));
         assert!(!is_public("168.63.129.16".parse().unwrap()));
         assert!(is_public("168.63.129.17".parse().unwrap()));
