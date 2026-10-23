@@ -232,7 +232,10 @@ don't compile calls to them), and Ubuntu's AppArmor userns restriction makes
   `target` must exist on the host, unless it's inside a tmpfs.
 - `tmpfs` mounts an empty tmpfs at any path but `/tmp` (use `private_tmp`).
 - `rootfs` runs in `path` as the root file system. `read_only`/`writable`
-  paths are bound into it at the same path.
+  paths are bound into it at the same path. Symlinks in it resolve as if it
+  were `/`, including while the mounts are set up, so one left there by an
+  earlier run can't point the setup at the host. This needs `openat2(2)`
+  (Linux 5.6); older kernels refuse a rootfs.
 
 ### Resource Limits
 

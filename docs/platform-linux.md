@@ -151,6 +151,12 @@ Every sandbox gets its own mount namespace. In the child, after `clone()`:
 7. With a rootfs: `chdir` into it, `pivot_root(".", ".")`, and detach the old
    root. No `put_old` directory is involved, so sandboxes can share a rootfs.
 
+With a rootfs, every target in steps 5 and 6 is resolved inside it with
+`openat2(RESOLVE_IN_ROOT)`, so a symlink an earlier run left in a writable
+part of it (`data -> /etc`) can't make a `mkdir`, an empty file to bind
+onto, or a mount land on the host. Mounts go to the resolved descriptor
+(`move_mount` onto it, or `/proc/self/fd/N`), never back through the path.
+
 Read-only binds are remounted with `MS_RDONLY`; the kernel ignores that flag
 when a bind mount is first created.
 

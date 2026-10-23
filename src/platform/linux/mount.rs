@@ -38,24 +38,36 @@ pub(super) fn needed_cgroup_controllers(config: &SandboxConfig) -> Vec<&'static 
     needed
 }
 
+/// Where a step acts. `Host` is an absolute host path (no rootfs). `InRoot` is resolved inside
+/// the rootfs with `open_in_root`, so a symlink planted in it can't lead the mkdir, file creation
+/// or mount out onto the host; `rel` is the whole path, `parent`/`name` its split for `mkdirat`.
+enum Target {
+    Host(CString),
+    InRoot {
+        rel: CString,
+        parent: CString,
+        name: CString,
+    },
+}
+
 /// One mount-ns setup step with all paths/options prebuilt (see `MountPlan`).
 enum MountStep {
     /// `mkdir`, EEXIST ignored. Issued per component in order with the mounts, so a target nested
     /// in an earlier mount is created inside it.
-    Mkdir(CString),
+    Mkdir(Target),
     /// Create an empty file to bind a file onto, if absent.
-    Touch(CString),
+    Touch(Target),
     /// `readonly` holds the source's locked flags (nosuid/nodev/noexec) to repeat on the read-only
     /// remount (dropping one fails with EPERM in a userns). `tree` is the detached copy of `source`
     /// taken before any mounting, so sources under a later tmpfs (e.g. /tmp) are still bindable.
     Bind {
         source: CString,
-        target: CString,
+        target: Target,
         readonly: Option<libc::c_ulong>,
         tree: std::cell::Cell<RawFd>,
     },
     Tmpfs {
-        target: CString,
+        target: Target,
         options: CString,
         flags: libc::c_ulong,
     },
@@ -65,6 +77,60 @@ enum MountStep {
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 /// move_mount(2): the source is the fd itself.
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+/// move_mount(2): the target is the fd itself.
+const MOVE_MOUNT_T_EMPTY_PATH: libc::c_uint = 0x40;
+/// openat2(2) resolve flags: scope every lookup to the dirfd as `/`, so an absolute or `..`
+/// symlink can't escape it, and refuse magic links (/proc/*/fd).
+const RESOLVE_IN_ROOT: u64 = 0x10;
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// `openat2(dirfd, path, { flags|O_CLOEXEC, mode, RESOLVE_IN_ROOT|RESOLVE_NO_MAGICLINKS })`.
+/// The fd, or -1 with errno set. With `dirfd` the rootfs, the path resolves as if the rootfs were
+/// `/`, so a symlink planted in it can't redirect the lookup onto the host.
+unsafe fn open_in_root(dirfd: RawFd, path: &CString, flags: libc::c_int, mode: u32) -> RawFd {
+    let how = OpenHow {
+        flags: (flags | libc::O_CLOEXEC) as u64,
+        mode: u64::from(mode),
+        resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+    };
+    unsafe {
+        libc::syscall(
+            libc::SYS_openat2,
+            dirfd,
+            path.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        ) as RawFd
+    }
+}
+
+/// `/proc/self/fd/<fd>` into `buf`, for the few syscalls that take only a path. No allocation.
+fn fd_path(fd: RawFd, buf: &mut [u8; 32]) -> *const libc::c_char {
+    let prefix = b"/proc/self/fd/";
+    buf[..prefix.len()].copy_from_slice(prefix);
+    let mut digits = [0u8; 10];
+    let (mut len, mut n) = (0usize, fd.max(0) as u32);
+    loop {
+        digits[len] = b'0' + (n % 10) as u8;
+        len += 1;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for i in 0..len {
+        buf[prefix.len() + i] = digits[len - 1 - i];
+    }
+    buf[prefix.len() + len] = 0;
+    buf.as_ptr().cast()
+}
 
 /// Everything the child needs to set up its mount ns, built before clone() (no allocation after).
 ///
@@ -73,9 +139,11 @@ const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
 /// (`check_mounts` enforces it at build()).
 pub(super) struct MountPlan {
     rootfs: Option<CString>,
+    /// The rootfs, opened once it's bound onto itself; `InRoot` targets resolve below it.
+    root_fd: std::cell::Cell<RawFd>,
     steps: Vec<MountStep>,
     /// Where a fresh procfs goes, so `/proc` shows the sandbox's own pid namespace.
-    proc_target: CString,
+    proc_target: Target,
 }
 
 impl MountPlan {
@@ -182,7 +250,7 @@ impl MountPlan {
                 }
                 // An empty, read-only directory or file over the denied path.
                 Item::Mask(path, true) => steps.push(MountStep::Tmpfs {
-                    target: path_cstring(path)?,
+                    target: Target::Host(path_cstring(path)?),
                     options: c"size=4k,nr_inodes=1,mode=000".to_owned(),
                     flags: libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
                 }),
@@ -191,7 +259,7 @@ impl MountPlan {
                     let readonly = Some(locked_flags(&source));
                     steps.push(MountStep::Bind {
                         source,
-                        target: path_cstring(path)?,
+                        target: Target::Host(path_cstring(path)?),
                         readonly,
                         tree: std::cell::Cell::new(-1),
                     });
@@ -212,11 +280,16 @@ impl MountPlan {
             }
         }
         let proc_target = match rootfs {
-            Some(rootfs) => path_cstring(&rootfs.join("proc"))?,
-            None => c"/proc".to_owned(),
+            Some(_) => Target::InRoot {
+                rel: c"proc".to_owned(),
+                parent: c".".to_owned(),
+                name: c"proc".to_owned(),
+            },
+            None => Target::Host(c"/proc".to_owned()),
         };
         Ok(Self {
             rootfs: rootfs.map(path_cstring).transpose()?,
+            root_fd: std::cell::Cell::new(-1),
             steps,
             proc_target,
         })
@@ -308,32 +381,152 @@ impl MountPlan {
         target: &Path,
         tmpfs: &[(PathBuf, u64)],
         is_dir: bool,
-    ) -> Result<CString> {
-        let (mut path, below) = match rootfs {
-            Some(rootfs) => (
-                rootfs.to_path_buf(),
-                target.strip_prefix("/").unwrap_or(target),
-            ),
-            None => match tmpfs
-                .iter()
-                .filter(|(t, _)| t != target && target.starts_with(t))
-                .max_by_key(|(t, _)| t.components().count())
-            {
-                Some((t, _)) => (t.clone(), target.strip_prefix(t).expect("checked above")),
-                None => return path_cstring(target),
-            },
+    ) -> Result<Target> {
+        // With a rootfs, targets are relative to it and resolved in it (open_in_root), so each
+        // component's mkdir/touch runs through the resolved parent, never a host path.
+        if rootfs.is_some() {
+            let below = target.strip_prefix("/").unwrap_or(target);
+            let components: Vec<_> = below.components().collect();
+            let mut rel = PathBuf::from(".");
+            let mut last_target = Target::InRoot {
+                rel: c".".to_owned(),
+                parent: c".".to_owned(),
+                name: c".".to_owned(),
+            };
+            for (i, component) in components.iter().enumerate() {
+                let parent = path_cstring(&rel)?;
+                rel.push(component);
+                let name = path_cstring(Path::new(component.as_os_str()))?;
+                let at = Target::InRoot {
+                    rel: path_cstring(&rel)?,
+                    parent: parent.clone(),
+                    name: name.clone(),
+                };
+                steps.push(if i + 1 == components.len() && !is_dir {
+                    MountStep::Touch(at)
+                } else {
+                    MountStep::Mkdir(at)
+                });
+                last_target = Target::InRoot {
+                    rel: path_cstring(&rel)?,
+                    parent,
+                    name,
+                };
+            }
+            return Ok(last_target);
+        }
+        let (mut path, below) = match tmpfs
+            .iter()
+            .filter(|(t, _)| t != target && target.starts_with(t))
+            .max_by_key(|(t, _)| t.components().count())
+        {
+            Some((t, _)) => (t.clone(), target.strip_prefix(t).expect("checked above")),
+            None => return Ok(Target::Host(path_cstring(target)?)),
         };
         let components: Vec<_> = below.components().collect();
         for (i, component) in components.iter().enumerate() {
             path.push(component);
             let last = i + 1 == components.len();
+            let at = Target::Host(path_cstring(&path)?);
             steps.push(if last && !is_dir {
-                MountStep::Touch(path_cstring(&path)?)
+                MountStep::Touch(at)
             } else {
-                MountStep::Mkdir(path_cstring(&path)?)
+                MountStep::Mkdir(at)
             });
         }
-        path_cstring(&path)
+        Ok(Target::Host(path_cstring(&path)?))
+    }
+
+    /// `mkdir`, EEXIST counting as success.
+    unsafe fn mkdir(&self, at: &Target, mode: u32) -> bool {
+        let made = |r: libc::c_int| r == 0 || unsafe { *libc::__errno_location() } == libc::EEXIST;
+        unsafe {
+            match at {
+                Target::Host(path) => made(libc::mkdir(path.as_ptr(), mode)),
+                Target::InRoot { parent, name, .. } => {
+                    let dir = open_in_root(
+                        self.root_fd.get(),
+                        parent,
+                        libc::O_PATH | libc::O_DIRECTORY,
+                        0,
+                    );
+                    if dir < 0 {
+                        return false;
+                    }
+                    let ok = made(libc::mkdirat(dir, name.as_ptr(), mode));
+                    libc::close(dir);
+                    ok
+                }
+            }
+        }
+    }
+
+    /// Creates an empty file if absent.
+    unsafe fn touch(&self, at: &Target) -> bool {
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC;
+        unsafe {
+            let fd = match at {
+                Target::Host(path) => libc::open(path.as_ptr(), flags, 0o644),
+                Target::InRoot { rel, .. } => open_in_root(self.root_fd.get(), rel, flags, 0o644),
+            };
+            if fd < 0 {
+                return false;
+            }
+            libc::close(fd);
+            true
+        }
+    }
+
+    /// Attaches the detached mount `tree` at `at`.
+    unsafe fn move_mount_to(&self, tree: RawFd, at: &Target) -> bool {
+        unsafe {
+            match at {
+                Target::Host(path) => {
+                    libc::syscall(
+                        libc::SYS_move_mount,
+                        tree,
+                        c"".as_ptr(),
+                        libc::AT_FDCWD,
+                        path.as_ptr(),
+                        MOVE_MOUNT_F_EMPTY_PATH,
+                    ) == 0
+                }
+                Target::InRoot { rel, .. } => {
+                    let fd = open_in_root(self.root_fd.get(), rel, libc::O_PATH, 0);
+                    if fd < 0 {
+                        return false;
+                    }
+                    let ok = libc::syscall(
+                        libc::SYS_move_mount,
+                        tree,
+                        c"".as_ptr(),
+                        fd,
+                        c"".as_ptr(),
+                        MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+                    ) == 0;
+                    libc::close(fd);
+                    ok
+                }
+            }
+        }
+    }
+
+    /// Runs `f` with a path for `at`: the host path, or `/proc/self/fd/N` of it resolved inside
+    /// the rootfs (opened afresh, so it reflects mounts made on it since).
+    unsafe fn with_path(&self, at: &Target, f: impl FnOnce(*const libc::c_char) -> bool) -> bool {
+        match at {
+            Target::Host(path) => f(path.as_ptr()),
+            Target::InRoot { rel, .. } => unsafe {
+                let fd = open_in_root(self.root_fd.get(), rel, libc::O_PATH, 0);
+                if fd < 0 {
+                    return false;
+                }
+                let mut buf = [0u8; 32];
+                let ok = f(fd_path(fd, &mut buf));
+                libc::close(fd);
+                ok
+            },
+        }
     }
 
     /// Whether there's anything to mount besides the `/proc` always added.
@@ -367,6 +560,11 @@ impl MountPlan {
                 {
                     return Err("bind mount rootfs");
                 }
+                let fd = libc::open(rootfs, libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC);
+                if fd < 0 {
+                    return Err("open rootfs");
+                }
+                self.root_fd.set(fd);
             }
             // Take every bind's source now, before any tmpfs can cover it.
             for step in &self.steps {
@@ -385,23 +583,15 @@ impl MountPlan {
             }
             for step in &self.steps {
                 match step {
-                    MountStep::Mkdir(path) => {
-                        if libc::mkdir(path.as_ptr(), 0o755) != 0
-                            && *libc::__errno_location() != libc::EEXIST
-                        {
+                    MountStep::Mkdir(at) => {
+                        if !self.mkdir(at, 0o755) {
                             return Err("create mount target");
                         }
                     }
-                    MountStep::Touch(path) => {
-                        let fd = libc::open(
-                            path.as_ptr(),
-                            libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC,
-                            0o644,
-                        );
-                        if fd < 0 {
+                    MountStep::Touch(at) => {
+                        if !self.touch(at) {
                             return Err("create mount target");
                         }
-                        libc::close(fd);
                     }
                     MountStep::Bind {
                         target,
@@ -409,23 +599,19 @@ impl MountPlan {
                         tree,
                         ..
                     } => {
-                        let moved = libc::syscall(
-                            libc::SYS_move_mount,
-                            tree.get(),
-                            c"".as_ptr(),
-                            libc::AT_FDCWD,
-                            target.as_ptr(),
-                            MOVE_MOUNT_F_EMPTY_PATH,
-                        );
+                        let moved = self.move_mount_to(tree.get(), target);
                         libc::close(tree.get());
-                        if moved != 0 {
+                        if !moved {
                             return Err("bind mount");
                         }
                         // MS_RDONLY is ignored at bind creation, only taking effect on remount (a ReadOnly mount
                         // without it was writable on the host).
                         if let Some(locked) = readonly {
                             let flags = libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | locked;
-                            if libc::mount(null, target.as_ptr(), null, flags, null as _) != 0 {
+                            let remounted = self.with_path(target, |path| {
+                                libc::mount(null, path, null, flags, null as _) == 0
+                            });
+                            if !remounted {
                                 return Err("remount bind mount read-only");
                             }
                         }
@@ -437,7 +623,10 @@ impl MountPlan {
                     } => {
                         let tmpfs = c"tmpfs".as_ptr();
                         let options = options.as_ptr() as _;
-                        if libc::mount(tmpfs, target.as_ptr(), tmpfs, *flags, options) != 0 {
+                        let mounted = self.with_path(target, |path| {
+                            libc::mount(tmpfs, path, tmpfs, *flags, options) == 0
+                        });
+                        if !mounted {
                             return Err("mount tmpfs");
                         }
                     }
@@ -450,14 +639,15 @@ impl MountPlan {
     /// Mounts a fresh procfs; best effort. Must precede `enter_rootfs`: the kernel needs a fully
     /// visible proc in the mount ns, and pivoting drops the host's.
     pub(super) fn mount_proc(&self) -> bool {
-        let target = self.proc_target.as_ptr();
         unsafe {
-            if libc::mkdir(target, 0o555) != 0 && *libc::__errno_location() != libc::EEXIST {
+            if !self.mkdir(&self.proc_target, 0o555) {
                 return false;
             }
             let proc = c"proc".as_ptr();
             let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
-            libc::mount(proc, target, proc, flags, std::ptr::null()) == 0
+            self.with_path(&self.proc_target, |path| {
+                libc::mount(proc, path, proc, flags, std::ptr::null()) == 0
+            })
         }
     }
 
@@ -468,6 +658,7 @@ impl MountPlan {
         };
         let rootfs = rootfs.as_ptr();
         unsafe {
+            libc::close(self.root_fd.get());
             // pivot_root(".", ".") then detaching stacks and drops the old root with no put_old dir; a
             // shared `<rootfs>/old_root` raced under concurrent runs. Same approach as runc.
             if libc::chdir(rootfs) != 0 {
@@ -537,6 +728,14 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
         });
     }
     if config.rootfs.is_some() {
+        let probe = unsafe { open_in_root(libc::AT_FDCWD, &c"/".to_owned(), libc::O_PATH, 0) };
+        if probe < 0 {
+            return Err(SandboxError::Unsupported {
+                setting: "rootfs".into(),
+                reason: "setting it up safely needs openat2(2), Linux 5.6+".into(),
+            });
+        }
+        unsafe { libc::close(probe) };
         return check_writable_by_sandbox(config);
     }
     let tmpfs = MountPlan::tmpfs_mounts(config, restricted);
@@ -605,4 +804,34 @@ fn locked_flags(path: &CString) -> libc::c_ulong {
         }
     }
     flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    /// open_in_root keeps an absolute symlink planted in the root from escaping it.
+    #[test]
+    fn test_open_in_root_contains_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::create_dir(outside.path().join("exists")).unwrap();
+        // data -> /abs/outside; RESOLVE_IN_ROOT must read it as <root>/abs/outside.
+        std::os::unix::fs::symlink(outside.path(), root.path().join("data")).unwrap();
+        std::fs::create_dir(root.path().join("real")).unwrap();
+
+        let rfd = std::fs::File::open(root.path()).unwrap();
+        let open = |rel: &str| unsafe {
+            let p = CString::new(rel).unwrap();
+            open_in_root(rfd.as_raw_fd(), &p, libc::O_PATH, 0)
+        };
+        // A path through the escaping symlink resolves inside the root, where it doesn't exist.
+        let escaped = open("data/exists");
+        assert!(escaped < 0, "symlink escaped the root");
+        // A real path inside the root still opens.
+        let inside = open("real");
+        assert!(inside >= 0, "a real in-root path failed");
+        unsafe { libc::close(inside) };
+    }
 }
