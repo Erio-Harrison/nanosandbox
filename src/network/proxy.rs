@@ -105,7 +105,7 @@ impl HttpProxy {
     pub fn new(allowed_domains: Vec<String>, port: u16) -> Self {
         Self {
             policy: Arc::new(Policy {
-                // // Hosts are lowercased before matching, so patterns must be too.
+                // Hosts are lowercased before matching, so patterns must be too.
                 domains: allowed_domains
                     .into_iter()
                     .map(|d| {
@@ -459,7 +459,7 @@ impl HttpProxy {
                 .collect();
             let usable: Vec<&SocketAddr> = resolved
                 .iter()
-                .filter(|a| policy.allow_private || is_public(a.ip()))
+                .filter(|a| policy.allow_private || (is_public(a.ip()) && !is_own_address(a.ip())))
                 .collect();
             if usable.is_empty() && !resolved.is_empty() {
                 return Err(ConnectError::NotPublic);
@@ -505,8 +505,13 @@ impl HttpProxy {
         if allowed.contains(host) {
             return true;
         }
-        // // "*.example.com" matches example.com and anything ending in ".example.com"; the dot stops
-        // // "evilexample.com".
+        // An IP literal, or anything else that isn't a DNS name (`::ffff:1.2.3.4%x.example.com`),
+        // matches only exactly.
+        if host.parse::<IpAddr>().is_ok() || !is_dns_name(host) {
+            return false;
+        }
+        // "*.example.com" matches example.com and anything ending in ".example.com"; the dot stops
+        // "evilexample.com".
         allowed.iter().any(|pattern| {
             pattern.strip_prefix('*').is_some_and(|dot_base| {
                 dot_base.starts_with('.') && (host.ends_with(dot_base) || host == &dot_base[1..])
@@ -547,8 +552,8 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
             (host, port)
         }
         None => match authority.rsplit_once(':') {
-            // // More than one colon without brackets: a bare IPv6 address; its last group can't be
-            // // told from a port.
+            // More than one colon without brackets: a bare IPv6 address; its last group can't be
+            // told from a port.
             Some((host, _)) if host.contains(':') => return None,
             Some((host, port)) => (host, Some(port)),
             None => (authority, None),
@@ -562,6 +567,51 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
         Some(p) => p.parse().ok().filter(|&p| p != 0)?,
     };
     Some((host.to_ascii_lowercase(), port))
+}
+
+/// Letters, digits, `-` and `_` in dot-separated labels, none empty.
+fn is_dns_name(host: &str) -> bool {
+    !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+}
+
+/// Why an `allow_network` entry can't work, if it can't: it must be a DNS name, `*.` and a name
+/// with at least two labels (`*.com` would allow a whole TLD), or an IP address. A port, path
+/// or other junk would never match.
+pub(crate) fn invalid_allowlist_entry(entry: &str) -> Option<&'static str> {
+    let host = entry.trim_start_matches('[').trim_end_matches(']');
+    if host.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+    let host = host.to_ascii_lowercase();
+    match host.strip_prefix("*.") {
+        Some(base) if !is_dns_name(base) => Some("not a domain name after `*.`"),
+        Some(base) if !base.contains('.') => Some("`*.` needs a name with at least two labels"),
+        Some(_) => None,
+        None if host.contains('*') => Some("`*` only works as a leading `*.`"),
+        None if host.contains(':') => Some("a port can't be given; any port is allowed"),
+        None if !is_dns_name(&host) => Some("not a domain name or IP address"),
+        None => None,
+    }
+}
+
+/// This machine's own interface addresses: a service bound to all interfaces answers on them
+/// just as on loopback, so they count as non-public.
+fn is_own_address(ip: IpAddr) -> bool {
+    #[cfg(unix)]
+    if let Ok(addrs) = nix::ifaddrs::getifaddrs() {
+        return addrs.filter_map(|a| a.address).any(|a| {
+            a.as_sockaddr_in().map(|s| IpAddr::V4(s.ip())) == Some(ip)
+                || a.as_sockaddr_in6().map(|s| IpAddr::V6(s.ip())) == Some(ip)
+        });
+    }
+    let _ = ip;
+    false
 }
 
 /// Whether `ip` is on the public internet (not loopback, private, link-local, CGNAT,
@@ -604,6 +654,7 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
         || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15, benchmarking
         || ip.is_documentation()
         || ip.is_multicast()
+        || o == [168, 63, 129, 16] // Azure's platform endpoint (metadata, agent)
         || o[0] >= 240) // reserved, and broadcast
 }
 
@@ -634,6 +685,49 @@ mod tests {
         // Only on a label boundary.
         assert!(!HttpProxy::is_allowed("evilexample.com", &allowed));
         assert!(!HttpProxy::is_allowed("example.com.evil.com", &allowed));
+        // Not a DNS name: an IPv6 literal with a zone that happens to end in the base.
+        assert!(!HttpProxy::is_allowed(
+            "::ffff:1.2.3.4%x.example.com",
+            &allowed
+        ));
+        assert!(!HttpProxy::is_allowed("1.2.3.4.example.com%x", &allowed));
+    }
+
+    #[test]
+    fn test_allowlist_entries_that_cannot_work_are_refused() {
+        for ok in [
+            "example.com",
+            "*.example.com",
+            "*.co.uk",
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "Example.COM",
+        ] {
+            assert_eq!(invalid_allowlist_entry(ok), None, "{ok}");
+        }
+        for bad in [
+            "",
+            "*",
+            "*.com",
+            "*.",
+            "example.*",
+            "a.*.example.com",
+            "example.com:443",
+            "https://example.com",
+            "example.com/path",
+            "exa mple.com",
+        ] {
+            assert!(invalid_allowlist_entry(bad).is_some(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_own_and_platform_addresses_are_not_public() {
+        assert!(is_own_address("127.0.0.1".parse().unwrap()));
+        assert!(!is_public("168.63.129.16".parse().unwrap()));
+        assert!(is_public("168.63.129.17".parse().unwrap()));
     }
 
     #[test]

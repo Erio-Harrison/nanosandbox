@@ -273,7 +273,10 @@ pub fn allow_private_destinations(self) -> Self     // with allow_network
 
 `allow_network` routes all traffic through a local HTTP/HTTPS proxy that
 only lets the listed domains through (`*.example.com` matches
-`example.com` and its subdomains). The sandbox has no other way out: on
+`example.com` and its subdomains, and only DNS names: an IP address must be
+listed itself). `build()` refuses an entry that could never match or would
+allow too much: one with a port or a path, `*` anywhere but a leading `*.`,
+or `*.` with a single label (`*.com`). The sandbox has no other way out: on
 Linux it gets its own network namespace, on macOS the sandbox profile only
 allows the proxy. `HTTP_PROXY`/`HTTPS_PROXY` are set for the program.
 
@@ -283,8 +286,9 @@ builder.allow_network(&["api.openai.com", "*.github.com"])
 
 The proxy connects from the host's network. So an allowed name that
 resolves to a loopback, private (10/8, 172.16/12, 192.168/16), link-local
-(including cloud metadata at 169.254.169.254) or other non-public address is
-refused with 403: it would reach the host's own services and internal
+(including cloud metadata at 169.254.169.254), Azure's platform endpoint
+(168.63.129.16), one of this machine's own interface addresses, or other
+non-public address is refused with 403: it would reach the host's own services and internal
 network. `allow_private_destinations()` allows it, for an internal API. The
 proxy resolves each name once and connects to the address it checked, so
 the name can't resolve to something else in between (DNS rebinding).

@@ -38,6 +38,14 @@ impl ProxiedNetwork {
     /// Start the proxy for `allowed_domains`; `allow_private_destinations` lets them resolve to
     /// loopback, private, link-local and other non-public addresses.
     pub fn setup(allowed_domains: Vec<String>, allow_private_destinations: bool) -> Result<Self> {
+        for entry in &allowed_domains {
+            if let Some(why) = super::proxy::invalid_allowlist_entry(entry) {
+                return Err(crate::error::SandboxError::Config {
+                    context: format!("allow_network entry {entry:?}: {why}"),
+                    source: None,
+                });
+            }
+        }
         let policy = HttpProxy::new(allowed_domains, 0)
             .allow_private_destinations(allow_private_destinations)
             .policy();
