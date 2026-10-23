@@ -185,6 +185,25 @@ impl MacOSExecutor {
                 ));
                 params.push((key, path.to_string_lossy().into_owned()));
             }
+            // In a writable root a denied path, or a directory above it, could be renamed to where
+            // no deny applies; none of them can be removed or renamed.
+            let in_root = |dir: &Path| roots.iter().any(|r| dir.starts_with(r));
+            let mut fixed_denied: Vec<(&str, &Path)> = Vec::new();
+            for path in denied.iter().filter(|p| in_root(p)) {
+                fixed_denied.push(("subpath", path));
+                for dir in path.ancestors().skip(1).take_while(|d| in_root(d)) {
+                    if !fixed_denied.iter().any(|(_, f)| *f == dir) {
+                        fixed_denied.push(("literal", dir));
+                    }
+                }
+            }
+            for (i, (filter, dir)) in fixed_denied.iter().enumerate() {
+                let key = format!("DENY_READ_FIXED_{i}");
+                read_rules.push_str(&format!(
+                    "(deny file-write-unlink ({filter} (param \"{key}\")))\n"
+                ));
+                params.push((key, dir.to_string_lossy().into_owned()));
+            }
             let mut granted = read_rules::granted(config, &denied);
             granted.dedup();
             for (i, path) in granted.iter().enumerate() {

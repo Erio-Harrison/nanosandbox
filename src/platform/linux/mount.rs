@@ -57,6 +57,7 @@ enum MountStep {
     Tmpfs {
         target: CString,
         options: CString,
+        flags: libc::c_ulong,
     },
 }
 
@@ -88,30 +89,35 @@ impl MountPlan {
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
             .collect();
 
-        // A read-only mount in a writable area protects the path but not its parents: `mv dir dir.bak`
-        // then a new `dir` is writable. Mount points can't be renamed, so each movable parent directory
-        // (the area's own directory included) is mounted onto itself too.
+        let masks = Self::masks(config, &tmpfs)?;
+
+        // A read-only mount (or a mask) in a writable area protects the path but not its parents:
+        // `mv dir dir.bak` then a new `dir` is writable. Mount points can't be renamed, so each
+        // movable parent directory (the area's own directory included) is mounted onto itself too.
         let mut pins: Vec<Mount> = Vec::new();
         if rootfs.is_none() {
             let areas: Vec<PathBuf> = super::landlock::writable_areas(config)
                 .map(Path::to_path_buf)
                 .collect();
-            for m in binds
+            let protected = binds
                 .iter()
                 .filter(|m| m.permission == Permission::ReadOnly)
-            {
+                .map(|m| m.target.as_path())
+                .chain(masks.iter().map(|(p, _)| p.as_path()));
+            for target in protected {
                 if !areas
                     .iter()
-                    .any(|a| a.as_path() != m.target && m.target.starts_with(a))
+                    .any(|a| a.as_path() != target && target.starts_with(a))
                 {
                     continue;
                 }
-                for dir in m.target.ancestors().skip(1) {
+                for dir in target.ancestors().skip(1) {
                     if dir == Path::new("/") || !areas.iter().any(|a| dir.starts_with(a)) {
                         break;
                     }
                     let taken = binds.iter().any(|b| b.target == dir)
-                        || pins.iter().any(|p| p.target == dir);
+                        || pins.iter().any(|p| p.target == dir)
+                        || masks.iter().any(|(p, _)| p == dir);
                     if !taken {
                         pins.push(Mount {
                             source: dir.to_path_buf(),
@@ -128,16 +134,18 @@ impl MountPlan {
         enum Item<'a> {
             Tmpfs(&'a Path, u64),
             Bind(&'a Mount),
+            Mask(&'a Path, bool),
         }
         let mut items: Vec<Item> = tmpfs
             .iter()
             .map(|(p, s)| Item::Tmpfs(p, *s))
             .chain(binds.iter().map(|&m| Item::Bind(m)))
             .chain(pins.iter().map(Item::Bind))
+            .chain(masks.iter().map(|(p, dir)| Item::Mask(p, *dir)))
             .collect();
         items.sort_by_key(|item| {
             match item {
-                Item::Tmpfs(p, _) => *p,
+                Item::Tmpfs(p, _) | Item::Mask(p, _) => *p,
                 Item::Bind(m) => m.target.as_path(),
             }
             .components()
@@ -150,7 +158,27 @@ impl MountPlan {
                 Item::Tmpfs(path, size) => {
                     let target = Self::target(&mut steps, rootfs, path, &tmpfs, true)?;
                     let options = CString::new(format!("size={size}")).expect("no NUL in a number");
-                    steps.push(MountStep::Tmpfs { target, options });
+                    steps.push(MountStep::Tmpfs {
+                        target,
+                        options,
+                        flags: 0,
+                    });
+                }
+                // An empty, read-only directory or file over the denied path.
+                Item::Mask(path, true) => steps.push(MountStep::Tmpfs {
+                    target: path_cstring(path)?,
+                    options: c"size=4k,nr_inodes=1,mode=000".to_owned(),
+                    flags: libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                }),
+                Item::Mask(path, false) => {
+                    let source = c"/dev/null".to_owned();
+                    let readonly = Some(locked_flags(&source));
+                    steps.push(MountStep::Bind {
+                        source,
+                        target: path_cstring(path)?,
+                        readonly,
+                        tree: std::cell::Cell::new(-1),
+                    });
                 }
                 Item::Bind(m) => {
                     let is_dir = m.source.is_dir();
@@ -176,6 +204,41 @@ impl MountPlan {
             steps,
             proc_target,
         })
+    }
+
+    /// Denied paths (`read_rules::denied`) inside a writable area, and whether each is a directory.
+    /// Landlock only adds access, so the area's rule would make them readable; they're mounted
+    /// over instead. Ones under a tmpfs are hidden by it already.
+    fn masks(config: &SandboxConfig, tmpfs: &[(PathBuf, u64)]) -> Result<Vec<(PathBuf, bool)>> {
+        if config.rootfs.is_some() {
+            return Ok(Vec::new());
+        }
+        let areas: Vec<PathBuf> = super::landlock::writable_areas(config)
+            .filter_map(|a| std::fs::canonicalize(a).ok())
+            .collect();
+        let mut masks = Vec::new();
+        for denied in crate::platform::read_rules::denied(config) {
+            let inside = areas.iter().any(|a| *a != denied && denied.starts_with(a));
+            if !inside || tmpfs.iter().any(|(t, _)| denied.starts_with(t)) {
+                continue;
+            }
+            if let Some(granted) =
+                crate::platform::read_rules::granted(config, std::slice::from_ref(&denied)).first()
+            {
+                return Err(SandboxError::Config {
+                    context: format!(
+                        "{} is denied reading inside a writable directory, so it's hidden by a \
+                         mount; {} inside it can't be shown through that",
+                        denied.display(),
+                        granted.display()
+                    ),
+                    source: None,
+                });
+            }
+            let is_dir = denied.is_dir();
+            masks.push((denied, is_dir));
+        }
+        Ok(masks)
     }
 
     /// Caller tmpfs mounts, private_tmp's at /tmp where mountable, and private tmpfs over
@@ -351,10 +414,14 @@ impl MountPlan {
                             }
                         }
                     }
-                    MountStep::Tmpfs { target, options } => {
+                    MountStep::Tmpfs {
+                        target,
+                        options,
+                        flags,
+                    } => {
                         let tmpfs = c"tmpfs".as_ptr();
-                        if libc::mount(tmpfs, target.as_ptr(), tmpfs, 0, options.as_ptr() as _) != 0
-                        {
+                        let options = options.as_ptr() as _;
+                        if libc::mount(tmpfs, target.as_ptr(), tmpfs, *flags, options) != 0 {
                             return Err("mount tmpfs");
                         }
                     }
@@ -443,7 +510,9 @@ pub(super) fn check_mounts(config: &SandboxConfig) -> Result<()> {
     let plan = MountPlan::new(config, restricted)?;
     if plan.requested() && restricted {
         return Err(SandboxError::Unsupported {
-            setting: "rootfs, tmpfs, bind, or read_only inside a writable directory".into(),
+            setting: "rootfs, tmpfs, bind, or read_only inside a writable directory (or a \
+                      deny_read path inside one)"
+                .into(),
             reason: "these need to mount inside the sandbox's user namespace, which AppArmor \
                      denies here (kernel.apparmor_restrict_unprivileged_userns=1 for an \
                      unprivileged, unconfined process). Run as root, set that sysctl to 0, or \

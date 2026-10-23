@@ -255,7 +255,9 @@ contents and directory listings) for credentials in the home directory,
 `deny_read` paths, and with `hide_home` the whole home directory. Paths the
 config names inside those are allowed again with `file-read-data`: an allow
 of `file-read*` doesn't override a deny of the more specific operation,
-whatever the order.
+whatever the order. A denied path inside a writable root, and each directory
+above it up to the root, also gets `file-write-unlink` denied, so it can't be
+renamed to where the deny doesn't reach.
 
 ### Resource Limits
 

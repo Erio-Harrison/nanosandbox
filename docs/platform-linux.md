@@ -182,6 +182,13 @@ path gets a rule, computed afresh for each run. Rules cover whole subtrees,
 so listing directories stays allowed everywhere (`ls ~` works, and shows
 `.ssh`), or listing `/` would have to go too.
 
+A writable area's rule grants reading too, and Landlock can't take it back
+for a path inside, so a denied path inside a writable area is mounted over
+instead: an empty read-only tmpfs for a directory, a read-only bind of
+`/dev/null` for a file. Like a `read_only` path there, its parent
+directories up to the area are mounted onto themselves so they can't be
+renamed. This needs mounting, so it's refused under the AppArmor restriction.
+
 Landlock is unprivileged: no mounts and no capabilities, so this works
 under the AppArmor restriction below too. `writable(path)` opens up a host
 directory with only a Landlock rule, and `read_only(path)` outside the

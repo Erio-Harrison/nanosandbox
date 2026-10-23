@@ -60,6 +60,56 @@ fn test_hide_home_except_what_is_named() {
     assert!(can_read(&sandbox, &hidden.path().join("f")));
 }
 
+/// A deny_read path inside a writable directory stays unreadable, also after renaming it, or
+/// the directory it's in, or linking or copying it; the rest of the directory works as usual.
+#[test]
+#[cfg(unix)]
+fn test_deny_read_inside_a_writable_dir() {
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(dir.path()) {
+        return;
+    }
+    let ws = dir.path();
+    std::fs::create_dir_all(ws.join("parent/secrets")).unwrap();
+    std::fs::write(ws.join(".env"), "SECRET").unwrap();
+    std::fs::write(ws.join("parent/secrets/key"), "SECRET").unwrap();
+
+    let built = Sandbox::builder()
+        .working_dir(ws)
+        .writable(ws)
+        .deny_read(ws.join(".env"))
+        .deny_read(ws.join("parent/secrets"))
+        .build();
+    if crate::common::skip_without_userns_privileges() {
+        // Hiding them needs a mount; refused rather than left readable.
+        assert!(built.is_err());
+        return;
+    }
+    let sandbox = built.unwrap();
+    for cmd in [
+        "cat .env",
+        "cat parent/secrets/key",
+        "mv .env moved; cat moved",
+        "mv parent/secrets s; cat s/key",
+        "mv parent p; cat p/secrets/key",
+        "ln .env linked; cat linked",
+        "cp .env copied; cat copied",
+    ] {
+        let r = sandbox.run("sh", &["-c", cmd]).unwrap();
+        assert!(
+            !r.stdout.contains("SECRET"),
+            "{cmd}: read it ({})",
+            r.stdout
+        );
+    }
+    assert_eq!(std::fs::read_to_string(ws.join(".env")).unwrap(), "SECRET");
+    assert!(ws.join("parent/secrets/key").exists());
+    let r = sandbox
+        .run("sh", &["-c", "echo ok > new && cat new"])
+        .unwrap();
+    assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
+}
+
 /// SSH keys can't be read by default; checked only where ~/.ssh has a file.
 #[test]
 #[cfg(unix)]

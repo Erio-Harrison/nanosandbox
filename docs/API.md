@@ -195,6 +195,11 @@ projects in the home directory stay readable, so builds work.
 `deny_read(path)` adds a file or directory to that. `hide_home()` hides the
 whole home directory instead, except what `read_only`, `writable` or
 `working_dir` name. On Linux file names stay visible, only contents aren't.
+A denied path inside a `writable` directory can't be renamed, removed or
+linked out from under the rule either. On Linux that takes a mount over it
+(an empty read-only directory, or `/dev/null` for a file), so it's refused
+where AppArmor denies mounting, like `read_only` inside a writable directory;
+a path the config names inside such a denied path is refused too.
 
 #### `working_dir`
 
