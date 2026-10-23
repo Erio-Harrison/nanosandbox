@@ -4,6 +4,27 @@ use nanosandbox::Sandbox;
 use std::process::Command;
 use std::time::Duration;
 
+/// The command runs in its own session, so it has no controlling terminal to read or inject into.
+#[test]
+#[cfg(unix)]
+fn test_command_runs_in_its_own_session() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    // Session leader is the command itself (macOS) or the init shim, its parent (Linux).
+    let script = "import os; print(os.getsid(0) in (os.getpid(), os.getppid()))";
+    let Ok(r) = sandbox.run("python3", &["-c", script]) else {
+        return;
+    };
+    if r.exit_code != 0 {
+        eprintln!("skipping: python3 failed in the sandbox: {}", r.stderr);
+        return;
+    }
+    assert_eq!(r.stdout.trim(), "True", "{}", r.stderr);
+}
+
 /// No zombies accumulate after timeout kills (kill() without wait() used to leave them).
 #[test]
 #[cfg(unix)]

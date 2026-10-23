@@ -304,7 +304,8 @@ impl PlatformExecutor for MacOSExecutor {
 
         unsafe {
             command.pre_exec(move || {
-                libc::setpgid(0, 0);
+                // New session and process group: no controlling terminal (see linux/child.rs).
+                libc::setsid();
 
                 MacOSExecutor::apply_resource_limits(
                     max_open_files,

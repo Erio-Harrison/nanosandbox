@@ -17,7 +17,7 @@ pub(super) struct Watchdog {
 }
 
 impl Watchdog {
-    /// `pgid`: the run's process group, i.e. its first process's pid (`setpgid(0, 0)` in `pre_exec`).
+    /// `pgid`: the run's process group, i.e. its first process's pid (`setsid()` in `pre_exec`).
     pub(super) fn spawn(pgid: i32) -> Result<Self> {
         let (read_end, write_end) = super::cloexec_pipe("watchdog")?;
 

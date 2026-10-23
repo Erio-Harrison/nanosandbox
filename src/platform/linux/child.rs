@@ -62,9 +62,10 @@ pub(super) struct ChildSetup {
 impl ChildSetup {
     /// Runs in the child between clone() and exec(): see the module doc.
     pub(super) fn run(&self) -> isize {
-        // New process group, so everything can be killed with killpg.
-        if unsafe { libc::setpgid(0, 0) } != 0 {
-            let _ = write_raw(2, b"Failed to create process group\n");
+        // New session (and so process group, for killpg): no controlling terminal, so the command
+        // can't open /dev/tty to read the caller's terminal or inject input with TIOCSTI.
+        if unsafe { libc::setsid() } < 0 {
+            let _ = write_raw(2, b"Failed to create a session\n");
             return 1;
         }
 
