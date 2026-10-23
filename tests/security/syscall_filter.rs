@@ -66,6 +66,11 @@ fn probe(sandbox: &Sandbox) -> Option<String> {
             &[libc::AF_UNIX as _, libc::SOCK_STREAM as _, 0],
         ),
         (
+            "socket_vsock",
+            libc::SYS_socket,
+            &[libc::AF_VSOCK as _, libc::SOCK_STREAM as _, 0],
+        ),
+        (
             "socket_inet",
             libc::SYS_socket,
             &[libc::AF_INET as _, libc::SOCK_STREAM as _, 0],
@@ -145,6 +150,7 @@ fn test_filter_blocks_kernel_entry_points() {
         "finit_module",
         "delete_module",
         "socket_unix",
+        "socket_vsock",
     ] {
         assert_eq!(
             errno_of(&out, name),

@@ -144,12 +144,13 @@ impl SyscallFilter {
                 flags,
             ));
         }
-        // AF_UNIX is a value, not a flag: jeq, not jset. socketpair() is a separate syscall,
-        // so proxy_link is unaffected.
+        // Families are values, not flags: jeq, not jset. socketpair() is a separate syscall,
+        // so proxy_link is unaffected. AF_VSOCK reaches the hypervisor host, past the netns.
         {
             targets.push((Label::CheckSocket, code.len()));
             code.push(load(DATA_ARG0_LOW));
             code.push(jeq(libc::AF_UNIX as u32, Label::Deny));
+            code.push(jeq(libc::AF_VSOCK as u32, Label::Deny));
             code.push(ret(libc::SECCOMP_RET_ALLOW));
         }
         for (label, action) in [
