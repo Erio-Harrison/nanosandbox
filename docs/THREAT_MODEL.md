@@ -135,6 +135,11 @@ that's not what this protects. Run them in separate sandboxes.
   (`TIOCSTI` needs a controlling terminal, which the new session drops). A
   private `/dev` with its own `devpts` needs mounting; macOS's profile scopes
   device access instead.
+- `/proc/self/cgroup` shows the host's cgroup path (e.g. the systemd slice
+  and scope names). This is an information leak, not access: it reveals
+  naming, not contents. A cgroup namespace would hide it, but it didn't
+  rebase reliably under the systemd-delegated cgroup setup concurrent runs
+  use, so it isn't applied.
 - Where a fresh procfs can't be mounted (under the AppArmor restriction
   below, or in a container that masks parts of its own `/proc`), the
   command sees the host's `/proc`: other processes and, for the same user,
