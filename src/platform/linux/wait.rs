@@ -3,7 +3,7 @@
 use crate::error::{Result, SandboxError};
 use crate::platform::output::Captured;
 use crate::platform::private_tmp::PrivateTmp;
-use std::os::unix::io::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
 use super::{CgroupManager, read_raw, write_raw};
@@ -46,6 +46,13 @@ fn read_reports(fd: RawFd) -> (Option<i32>, bool) {
         .find(|b| (1..=64).contains(*b))
         .map(|&b| i32::from(b));
     (signal, bytes.contains(&0))
+}
+
+/// A pidfd (kernel 5.3+), readable once `pid` has exited, so the loop wakes on the exit instead
+/// of at its next tick. None on older kernels: the tick still catches it.
+fn exit_watch(pid: nix::unistd::Pid) -> Option<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw(), 0) };
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
 /// Reads from `fd` until it would block. False on EOF or error.
@@ -106,6 +113,7 @@ pub(super) fn wait_with_timeout(
     if let Some((fd, _)) = &stdin {
         set_nonblocking(fd.as_raw_fd());
     }
+    let exit_fd = exit_watch(pid);
 
     loop {
         // Up to 10 ms; the timeout checks below run at least that often.
@@ -118,6 +126,11 @@ pub(super) fn wait_with_timeout(
                 events: libc::POLLIN,
                 revents: 0,
             })
+            .chain(exit_fd.iter().map(|fd| libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            }))
             .collect();
         if let Some((fd, _)) = &stdin {
             polled.push(libc::pollfd {

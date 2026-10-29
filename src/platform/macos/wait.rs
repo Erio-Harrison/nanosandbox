@@ -11,6 +11,7 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use super::MacOSExecutor;
+use super::kqueue::{Event, Kqueue};
 use super::run_marker::RunMarker;
 
 impl MacOSExecutor {
@@ -50,6 +51,26 @@ impl MacOSExecutor {
         let mut stdin_remaining = stdin_data.unwrap_or(&[]);
         let mut stdout = Captured::new(config.max_output);
         let mut stderr = Captured::new(config.max_output);
+
+        // Sleeps until output, stdin room or the exit, bounded by the limit checks' interval.
+        let kq = Kqueue::new().map_err(|e| SandboxError::ExecutionFailed {
+            context: "create kqueue".into(),
+            source: Box::new(e),
+        })?;
+        for fd in [
+            stdout_pipe.as_ref().map(|p| p.as_raw_fd()),
+            stderr_pipe.as_ref().map(|p| p.as_raw_fd()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let _ = kq.watch_readable(fd);
+        }
+        if let Some(pipe) = &stdin_pipe {
+            let _ = kq.watch_writable(pipe.as_raw_fd());
+        }
+        // Already gone: don't sleep before the wait4 that reaps it.
+        let mut exited = !kq.watch_exit(child_pid).unwrap_or(false);
 
         loop {
             // Interleave stdin writes and output drains; doing them in sequence deadlocks on full pipes.
@@ -143,7 +164,9 @@ impl MacOSExecutor {
                     Self::kill_run(child_pid, marker);
                     killed_by_tmp_limit = true;
                 }
-                std::thread::sleep(poll);
+                let timeout = if exited { Duration::ZERO } else { poll };
+                let events = kq.wait(Some(timeout)).unwrap_or_default();
+                exited = events.contains(&Event::Exited(child_pid));
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {

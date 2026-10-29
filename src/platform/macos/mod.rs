@@ -16,6 +16,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod kqueue;
 mod profile;
 pub(crate) mod run_marker;
 use run_marker::RunMarker;
