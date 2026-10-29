@@ -22,13 +22,16 @@ const STALE_AFTER: Duration = Duration::from_secs(120);
 /// How often a process sweeps, at most.
 const SWEEP_EVERY: Duration = Duration::from_secs(300);
 
-/// Size check interval; walking the dir is costly and precision isn't needed.
+/// Size check interval; walking the dir is costly and precision isn't needed. Closer once the
+/// last walk found it past 60% of the limit.
 const CHECK_INTERVAL: Duration = Duration::from_millis(250);
+const CLOSE_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) struct PrivateTmp {
     dir: PathBuf,
     limit: u64,
     last_check: Instant,
+    last_usage: u64,
     /// Lock showing the run is alive; `None` where the fs can't lock (a sweep then skips it).
     _lease: Option<File>,
 }
@@ -57,6 +60,7 @@ impl PrivateTmp {
                         dir,
                         limit,
                         last_check: Instant::now(),
+                        last_usage: 0,
                         _lease: lease,
                     });
                 }
@@ -70,13 +74,25 @@ impl PrivateTmp {
         &self.dir
     }
 
-    /// Whether the dir exceeds the limit; measures at most once per `CHECK_INTERVAL`.
+    /// When the next size check is due.
+    pub(crate) fn due(&self) -> Instant {
+        self.last_check
+            + if self.last_usage > self.limit / 10 * 6 {
+                CLOSE_CHECK_INTERVAL
+            } else {
+                CHECK_INTERVAL
+            }
+    }
+
+    /// Whether the dir exceeds the limit; measures only once `due`.
     pub(crate) fn over_limit(&mut self) -> bool {
-        if self.last_check.elapsed() < CHECK_INTERVAL {
+        let now = Instant::now();
+        if now < self.due() {
             return false;
         }
-        self.last_check = Instant::now();
-        disk_usage(&self.dir) > self.limit
+        self.last_check = now;
+        self.last_usage = disk_usage(&self.dir);
+        self.last_usage > self.limit
     }
 }
 

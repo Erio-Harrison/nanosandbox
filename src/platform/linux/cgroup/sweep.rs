@@ -188,13 +188,7 @@ pub(super) fn kill_cgroup_atomically(dir: &Path) {
     if fs::write(dir.join("cgroup.kill"), "1").is_err() {
         return;
     }
-    for _ in 0..50 {
-        match fs::read_to_string(dir.join("cgroup.events")) {
-            Ok(events) if events.lines().any(|l| l.trim() == "populated 0") => return,
-            Err(_) => return,
-            _ => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
+    super::wait_until_empty(dir, Duration::from_millis(500));
 }
 
 #[cfg(test)]

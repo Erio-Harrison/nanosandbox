@@ -1,15 +1,13 @@
 //! Feeding stdin, collecting output and waiting for the sandboxed process (parent side).
 
 use crate::error::{Result, SandboxError};
+use crate::platform::checks::{CPU_LIMIT_GRACE, cpu_check_due, poll_timeout_ms};
 use crate::platform::output::Captured;
 use crate::platform::private_tmp::PrivateTmp;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
 use super::{CgroupManager, read_raw, write_raw};
-
-/// See the cpu_limit check in `wait_with_timeout`.
-const CPU_LIMIT_GRACE_USEC: u64 = 200_000;
 
 /// How the sandboxed process ended, from `wait_with_timeout`.
 pub(super) struct Waited {
@@ -34,6 +32,15 @@ pub(super) struct ChildReads {
     pub(super) signal: OwnedFd,
 }
 
+/// `cpu_time_limit` over the whole cgroup: RLIMIT_CPU is per process, so forking evades it.
+/// `cpu.stat` works without the cpu controller.
+pub(super) struct CpuLimit<'a> {
+    pub(super) cgroup: &'a CgroupManager,
+    pub(super) limit: Duration,
+    /// CPUs the run can use at once: how fast its budget can go.
+    pub(super) parallelism: u32,
+}
+
 /// What the init shim reported on `fd`: a 0 byte if it couldn't mount a private `/proc`
 /// (before exec), then a signal number if the command died by one (just before exit).
 fn read_reports(fd: RawFd) -> (Option<i32>, bool) {
@@ -49,7 +56,7 @@ fn read_reports(fd: RawFd) -> (Option<i32>, bool) {
 }
 
 /// A pidfd (kernel 5.3+), readable once `pid` has exited, so the loop wakes on the exit instead
-/// of at its next tick. None on older kernels: the tick still catches it.
+/// of at a tick. None on older kernels, where the loop keeps a 10 ms tick for it.
 fn exit_watch(pid: nix::unistd::Pid) -> Option<OwnedFd> {
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid.as_raw(), 0) };
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
@@ -70,9 +77,11 @@ fn drain(fd: RawFd, out: &mut Captured) -> bool {
 }
 
 /// Feeds stdin, collects output and waits, killing on `timeout`, `private_tmp` over size, or
-/// (`cpu_limit`) cgroup CPU time over `cpu_time_limit` (RLIMIT_CPU only catches one process).
+/// `cpu_limit` over budget.
 ///
-/// Polls the pipes and drains each when ready; fixed 4 KB reads per 10 ms starved large output.
+/// Sleeps in `poll` on the pipes and the pidfd until the earliest due check: the wall deadline
+/// (once), the next `/tmp` size walk, the next CPU total read (see `checks.rs`). A run with
+/// only a wall limit wakes for output, the exit and the deadline, and nothing else.
 pub(super) fn wait_with_timeout(
     pid: nix::unistd::Pid,
     reads: ChildReads,
@@ -80,7 +89,7 @@ pub(super) fn wait_with_timeout(
     timeout: Duration,
     mut private_tmp: Option<&mut PrivateTmp>,
     max_output: u64,
-    cpu_limit: Option<(&CgroupManager, u64)>,
+    cpu_limit: Option<CpuLimit<'_>>,
 ) -> Result<Waited> {
     let start = Instant::now();
     let ChildReads {
@@ -93,8 +102,6 @@ pub(super) fn wait_with_timeout(
     let mut open = [true, true];
     let mut killed_by_timeout = false;
     let mut killed_by_tmp_limit = false;
-    // Whole-cgroup total: RLIMIT_CPU is per process, so forking evades it. cpu.stat works
-    // without the cpu controller.
     let mut killed_by_cpu_limit = false;
     let kill = || {
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
@@ -115,8 +122,27 @@ pub(super) fn wait_with_timeout(
     }
     let exit_fd = exit_watch(pid);
 
+    // Each check's next due time; None once it can't fire again.
+    let mut deadline = Some(start + timeout);
+    let mut cpu_due = cpu_limit.as_ref().map(|c| {
+        cpu_check_due(start, Duration::ZERO, c.limit, c.parallelism)
+    });
+
     loop {
-        // Up to 10 ms; the timeout checks below run at least that often.
+        let now = Instant::now();
+        let mut wake = [
+            deadline,
+            cpu_due,
+            private_tmp.as_ref().filter(|_| !killed_by_tmp_limit).map(|t| t.due()),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if exit_fd.is_none() {
+            // No pidfd: the exit can only be seen by wait4, so keep a tick.
+            wake = Some(wake.map_or(now, |w| w.min(now + Duration::from_millis(10))));
+        }
+
         let mut polled: Vec<libc::pollfd> = fds
             .iter()
             .zip(open)
@@ -140,7 +166,11 @@ pub(super) fn wait_with_timeout(
             });
         }
         unsafe {
-            libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, 10);
+            libc::poll(
+                polled.as_mut_ptr(),
+                polled.len() as libc::nfds_t,
+                poll_timeout_ms(wake, now),
+            );
         }
 
         // Interleaved with draining: writing all stdin first deadlocks against a program (e.g.
@@ -210,29 +240,40 @@ pub(super) fn wait_with_timeout(
                 output_truncated,
             });
         }
+        if ret != 0 {
+            continue;
+        }
+
+        // Still running: the checks that are due.
+        let now = Instant::now();
         if let Some(tmp) = private_tmp.as_deref_mut()
-            && ret == 0
             && !killed_by_tmp_limit
             && tmp.over_limit()
         {
             kill();
             killed_by_tmp_limit = true;
         }
-        if let Some((cg, limit_usec)) = cpu_limit
-            && ret == 0
-            && !killed_by_cpu_limit
+        if let (Some(c), Some(due)) = (&cpu_limit, cpu_due)
+            && now >= due
         {
-            let used = cg.get_cpu_stats().map(|s| s.total_usec).unwrap_or(0);
-            // Margin so RLIMIT_CPU wins for a single process; without it this poll races ahead under load.
-            if used > limit_usec + CPU_LIMIT_GRACE_USEC {
+            let used = c
+                .cgroup
+                .get_cpu_stats()
+                .map(|s| Duration::from_micros(s.total_usec))
+                .unwrap_or_default();
+            if used > c.limit + CPU_LIMIT_GRACE {
                 kill();
                 killed_by_cpu_limit = true;
+                cpu_due = None;
+            } else {
+                cpu_due = Some(cpu_check_due(now, used, c.limit, c.parallelism));
             }
         }
-        if ret == 0 && start.elapsed() > timeout && !killed_by_timeout {
+        if deadline.is_some_and(|d| now >= d) {
             // Child is PID-ns init: its death kills the rest. Kill the group too, just in case.
             kill();
             killed_by_timeout = true;
+            deadline = None;
         }
     }
 }

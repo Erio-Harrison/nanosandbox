@@ -11,8 +11,12 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use super::MacOSExecutor;
-use super::kqueue::{Event, Kqueue};
+use super::kqueue::{Event, Kqueue, wait_for_exits};
 use super::run_marker::RunMarker;
+use crate::platform::checks::memory_check_due;
+
+/// How long killing a run's leftovers may take before giving up on them.
+pub(super) const KILL_RUN_LIMIT: Duration = Duration::from_millis(250);
 
 impl MacOSExecutor {
     pub(super) fn wait_with_timeout(
@@ -52,7 +56,8 @@ impl MacOSExecutor {
         let mut stdout = Captured::new(config.max_output);
         let mut stderr = Captured::new(config.max_output);
 
-        // Sleeps until output, stdin room or the exit, bounded by the limit checks' interval.
+        // Sleeps until output, stdin room, the exit or the earliest due check (see checks.rs):
+        // the wall deadline once, the next memory read, the next /tmp size walk.
         let kq = Kqueue::new().map_err(|e| SandboxError::ExecutionFailed {
             context: "create kqueue".into(),
             source: Box::new(e),
@@ -69,8 +74,11 @@ impl MacOSExecutor {
         if let Some(pipe) = &stdin_pipe {
             let _ = kq.watch_writable(pipe.as_raw_fd());
         }
-        // Already gone: don't sleep before the wait4 that reaps it.
-        let mut exited = !kq.watch_exit(child_pid).unwrap_or(false);
+        // Already gone: don't sleep before the wait4 that reaps it. A failed watch keeps a tick.
+        let exit_watched = kq.watch_exit(child_pid);
+        let mut exited = matches!(exit_watched, Ok(false));
+        let mut deadline = Some(start + timeout);
+        let mut memory_due = memory_limit.map(|_| start);
 
         loop {
             // Interleave stdin writes and output drains; doing them in sequence deadlocks on full pipes.
@@ -141,20 +149,22 @@ impl MacOSExecutor {
                     proc_isolated: true,
                 });
             } else if result == 0 {
-                if start.elapsed() > timeout && !killed_by_timeout {
+                let now = Instant::now();
+                if deadline.is_some_and(|d| now >= d) {
                     Self::kill_run(child_pid, marker);
                     killed_by_timeout = true;
+                    deadline = None;
                 }
-                let mut poll = Duration::from_millis(10);
-                if let Some(limit) = memory_limit
-                    && !killed_by_oom
+                if let (Some(limit), Some(due)) = (memory_limit, memory_due)
+                    && now >= due
                 {
                     let used = Self::tree_footprint(marker);
                     if used > limit {
                         Self::kill_run(child_pid, marker);
                         killed_by_oom = true;
-                    } else if used > limit / 10 * 6 {
-                        poll = Duration::from_millis(2);
+                        memory_due = None;
+                    } else {
+                        memory_due = Some(memory_check_due(now, used, limit));
                     }
                 }
                 if let Some(tmp) = private_tmp.as_deref_mut()
@@ -164,8 +174,25 @@ impl MacOSExecutor {
                     Self::kill_run(child_pid, marker);
                     killed_by_tmp_limit = true;
                 }
-                let timeout = if exited { Duration::ZERO } else { poll };
-                let events = kq.wait(Some(timeout)).unwrap_or_default();
+
+                let mut wake = [
+                    deadline,
+                    memory_due,
+                    private_tmp
+                        .as_ref()
+                        .filter(|_| !killed_by_tmp_limit)
+                        .map(|t| t.due()),
+                ]
+                .into_iter()
+                .flatten()
+                .min();
+                if exited || exit_watched.is_err() {
+                    let tick = if exited { Duration::ZERO } else { Duration::from_millis(10) };
+                    wake = Some(wake.map_or(now + tick, |w| w.min(now + tick)));
+                }
+                let events = kq
+                    .wait(wake.map(|w| w.saturating_duration_since(Instant::now())))
+                    .unwrap_or_default();
                 exited = events.contains(&Event::Exited(child_pid));
             } else {
                 let err = std::io::Error::last_os_error();
@@ -229,20 +256,21 @@ impl MacOSExecutor {
     }
 
     /// Kill the tree under `root`, then whatever the run's sandbox still holds; repeat until
-    /// none are left, since one may fork meanwhile.
+    /// none are left, since one may fork meanwhile. Gives up after `KILL_RUN_LIMIT`.
     fn kill_run(root: i32, marker: &RunMarker) {
         Self::kill_process_tree(root);
-        for _ in 0..50 {
+        let deadline = Instant::now() + KILL_RUN_LIMIT;
+        while Instant::now() < deadline {
             let members = marker.members();
             if members.is_empty() {
                 return;
             }
-            for pid in members {
+            for &pid in &members {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
             }
-            std::thread::sleep(Duration::from_millis(5));
+            wait_for_exits(&members, deadline);
         }
     }
 

@@ -113,10 +113,58 @@ impl Kqueue {
     }
 }
 
+/// Waits until every one of `pids` has exited or `deadline` passes. Ones already gone count as
+/// exited; if none could be watched, it yields briefly so a caller re-listing them doesn't spin.
+pub(super) fn wait_for_exits(pids: &[libc::pid_t], deadline: std::time::Instant) {
+    let Ok(kq) = Kqueue::new() else {
+        std::thread::sleep(Duration::from_millis(1));
+        return;
+    };
+    let mut pending = pids
+        .iter()
+        .filter(|&&pid| kq.watch_exit(pid).unwrap_or(false))
+        .count();
+    if pending == 0 {
+        std::thread::sleep(Duration::from_millis(1));
+        return;
+    }
+    while pending > 0 {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return;
+        }
+        match kq.wait(Some(deadline - now)) {
+            Ok(events) if events.is_empty() => return, // timed out
+            Ok(events) => pending = pending.saturating_sub(events.len()),
+            Err(_) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn test_wait_for_exits_returns_when_all_are_gone() {
+        let mut kids: Vec<_> = (0..3)
+            .map(|_| {
+                std::process::Command::new("/bin/sleep")
+                    .arg("0.05")
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        let pids: Vec<_> = kids.iter().map(|k| k.id() as libc::pid_t).collect();
+        let start = Instant::now();
+        wait_for_exits(&pids, start + Duration::from_secs(5));
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(40) && took < Duration::from_secs(2), "{took:?}");
+        for k in &mut kids {
+            k.wait().unwrap();
+        }
+    }
 
     #[test]
     fn test_wakes_on_exit_not_on_the_timeout() {

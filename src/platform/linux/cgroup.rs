@@ -228,11 +228,16 @@ impl CgroupManager {
         }
     }
 
-    /// Sends SIGKILL to all processes in the cgroup and waits for them to exit.
+    /// Kills every process in the cgroup and waits until it's empty: `cgroup.kill` (kernel
+    /// 5.14+, no fork race) then a poll on `cgroup.events`. Older kernels freeze and signal.
     pub fn kill_all(&self) {
+        if fs::write(self.path.join("cgroup.kill"), "1").is_ok() {
+            wait_until_empty(&self.path, KILL_WAIT);
+            return;
+        }
+
         let freeze_path = self.path.join("cgroup.freeze");
         let _ = fs::write(&freeze_path, "1"); // block new forks while killing
-
         for _ in 0..10 {
             match self.get_pids() {
                 Some(pids) if pids.is_empty() => break,
@@ -247,20 +252,50 @@ impl CgroupManager {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-
         let _ = fs::write(&freeze_path, "0");
+        wait_until_empty(&self.path, KILL_WAIT);
     }
 
     /// Kills all processes and removes the cgroup directory.
     pub fn cleanup(&self) {
         self.kill_all();
-        for _ in 0..50 {
-            if self.get_pids().is_some_and(|p| p.is_empty()) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
         let _ = fs::remove_dir(&self.path);
+    }
+}
+
+/// How long a kill may take to empty a cgroup before it's given up on.
+const KILL_WAIT: Duration = Duration::from_millis(500);
+
+/// Waits until `dir`'s `cgroup.events` says `populated 0` (the kernel flags the file for
+/// `poll` on each change), or `timeout`. True once empty; a gone cgroup counts as empty.
+pub(super) fn wait_until_empty(dir: &Path, timeout: Duration) -> bool {
+    use std::io::{Read, Seek};
+    use std::os::fd::AsRawFd;
+    let Ok(mut events) = fs::File::open(dir.join("cgroup.events")) else {
+        return true;
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut text = String::new();
+        if events.rewind().is_err() || events.read_to_string(&mut text).is_err() {
+            return true;
+        }
+        if text.lines().any(|l| l.trim() == "populated 0") {
+            return true;
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let mut pfd = libc::pollfd {
+            fd: events.as_raw_fd(),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        let ms = crate::platform::checks::poll_timeout_ms(Some(deadline), now);
+        unsafe {
+            libc::poll(&mut pfd, 1, ms);
+        }
     }
 }
 

@@ -334,14 +334,17 @@ let mut rusage: libc::rusage = std::mem::zeroed();
 let mut status: i32 = 0;
 
 loop {
+    // Sleep until output, the exit (pidfd on Linux, kqueue NOTE_EXIT on
+    // macOS) or the earliest due check: the wall deadline, the next memory
+    // or /tmp size read. Nothing wakes a run that has nothing to poll.
+    wait_for_events(until: next_due());
     let result = libc::wait4(child_pid, &mut status, WNOHANG, &mut rusage);
     if result == child_pid {
         break;  // Child exited
     }
-    if timeout_elapsed {
+    if now >= deadline {
         kill_process_group(child_pid);
     }
-    sleep(10ms);
 }
 
 // Extract metrics

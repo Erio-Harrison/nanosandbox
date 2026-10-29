@@ -79,6 +79,8 @@ and waits for the result. Split across a few files by subsystem:
   closure, and `FORK_LOCK`/`cloexec_pipe` (see Process Lifetime below).
 - `profile.rs`: `generate_profile()`.
 - `wait.rs`: the wait loop, process-tree killing, memory polling.
+  `kqueue.rs`: what it sleeps on (pipe readiness, `NOTE_EXIT`, and the
+  earliest due check -- see `src/platform/checks.rs`).
 - `watchdog.rs`, `run_marker.rs`: see their own sections below.
 
 ### Profile Generation
@@ -268,7 +270,9 @@ from `Command::pre_exec` between `fork()` and `exec()`.
 `memory_limit` can't go through `setrlimit`: the kernel rejects
 `RLIMIT_AS`. Instead, the wait loop polls physical footprint
 (`proc_pid_rusage`) summed over every process of the run (see Process
-Cleanup, above) every 2-10 ms, and kills the run once it's over.
+Cleanup, above) every 10 ms, 2 ms once past 60% of the limit, and kills the
+run once it's over. Without a `memory_limit` nothing is polled: the loop
+sleeps until output, the exit, or the wall deadline.
 `RLIMIT_NPROC` for `max_pids` isn't used either, for an unrelated reason:
 it counts every process the user has, not just the sandbox's -- there's no
 macOS equivalent to cgroups' `pids.max`, so `max_pids` is refused instead

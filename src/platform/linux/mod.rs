@@ -37,7 +37,17 @@ pub use namespace::UserNamespace;
 use prepare::{ExecBuffers, Pipes, prepare_cgroup, prepare_env, prepare_rlimits};
 use proxy_link::{ProxyLink, check_network};
 use seccomp::SyscallFilter;
-use wait::{ChildReads, Waited, wait_with_timeout};
+use wait::{ChildReads, CpuLimit, Waited, wait_with_timeout};
+
+/// CPUs a run can use at once: the host's, capped by `cpu_limit`.
+fn parallelism(config: &SandboxConfig) -> u32 {
+    let host = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    match config.cpu_limit {
+        Some(cpus) if cpus >= 1.0 => host.min(cpus.ceil() as u32),
+        Some(_) => 1,
+        None => host,
+    }
+}
 
 /// RawFd version of close
 fn close_raw(fd: RawFd) -> nix::Result<()> {
@@ -386,7 +396,11 @@ impl PlatformExecutor for LinuxExecutor {
             cgroup
                 .as_ref()
                 .zip(config.cpu_time_limit)
-                .map(|(cg, d)| (cg, d.as_micros() as u64)),
+                .map(|(cgroup, limit)| CpuLimit {
+                    cgroup,
+                    limit,
+                    parallelism: parallelism(config),
+                }),
         )?;
         let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);

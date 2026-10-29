@@ -379,8 +379,9 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
   returning it as a normal exit code -- it used to stay an `Ok` with exit
   127, the only Unix platform where `CommandNotFound` never actually fired.
 - `cpu_time_limit` is also checked against the whole cgroup's total CPU
-  time (`cpu.stat`'s `usage_usec`, polled the same way as the `private_tmp`
-  size check), not just charged to `pid` alone via `RLIMIT_CPU`: a program
+  time (`cpu.stat`'s `usage_usec`, re-read whenever the budget left could
+  have been used up at full parallelism, at least every 10 ms), not just
+  charged to `pid` alone via `RLIMIT_CPU`: a program
   that forks could otherwise use close to `N times cpu_time_limit` before
   any one of its `N` children, on its own, used enough to hit its own copy
   of the rlimit. Confirmed for real: 10 busy-loop children under a 2s limit
@@ -388,7 +389,12 @@ such as Chrome with its own sandbox enabled (or run that with `--no-sandbox`).
   under a second. This needs only a cgroup to exist, not its "cpu"
   controller enabled -- `cpu.stat`'s usage figures are populated either
   way (confirmed for real).
-- Output is read as it arrives (`poll`), up to `max_output` per stream.
+- Output is read as it arrives, up to `max_output` per stream. The wait
+  loop sleeps in `poll` on the pipes, a pidfd for the exit, and the earliest
+  due check (the wall deadline, the next `private_tmp` size walk, the next
+  CPU total read -- `src/platform/checks.rs`); a run with only a wall limit
+  wakes for output, the exit and the deadline, never on a timer. Killing
+  the cgroup writes `cgroup.kill` and polls `cgroup.events` until empty.
 
 ## Complete Execution Flow
 

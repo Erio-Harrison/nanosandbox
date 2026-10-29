@@ -254,7 +254,7 @@ Where a platform can't enforce a limit, `build()` refuses it
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
-| `memory_limit` | cgroup | checked every 10 ms, killed when over | Job Object |
+| `memory_limit` | cgroup | checked every 10 ms (2 ms near the limit), killed when over | Job Object |
 | `cpu_limit` | cgroup | refused | refused |
 | `wall_time_limit` | ✓ | ✓ | ✓ |
 | `cpu_time_limit` | rlimit *and* cgroup total | rlimit | Job Object total |

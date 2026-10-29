@@ -212,9 +212,9 @@ equivalent):**
   time is `RLIMIT_CPU` per-process only -- nothing sums CPU across a
   process tree the way Linux's cgroup accounting does.
 - `private_tmp` on macOS is a private directory with size checked every
-  250ms and the run killed if over, not a real tmpfs with `ENOSPC` on
-  write -- a short burst can exceed the configured size before the next
-  check.
+  250ms (100ms once past 60% of the limit) and the run killed if over, not
+  a real tmpfs with `ENOSPC` on write -- a short burst can exceed the
+  configured size before the next check.
 
 **Standing caveat:** `sandbox-exec`'s general/custom-profile use has been
 marked deprecated by Apple since macOS 10.15, for third-party use outside

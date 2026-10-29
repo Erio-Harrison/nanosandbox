@@ -10,6 +10,8 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(unix)]
+pub(crate) mod checks;
 pub(crate) mod output;
 #[cfg(unix)]
 pub(crate) mod private_tmp;

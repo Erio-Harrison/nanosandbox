@@ -166,18 +166,19 @@ pub(crate) fn kill_orphans(denied: &Path, allowed: &Path) -> usize {
         return 0;
     };
     let mut killed = std::collections::HashSet::new();
-    for _ in 0..50 {
+    let deadline = std::time::Instant::now() + super::wait::KILL_RUN_LIMIT;
+    while std::time::Instant::now() < deadline {
         let members = members_marked_by(&denied, &denied_c, &allowed, &allowed_c);
         if members.is_empty() {
             break;
         }
-        for pid in members {
+        for &pid in &members {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }
             killed.insert(pid);
         }
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        super::kqueue::wait_for_exits(&members, deadline);
     }
     killed.len()
 }
