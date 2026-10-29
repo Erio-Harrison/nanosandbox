@@ -4,8 +4,7 @@
 ; Licensed under the Apache License, Version 2.0. See THIRD_PARTY_NOTICES.md.
 ; Parts of the original policies are derived from Chromium's sandbox policies (BSD-3-Clause),
 ; as referenced in the comments below.
-; Changes: added the com.apple.TrustEvaluationAgent mach-lookup (legacy cert-verification
-; service on older macOS); otherwise only this header.
+; Changes: none to the rules; only this header was added.
 
 ; when network access is enabled, these policies are added after those in seatbelt_base_policy.sbpl
 ; proxy-specific allow rules are injected by codex-core based on environment.
@@ -29,8 +28,6 @@
     (global-name "com.apple.networkd")
     (global-name "com.apple.ocspd")
     (global-name "com.apple.trustd.agent")
-    ; Legacy name for the above on older macOS, so Security.framework TLS still verifies.
-    (global-name "com.apple.TrustEvaluationAgent")
 
     ; Read network configuration.
     (global-name "com.apple.SystemConfiguration.DNSConfiguration")
