@@ -1,18 +1,16 @@
-//! Feeding stdin, collecting output and waiting for the sandboxed process (parent side).
+//! Waiting for the sandboxed process and enforcing the limits the kernel doesn't (supervisor
+//! thread; the I/O ends are the caller's, see `platform/supervise.rs`).
 
 use crate::error::{Result, SandboxError};
 use crate::platform::checks::{CPU_LIMIT_GRACE, cpu_check_due, poll_timeout_ms};
-use crate::platform::output::Captured;
 use crate::platform::private_tmp::PrivateTmp;
 use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::{Duration, Instant};
 
-use super::{CgroupManager, read_raw, write_raw};
+use super::{CgroupManager, read_raw};
 
-/// How the sandboxed process ended, from `wait_with_timeout`.
-pub(super) struct Waited {
-    pub(super) stdout: String,
-    pub(super) stderr: String,
+/// How the sandboxed process ended, from `supervise`.
+pub(super) struct Ended {
     pub(super) exit_code: i32,
     pub(super) killed_by_timeout: bool,
     pub(super) killed_by_tmp_limit: bool,
@@ -21,15 +19,6 @@ pub(super) struct Waited {
     /// The init shim reported that it couldn't mount a private `/proc`.
     pub(super) proc_mount_failed: bool,
     pub(super) rusage: libc::rusage,
-    pub(super) output_truncated: bool,
-}
-
-/// The read ends of the pipes a run reports back on.
-pub(super) struct ChildReads {
-    pub(super) stdout: OwnedFd,
-    pub(super) stderr: OwnedFd,
-    /// See `reported_signal`.
-    pub(super) signal: OwnedFd,
 }
 
 /// `cpu_time_limit` over the whole cgroup: RLIMIT_CPU is per process, so forking evades it.
@@ -62,44 +51,19 @@ fn exit_watch(pid: nix::unistd::Pid) -> Option<OwnedFd> {
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
-/// Reads from `fd` until it would block. False on EOF or error.
-fn drain(fd: RawFd, out: &mut Captured) -> bool {
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        match read_raw(fd, &mut buf) {
-            Ok(0) => return false,
-            Ok(n) => out.push(&buf[..n]),
-            Err(nix::errno::Errno::EAGAIN) => return true,
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => return false,
-        }
-    }
-}
-
-/// Feeds stdin, collects output and waits, killing on `timeout`, `private_tmp` over size, or
-/// `cpu_limit` over budget.
+/// Waits for `pid`, killing on `timeout`, `private_tmp` over size, or `cpu_limit` over budget.
 ///
-/// Sleeps in `poll` on the pipes and the pidfd until the earliest due check: the wall deadline
-/// (once), the next `/tmp` size walk, the next CPU total read (see `checks.rs`). A run with
-/// only a wall limit wakes for output, the exit and the deadline, and nothing else.
-pub(super) fn wait_with_timeout(
+/// Sleeps in `poll` on the pidfd until the earliest due check: the wall deadline (once), the
+/// next `/tmp` size walk, the next CPU total read (see `checks.rs`). A run with only a wall
+/// limit wakes for the exit and the deadline, and nothing else.
+pub(super) fn supervise(
     pid: nix::unistd::Pid,
-    reads: ChildReads,
-    mut stdin: Option<(OwnedFd, &[u8])>,
+    signal_pipe: OwnedFd,
     timeout: Duration,
     mut private_tmp: Option<&mut PrivateTmp>,
-    max_output: u64,
     cpu_limit: Option<CpuLimit<'_>>,
-) -> Result<Waited> {
+) -> Result<Ended> {
     let start = Instant::now();
-    let ChildReads {
-        stdout,
-        stderr,
-        signal: signal_pipe,
-    } = reads;
-    let outputs = [stdout, stderr];
-    let mut captured = [Captured::new(max_output), Captured::new(max_output)];
-    let mut open = [true, true];
     let mut killed_by_timeout = false;
     let mut killed_by_tmp_limit = false;
     let mut killed_by_cpu_limit = false;
@@ -109,31 +73,27 @@ pub(super) fn wait_with_timeout(
             libc::kill(-(pid.as_raw()), libc::SIGKILL);
         }
     };
-
-    let set_nonblocking = |fd: RawFd| unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-    };
-    let fds = [outputs[0].as_raw_fd(), outputs[1].as_raw_fd()];
-    fds.iter().for_each(|&fd| set_nonblocking(fd));
-    set_nonblocking(signal_pipe.as_raw_fd());
-    if let Some((fd, _)) = &stdin {
-        set_nonblocking(fd.as_raw_fd());
+    unsafe {
+        let fd = signal_pipe.as_raw_fd();
+        libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
     }
     let exit_fd = exit_watch(pid);
 
     // Each check's next due time; None once it can't fire again.
     let mut deadline = Some(start + timeout);
-    let mut cpu_due = cpu_limit.as_ref().map(|c| {
-        cpu_check_due(start, Duration::ZERO, c.limit, c.parallelism)
-    });
+    let mut cpu_due = cpu_limit
+        .as_ref()
+        .map(|c| cpu_check_due(start, Duration::ZERO, c.limit, c.parallelism));
 
     loop {
         let now = Instant::now();
         let mut wake = [
             deadline,
             cpu_due,
-            private_tmp.as_ref().filter(|_| !killed_by_tmp_limit).map(|t| t.due()),
+            private_tmp
+                .as_ref()
+                .filter(|_| !killed_by_tmp_limit)
+                .map(|t| t.due()),
         ]
         .into_iter()
         .flatten()
@@ -142,57 +102,20 @@ pub(super) fn wait_with_timeout(
             // No pidfd: the exit can only be seen by wait4, so keep a tick.
             wake = Some(wake.map_or(now, |w| w.min(now + Duration::from_millis(10))));
         }
-
-        let mut polled: Vec<libc::pollfd> = fds
+        let mut polled: Vec<libc::pollfd> = exit_fd
             .iter()
-            .zip(open)
-            .filter(|(_, open)| *open)
-            .map(|(&fd, _)| libc::pollfd {
-                fd,
+            .map(|fd| libc::pollfd {
+                fd: fd.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             })
-            .chain(exit_fd.iter().map(|fd| libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }))
             .collect();
-        if let Some((fd, _)) = &stdin {
-            polled.push(libc::pollfd {
-                fd: fd.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            });
-        }
         unsafe {
             libc::poll(
                 polled.as_mut_ptr(),
                 polled.len() as libc::nfds_t,
                 poll_timeout_ms(wake, now),
             );
-        }
-
-        // Interleaved with draining: writing all stdin first deadlocks against a program (e.g.
-        // `cat`) blocked on its full output pipe.
-        if let Some((fd, data)) = &mut stdin {
-            if !data.is_empty() {
-                match write_raw(fd.as_raw_fd(), data) {
-                    Ok(n) if n > 0 => *data = &data[n..],
-                    Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EINTR) => {}
-                    // Wrote 0 or reader gone (EPIPE): stop.
-                    _ => *data = &[],
-                }
-            }
-            if data.is_empty() {
-                stdin = None; // dropping it closes the pipe: EOF for the program
-            }
-        }
-
-        for i in 0..2 {
-            if open[i] {
-                open[i] = drain(fds[i], &mut captured[i]);
-            }
         }
 
         // wait4 for rusage: the cpu_time/peak_memory source without a cgroup.
@@ -212,12 +135,6 @@ pub(super) fn wait_with_timeout(
         let exited = ret == pid.as_raw() && libc::WIFEXITED(status);
         let signaled = ret == pid.as_raw() && libc::WIFSIGNALED(status);
         if exited || signaled {
-            // Drain what's there now; a descendant may hold the pipes open, so not to EOF.
-            for i in 0..2 {
-                if open[i] {
-                    drain(fds[i], &mut captured[i]);
-                }
-            }
             let (reported, proc_mount_failed) = read_reports(signal_pipe.as_raw_fd());
             let (code, signal) = if exited {
                 (libc::WEXITSTATUS(status), reported)
@@ -225,11 +142,7 @@ pub(super) fn wait_with_timeout(
                 let sig = libc::WTERMSIG(status);
                 (128 + sig, Some(sig))
             };
-            let output_truncated = captured.iter().any(Captured::truncated);
-            let [stdout, stderr] = captured.map(Captured::into_string);
-            return Ok(Waited {
-                stdout,
-                stderr,
+            return Ok(Ended {
                 exit_code: code,
                 killed_by_timeout,
                 killed_by_tmp_limit,
@@ -237,7 +150,6 @@ pub(super) fn wait_with_timeout(
                 signal,
                 proc_mount_failed,
                 rusage,
-                output_truncated,
             });
         }
         if ret != 0 {

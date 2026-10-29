@@ -4,18 +4,18 @@
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::time::Duration;
 
-pub(super) struct Kqueue(OwnedFd);
+pub(crate) struct Kqueue(OwnedFd);
 
 /// What `wait` reports.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Event {
+pub(crate) enum Event {
     Readable(RawFd),
     Writable(RawFd),
     Exited(libc::pid_t),
 }
 
 impl Kqueue {
-    pub(super) fn new() -> std::io::Result<Self> {
+    pub(crate) fn new() -> std::io::Result<Self> {
         let fd = unsafe { libc::kqueue() };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
@@ -52,17 +52,23 @@ impl Kqueue {
     }
 
     /// Level-triggered; closing `fd` removes it.
-    pub(super) fn watch_readable(&self, fd: RawFd) -> std::io::Result<()> {
+    pub(crate) fn watch_readable(&self, fd: RawFd) -> std::io::Result<()> {
         self.change(fd as usize, libc::EVFILT_READ, libc::EV_ADD, 0)
     }
 
-    pub(super) fn watch_writable(&self, fd: RawFd) -> std::io::Result<()> {
+    pub(crate) fn watch_writable(&self, fd: RawFd) -> std::io::Result<()> {
         self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_ADD, 0)
+    }
+
+    /// Stops watching `fd` either way; closing it does the same.
+    pub(crate) fn unwatch(&self, fd: RawFd) {
+        let _ = self.change(fd as usize, libc::EVFILT_READ, libc::EV_DELETE, 0);
+        let _ = self.change(fd as usize, libc::EVFILT_WRITE, libc::EV_DELETE, 0);
     }
 
     /// Fires once when `pid` exits. False if it already has (`ESRCH`), so the caller doesn't
     /// wait for an event that never comes.
-    pub(super) fn watch_exit(&self, pid: libc::pid_t) -> std::io::Result<bool> {
+    pub(crate) fn watch_exit(&self, pid: libc::pid_t) -> std::io::Result<bool> {
         match self.change(
             pid as usize,
             libc::EVFILT_PROC,
@@ -76,7 +82,7 @@ impl Kqueue {
     }
 
     /// Blocks until something fires or `timeout` passes (`None`: no limit).
-    pub(super) fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Vec<Event>> {
+    pub(crate) fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Vec<Event>> {
         let ts = timeout.map(|t| libc::timespec {
             tv_sec: t.as_secs() as libc::time_t,
             tv_nsec: libc::c_long::from(t.subsec_nanos()),

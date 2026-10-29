@@ -6,6 +6,7 @@ use crate::network::ProxiedNetwork;
 use crate::platform::{PlatformExecutor, get_executor};
 use crate::result::ExecutionResult;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -23,11 +24,12 @@ fn generate_sandbox_id() -> String {
 /// Cross-platform sandbox: Linux namespaces/cgroups/seccomp, macOS sandbox-exec, Windows
 /// Job Objects.
 pub struct Sandbox {
-    config: SandboxConfig,
+    /// Shared with each run's supervisor thread.
+    config: Arc<SandboxConfig>,
     id: String,
     executor: Box<dyn PlatformExecutor>,
-    /// Started once and reused by every `run()`; shut down with the `Sandbox`.
-    proxy: Option<ProxiedNetwork>,
+    /// Started once and reused by every run; shut down once the `Sandbox` and its runs are gone.
+    proxy: Option<Arc<ProxiedNetwork>>,
     /// Counts runs, so an audit start and its end can be tied together.
     runs: AtomicU64,
 }
@@ -61,15 +63,15 @@ impl Sandbox {
 
         // // After the support check, so a failure doesn't spin up a proxy for nothing.
         let proxy = match &config.network_mode {
-            NetworkMode::Proxied { allowed_domains } => Some(ProxiedNetwork::setup(
+            NetworkMode::Proxied { allowed_domains } => Some(Arc::new(ProxiedNetwork::setup(
                 allowed_domains.clone(),
                 config.allow_private_destinations,
-            )?),
+            )?)),
             _ => None,
         };
 
         Ok(Self {
-            config,
+            config: Arc::new(config),
             id: generate_sandbox_id(),
             executor,
             proxy,

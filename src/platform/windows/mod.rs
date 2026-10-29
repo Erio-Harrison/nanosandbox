@@ -52,12 +52,12 @@ const SYSTEM_ENV: [&str; 5] = ["SystemRoot", "SystemDrive", "windir", "ComSpec",
 impl PlatformExecutor for WindowsExecutor {
     fn execute(
         &self,
-        config: &SandboxConfig,
+        config: &std::sync::Arc<SandboxConfig>,
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
         // check_support refuses allow_network without the install.
-        _proxy: Option<&ProxiedNetwork>,
+        _proxy: Option<&std::sync::Arc<ProxiedNetwork>>,
     ) -> Result<ExecutionResult> {
         let start = Instant::now();
 

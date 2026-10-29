@@ -1,79 +1,53 @@
-//! Wait for a run, poll its limits, and kill every process of it.
+//! Wait for a run, poll its limits, and kill every process of it (supervisor thread; the I/O
+//! ends are the caller's, see `platform/supervise.rs`).
 
-use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
-use crate::platform::output::Captured;
+use crate::platform::checks::memory_check_due;
 use crate::platform::private_tmp::PrivateTmp;
-use crate::result::ExecutionResult;
 use std::collections::HashSet;
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use super::MacOSExecutor;
 use super::kqueue::{Event, Kqueue, wait_for_exits};
 use super::run_marker::RunMarker;
-use crate::platform::checks::memory_check_due;
 
 /// How long killing a run's leftovers may take before giving up on them.
 pub(super) const KILL_RUN_LIMIT: Duration = Duration::from_millis(250);
 
+/// How the run's first process ended, from `supervise`.
+pub(super) struct Ended {
+    pub(super) exit_code: i32,
+    pub(super) signal: Option<i32>,
+    pub(super) killed_by_timeout: bool,
+    pub(super) killed_by_oom: bool,
+    pub(super) killed_by_tmp_limit: bool,
+    pub(super) rusage: libc::rusage,
+}
+
 impl MacOSExecutor {
-    pub(super) fn wait_with_timeout(
-        &self,
+    /// Waits for `child`, killing the run on `timeout`, `memory_limit` or `private_tmp` over
+    /// size, then sweeps what it left behind.
+    ///
+    /// Sleeps on a kqueue (`NOTE_EXIT`) until the earliest due check (see checks.rs): the wall
+    /// deadline once, the next memory read, the next /tmp size walk. Without a memory limit a
+    /// run wakes for the exit and the deadline, and nothing else.
+    pub(super) fn supervise(
         child: &mut std::process::Child,
-        stdin_data: Option<&[u8]>,
-        config: &SandboxConfig,
+        timeout: Duration,
+        memory_limit: Option<u64>,
         mut private_tmp: Option<&mut PrivateTmp>,
         marker: &RunMarker,
-        start: Instant,
-    ) -> Result<ExecutionResult> {
+    ) -> Result<Ended> {
         let child_pid = child.id() as i32;
-        let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
-        let memory_limit = config.memory_limit;
+        let start = Instant::now();
         let mut killed_by_timeout = false;
         let mut killed_by_oom = false;
         let mut killed_by_tmp_limit = false;
 
-        let mut stdin_pipe = child.stdin.take();
-        let mut stdout_pipe = child.stdout.take();
-        let mut stderr_pipe = child.stderr.take();
-        for fd in [
-            stdin_pipe.as_ref().map(|p| p.as_raw_fd()),
-            stdout_pipe.as_ref().map(|p| p.as_raw_fd()),
-            stderr_pipe.as_ref().map(|p| p.as_raw_fd()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            unsafe {
-                let flags = libc::fcntl(fd, libc::F_GETFL);
-                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
-
-        let mut stdin_remaining = stdin_data.unwrap_or(&[]);
-        let mut stdout = Captured::new(config.max_output);
-        let mut stderr = Captured::new(config.max_output);
-
-        // Sleeps until output, stdin room, the exit or the earliest due check (see checks.rs):
-        // the wall deadline once, the next memory read, the next /tmp size walk.
         let kq = Kqueue::new().map_err(|e| SandboxError::ExecutionFailed {
             context: "create kqueue".into(),
             source: Box::new(e),
         })?;
-        for fd in [
-            stdout_pipe.as_ref().map(|p| p.as_raw_fd()),
-            stderr_pipe.as_ref().map(|p| p.as_raw_fd()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let _ = kq.watch_readable(fd);
-        }
-        if let Some(pipe) = &stdin_pipe {
-            let _ = kq.watch_writable(pipe.as_raw_fd());
-        }
         // Already gone: don't sleep before the wait4 that reaps it. A failed watch keeps a tick.
         let exit_watched = kq.watch_exit(child_pid);
         let mut exited = matches!(exit_watched, Ok(false));
@@ -81,32 +55,11 @@ impl MacOSExecutor {
         let mut memory_due = memory_limit.map(|_| start);
 
         loop {
-            // Interleave stdin writes and output drains; doing them in sequence deadlocks on full pipes.
-            if !stdin_remaining.is_empty()
-                && let Some(pipe) = stdin_pipe.as_mut()
-            {
-                match pipe.write(stdin_remaining) {
-                    Ok(n) if n > 0 => stdin_remaining = &stdin_remaining[n..],
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                    // Wrote 0 or the reader is gone (EPIPE).
-                    _ => stdin_remaining = &[],
-                }
-            }
-            if stdin_remaining.is_empty() {
-                stdin_pipe = None; // drop closes the fd, signaling EOF
-            }
-            drain_available(&mut stdout_pipe, &mut stdout);
-            drain_available(&mut stderr_pipe, &mut stderr);
-
             let mut status: libc::c_int = 0;
             let mut rusage: libc::rusage = unsafe { std::mem::zeroed() };
-
             let result = unsafe { libc::wait4(child_pid, &mut status, libc::WNOHANG, &mut rusage) };
 
             if result == child_pid {
-                drain_available(&mut stdout_pipe, &mut stdout);
-                drain_available(&mut stderr_pipe, &mut stderr);
-
                 // Sweep descendants the child backgrounded (`cmd & exit 0`); they'd outlive run().
                 Self::kill_run(child_pid, marker);
 
@@ -118,35 +71,13 @@ impl MacOSExecutor {
                 } else {
                     (-1, None)
                 };
-
-                // ru_maxrss is in bytes on macOS.
-                let peak_memory = Some(rusage.ru_maxrss as u64);
-
-                let user_time = Duration::new(
-                    rusage.ru_utime.tv_sec as u64,
-                    rusage.ru_utime.tv_usec as u32 * 1000,
-                );
-                let sys_time = Duration::new(
-                    rusage.ru_stime.tv_sec as u64,
-                    rusage.ru_stime.tv_usec as u32 * 1000,
-                );
-                let cpu_time = Some(user_time + sys_time);
-
-                return Ok(ExecutionResult {
-                    output_truncated: stdout.truncated() || stderr.truncated(),
-                    stdout: stdout.into_string(),
-                    stderr: stderr.into_string(),
+                return Ok(Ended {
                     exit_code,
-                    duration: start.elapsed(),
+                    signal,
                     killed_by_timeout,
                     killed_by_oom,
                     killed_by_tmp_limit,
-                    killed_by_cpu_limit: false,
-                    signal,
-                    peak_memory,
-                    cpu_time,
-                    blocked_hosts: Vec::new(), // filled in by execute()
-                    proc_isolated: true,
+                    rusage,
                 });
             } else if result == 0 {
                 let now = Instant::now();
@@ -187,7 +118,11 @@ impl MacOSExecutor {
                 .flatten()
                 .min();
                 if exited || exit_watched.is_err() {
-                    let tick = if exited { Duration::ZERO } else { Duration::from_millis(10) };
+                    let tick = if exited {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_millis(10)
+                    };
                     wake = Some(wake.map_or(now + tick, |w| w.min(now + tick)));
                 }
                 let events = kq
@@ -197,7 +132,6 @@ impl MacOSExecutor {
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {
-                    // EINTR: retry.
                     continue;
                 }
                 Self::kill_run(child_pid, marker);
@@ -303,25 +237,5 @@ impl MacOSExecutor {
                 if ret == 0 { info.ri_phys_footprint } else { 0 }
             })
             .sum()
-    }
-}
-
-/// Drain a non-blocking pipe; EOF or a hard error drops the handle.
-fn drain_available<R: Read>(pipe: &mut Option<R>, out: &mut Captured) {
-    let Some(p) = pipe else { return };
-    let mut tmp = [0u8; 64 * 1024];
-    loop {
-        match p.read(&mut tmp) {
-            Ok(0) => {
-                *pipe = None;
-                break;
-            }
-            Ok(n) => out.push(&tmp[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(_) => {
-                *pipe = None;
-                break;
-            }
-        }
     }
 }

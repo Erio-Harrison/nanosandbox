@@ -35,7 +35,7 @@ pub(super) struct Pipes {
 impl Pipes {
     /// Close-on-exec, so a concurrent clone() on another thread doesn't hand these to its
     /// program. dup2() onto 0/1/2 in the child clears the flag.
-    pub(super) fn create(stdin: Option<&[u8]>, owner: (u32, u32)) -> Result<Self> {
+    pub(super) fn create(stdin: bool, owner: (u32, u32)) -> Result<Self> {
         use nix::fcntl::OFlag;
         use nix::unistd::pipe2;
 
@@ -49,12 +49,11 @@ impl Pipes {
         let (stderr_read_fd, stderr_write_fd) = pipe("stderr")?;
         let (ready_read_fd, ready_write_fd) = pipe("sync")?;
         let (signal_read_fd, signal_write_fd) = pipe("signal")?;
-        let (stdin_read_fd, stdin_write_fd) = match stdin {
-            Some(_) => {
-                let (r, w) = pipe("stdin")?;
-                (Some(r), Some(w))
-            }
-            None => (None, None),
+        let (stdin_read_fd, stdin_write_fd) = if stdin {
+            let (r, w) = pipe("stdin")?;
+            (Some(r), Some(w))
+        } else {
+            (None, None)
         };
 
         // As root the sandbox runs as nobody (or chosen ids; see namespace::runs_as_root) and a

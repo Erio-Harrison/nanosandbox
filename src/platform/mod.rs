@@ -17,11 +17,14 @@ pub(crate) mod output;
 pub(crate) mod private_tmp;
 #[cfg(unix)]
 pub(crate) mod read_rules;
+#[cfg(unix)]
+pub(crate) mod supervise;
 
 use crate::builder::SandboxConfig;
 use crate::error::Result;
 use crate::network::ProxiedNetwork;
 use crate::result::ExecutionResult;
+use std::sync::Arc;
 
 /// `cpu_time_limit` as RLIMIT_CPU whole seconds, rounded up and at least 1 (0 would mean no limit).
 #[cfg(unix)]
@@ -29,17 +32,60 @@ pub(crate) fn rlimit_cpu_secs(limit: std::time::Duration) -> u64 {
     (limit.as_secs() + u64::from(limit.subsec_nanos() > 0)).max(1)
 }
 
+/// A pipe whose ends no concurrently started program inherits.
+#[cfg(target_os = "linux")]
+pub(crate) fn cloexec_pipe(
+    what: &str,
+) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(|e| {
+        crate::error::SandboxError::Internal {
+            context: format!("create {what} pipe"),
+            source: Box::new(e),
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos::cloexec_pipe;
+
 /// Platform-specific sandbox executor.
 pub trait PlatformExecutor: Send + Sync {
-    /// Execute a command in the sandbox. `proxy` is the sandbox's running proxy when
-    /// `network_mode` is `Proxied`, reused across `run()` calls.
+    /// Starts a command on its own supervisor thread (see `supervise.rs`) and hands back its
+    /// I/O ends. `stdin`: whether to give it a pipe (else `/dev/null`). `proxy` is the sandbox's
+    /// running proxy when `network_mode` is `Proxied`, shared by every run.
+    #[cfg(unix)]
+    fn launch(
+        &self,
+        config: Arc<SandboxConfig>,
+        cmd: &str,
+        args: &[&str],
+        stdin: bool,
+        proxy: Option<Arc<ProxiedNetwork>>,
+    ) -> Result<supervise::Launched>;
+
+    /// `run()`: the command with `stdin` fed to it and both streams collected (up to
+    /// `max_output` each), waited for.
+    #[cfg(unix)]
     fn execute(
         &self,
-        config: &SandboxConfig,
+        config: &Arc<SandboxConfig>,
         cmd: &str,
         args: &[&str],
         stdin: Option<&[u8]>,
-        proxy: Option<&ProxiedNetwork>,
+        proxy: Option<&Arc<ProxiedNetwork>>,
+    ) -> Result<ExecutionResult> {
+        let launched = self.launch(Arc::clone(config), cmd, args, stdin.is_some(), proxy.cloned())?;
+        supervise::collect(launched, stdin, config.max_output)
+    }
+
+    #[cfg(not(unix))]
+    fn execute(
+        &self,
+        config: &Arc<SandboxConfig>,
+        cmd: &str,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        proxy: Option<&Arc<ProxiedNetwork>>,
     ) -> Result<ExecutionResult>;
 
     /// Check that the platform supports every requested feature.
