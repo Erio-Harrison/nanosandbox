@@ -7,7 +7,7 @@ use crate::builder::SandboxConfig;
 use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 use crate::platform::private_tmp::PrivateTmp;
-use crate::platform::supervise::{Handles, Launched, Outcome, Supervisor};
+use crate::platform::supervise::{Handles, Io, Launched, Outcome, Supervisor};
 use crate::platform::{PlatformExecutor, rlimit_cpu_secs};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
@@ -27,7 +27,7 @@ use watchdog::Watchdog;
 
 /// Orders forks against `cloexec_pipe()`: macOS has no `pipe2(O_CLOEXEC)`, so a fork between
 /// `pipe()` and `fcntl` leaks the fds. `cloexec_pipe` writes; every fork here reads.
-static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+pub(crate) static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// A pipe with `O_CLOEXEC` fds, under FORK_LOCK.
 pub(crate) fn cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd)> {
@@ -190,7 +190,7 @@ fn launch_in_thread(
     config: &Arc<SandboxConfig>,
     cmd: &str,
     args: &[String],
-    stdin: bool,
+    io: Io,
     proxy: Option<Arc<ProxiedNetwork>>,
 ) -> Result<(Handles, impl FnOnce() -> Result<Outcome> + use<>)> {
     // A NUL byte is reported as on Linux, not as a generic spawn failure.
@@ -297,14 +297,38 @@ fn launch_in_thread(
         ));
     }
 
-    command.stdin(if stdin { Stdio::piped() } else { Stdio::null() });
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
+    // A terminal is the command's stdio and, in pre_exec, its session's controlling terminal.
+    let pty = io
+        .pty
+        .map(|(rows, cols)| crate::platform::pty::open(rows, cols))
+        .transpose()
+        .map_err(|e| SandboxError::ExecutionFailed {
+            context: "open a pseudo-terminal".into(),
+            source: Box::new(e),
+        })?;
+    match &pty {
+        Some(pty) => {
+            let slave = || pty.slave.try_clone().map(Stdio::from);
+            command.stdin(slave()?);
+            command.stdout(slave()?);
+            command.stderr(slave()?);
+        }
+        None => {
+            command.stdin(if io.stdin { Stdio::piped() } else { Stdio::null() });
+            command.stdout(Stdio::piped());
+            command.stderr(Stdio::piped());
+        }
+    }
+    let has_pty = pty.is_some();
 
     unsafe {
         command.pre_exec(move || {
-            // New session and process group: no controlling terminal (see linux/child.rs).
+            // New session and process group: no controlling terminal (see linux/child.rs),
+            // unless the run brought its own, which is stdin by now.
             libc::setsid();
+            if has_pty && libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY as _, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
 
             MacOSExecutor::apply_resource_limits(
                 max_open_files,
@@ -346,11 +370,32 @@ fn launch_in_thread(
         let _ = child.wait();
     })?;
 
-    let handles = Handles {
-        stdin: child.stdin.take().map(OwnedFd::from),
-        stdout: child.stdout.take().map(OwnedFd::from),
-        stderr: child.stderr.take().map(OwnedFd::from),
-        pid: child.id(),
+    let handles = match pty {
+        Some(pty) => {
+            drop(pty.slave); // the child's now
+            let dup = |what: &str| {
+                crate::platform::pty::dup_cloexec(pty.master.as_raw_fd()).map_err(|e| {
+                    SandboxError::Internal {
+                        context: format!("dup the terminal for {what}"),
+                        source: Box::new(e),
+                    }
+                })
+            };
+            Handles {
+                stdin: Some(dup("stdin")?),
+                pty: Some(dup("resizing")?),
+                stdout: Some(pty.master),
+                stderr: None,
+                pid: child.id(),
+            }
+        }
+        None => Handles {
+            stdin: child.stdin.take().map(OwnedFd::from),
+            stdout: child.stdout.take().map(OwnedFd::from),
+            stderr: child.stderr.take().map(OwnedFd::from),
+            pid: child.id(),
+            pty: None,
+        },
     };
     let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
     let memory_limit = config.memory_limit;
@@ -400,12 +445,12 @@ impl PlatformExecutor for MacOSExecutor {
         config: Arc<SandboxConfig>,
         cmd: &str,
         args: &[&str],
-        stdin: bool,
+        io: Io,
         proxy: Option<Arc<ProxiedNetwork>>,
     ) -> Result<Launched> {
         let cmd = cmd.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        Supervisor::start(move || launch_in_thread(&config, &cmd, &args, stdin, proxy))
+        Supervisor::start(move || launch_in_thread(&config, &cmd, &args, io, proxy))
     }
 
     fn check_support(&self, config: &SandboxConfig) -> Result<()> {

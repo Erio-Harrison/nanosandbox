@@ -24,3 +24,6 @@ mod proxy_advanced;
 
 #[path = "integration/observability.rs"]
 mod observability;
+
+#[path = "integration/spawn.rs"]
+mod spawn;

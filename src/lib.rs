@@ -26,9 +26,14 @@
 //! let result = sandbox.run("python3", &["-c", "print('hello')"]).unwrap();
 //! println!("{}", result.stdout);
 //! ```
+//!
+//! `run` collects everything; [`Sandbox::spawn`] and [`Sandbox::spawn_pty`] (Linux, macOS)
+//! hand the streams to the caller as the command runs.
 
 pub mod audit;
 mod builder;
+#[cfg(unix)]
+pub mod child;
 pub mod error;
 pub mod network;
 pub(crate) mod platform;
@@ -38,6 +43,8 @@ pub mod sandbox;
 #[cfg(target_os = "linux")]
 pub use builder::Permission;
 pub use builder::{DEFAULT_MAX_OUTPUT, DEFAULT_PRIVATE_TMP_SIZE, SandboxBuilder};
+#[cfg(unix)]
+pub use child::{Child, ChildStderr, ChildStdin, ChildStdout};
 pub use error::{Result, SandboxError};
 pub use result::ExecutionResult;
 pub use sandbox::Sandbox;

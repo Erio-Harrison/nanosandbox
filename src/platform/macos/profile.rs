@@ -19,11 +19,14 @@ const DEFAULT_WRITABLE: [&str; 4] = [
 ];
 
 /// Base-policy gaps found with real programs: sysctl metadata nodes, clang's dirhelper,
-/// and `/dev/fd/1` for `echo > /dev/stdout`.
+/// and `/dev/fd/1` for `echo > /dev/stdout`. `/dev/tty` is the run's own controlling terminal
+/// (`spawn_pty`; otherwise there is none and opening it fails), which the base policy's
+/// `/dev/ttysN` rule doesn't cover for a terminal made before the sandbox applied.
 const EXTRA_BASE_POLICY: &str = r#"
 (allow sysctl-read (sysctl-name-prefix "sysctl."))
 (allow mach-lookup (global-name "com.apple.bsd.dirhelper"))
 (allow file-write-data (regex #"^/dev/fd/[0-9]+$"))
+(allow file-read* file-write* file-ioctl (literal "/dev/tty"))
 "#;
 
 pub(super) struct SeatbeltProfile {

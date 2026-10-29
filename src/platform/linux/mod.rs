@@ -13,7 +13,7 @@ use crate::error::{Result, SandboxError};
 use crate::network::{ProxiedNetwork, SANDBOX_PROXY_PORT};
 use crate::platform::PlatformExecutor;
 use crate::platform::private_tmp::PrivateTmp;
-use crate::platform::supervise::{self, Handles, Launched, Outcome, Supervisor};
+use crate::platform::supervise::{self, Handles, Io, Launched, Outcome, Supervisor};
 use crate::result::ExecutionResult;
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
@@ -158,7 +158,7 @@ fn launch_in_thread(
     config: &Arc<SandboxConfig>,
     cmd: &str,
     args: &[String],
-    stdin: bool,
+    io: Io,
     proxy: Option<Arc<ProxiedNetwork>>,
 ) -> Result<(Handles, impl FnOnce() -> Result<Outcome> + use<>)> {
     use nix::sched::{CloneFlags, clone};
@@ -169,7 +169,26 @@ fn launch_in_thread(
     // Pipes (see prepare::Pipes). The child gets plain fd numbers: it has its own fd table.
     let user_ns =
         UserNamespace::new(config.uid, config.gid).with_host_ids(config.host_uid, config.host_gid);
-    let pipes = Pipes::create(stdin, user_ns.host_ids())?;
+    let pipes = Pipes::create(io.stdin && io.pty.is_none(), user_ns.host_ids())?;
+    // With a terminal the child's stdio is its slave end instead (see child.rs).
+    let pty = io
+        .pty
+        .map(|(rows, cols)| crate::platform::pty::open(rows, cols))
+        .transpose()
+        .map_err(|e| SandboxError::Internal {
+            context: "open a pseudo-terminal".into(),
+            source: Box::new(e),
+        })?;
+    let pty_slave = pty.as_ref().map(|p| p.slave_path.clone());
+    if let Some(p) = &pty
+        && namespace::runs_as_root()
+    {
+        // Like the pipes: the sandbox's user must own its terminal.
+        let (uid, gid) = user_ns.host_ids();
+        unsafe {
+            libc::fchown(p.slave.as_raw_fd(), uid, gid);
+        }
+    }
     let stdout_read = pipes.stdout_read_fd.as_raw_fd();
     let stdout_write = pipes.stdout_write_fd.as_raw_fd();
     let stderr_read = pipes.stderr_read_fd.as_raw_fd();
@@ -296,6 +315,7 @@ fn launch_in_thread(
         write_rules,
         rlimits,
         syscall_filter,
+        pty_slave,
     };
 
     let child_fn: Box<dyn FnMut() -> isize> = Box::new(move || child_setup.run());
@@ -362,11 +382,35 @@ fn launch_in_thread(
         _ => None,
     };
 
-    let handles = Handles {
-        stdin: pipes.stdin_write_fd,
-        stdout: Some(pipes.stdout_read_fd),
-        stderr: Some(pipes.stderr_read_fd),
-        pid: child_pid.as_raw() as u32,
+    // Held open until the exit, so the master has no EOF (EIO) before the command has opened
+    // its own slave, and gets one right after it's gone.
+    let mut slave_until_exit = None;
+    let handles = match pty {
+        Some(pty) => {
+            slave_until_exit = Some(pty.slave);
+            let dup = |what: &str| {
+                crate::platform::pty::dup_cloexec(pty.master.as_raw_fd()).map_err(|e| {
+                    SandboxError::Internal {
+                        context: format!("dup the terminal for {what}"),
+                        source: Box::new(e),
+                    }
+                })
+            };
+            Handles {
+                stdin: Some(dup("stdin")?),
+                pty: Some(dup("resizing")?),
+                stdout: Some(pty.master),
+                stderr: None,
+                pid: child_pid.as_raw() as u32,
+            }
+        }
+        None => Handles {
+            stdin: pipes.stdin_write_fd,
+            stdout: Some(pipes.stdout_read_fd),
+            stderr: Some(pipes.stderr_read_fd),
+            pid: child_pid.as_raw() as u32,
+            pty: None,
+        },
     };
     let signal_pipe = pipes.signal_read_fd;
     let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
@@ -396,6 +440,7 @@ fn launch_in_thread(
                     parallelism,
                 }),
         )?;
+        slave_until_exit.take();
         let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);
 
@@ -443,12 +488,12 @@ impl PlatformExecutor for LinuxExecutor {
         config: Arc<SandboxConfig>,
         cmd: &str,
         args: &[&str],
-        stdin: bool,
+        io: Io,
         proxy: Option<Arc<ProxiedNetwork>>,
     ) -> Result<Launched> {
         let cmd = cmd.to_string();
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        Supervisor::start(move || launch_in_thread(&config, &cmd, &args, stdin, proxy))
+        Supervisor::start(move || launch_in_thread(&config, &cmd, &args, io, proxy))
     }
 
     fn execute(
@@ -459,7 +504,11 @@ impl PlatformExecutor for LinuxExecutor {
         stdin: Option<&[u8]>,
         proxy: Option<&Arc<ProxiedNetwork>>,
     ) -> Result<ExecutionResult> {
-        let launched = self.launch(Arc::clone(config), cmd, args, stdin.is_some(), proxy.cloned())?;
+        let io = Io {
+            stdin: stdin.is_some(),
+            pty: None,
+        };
+        let launched = self.launch(Arc::clone(config), cmd, args, io, proxy.cloned())?;
         let result = supervise::collect(launched, stdin, config.max_output)?;
         // The child writes this exact line only from this exit code, after giving up on every $PATH
         // candidate, so it's safe to turn into `SandboxError::CommandNotFound`, matching Windows.

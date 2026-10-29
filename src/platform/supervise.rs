@@ -34,6 +34,17 @@ pub(crate) struct Handles {
     pub(crate) stderr: Option<OwnedFd>,
     /// Host pid of the run's first process.
     pub(crate) pid: u32,
+    /// With a PTY: a handle on its master, for resizing.
+    pub(crate) pty: Option<OwnedFd>,
+}
+
+/// What `launch` is asked to connect the command to.
+#[derive(Clone, Copy)]
+pub(crate) struct Io {
+    /// A pipe for stdin (else `/dev/null`).
+    pub(crate) stdin: bool,
+    /// A pseudo-terminal of this many rows and columns as stdin, stdout and stderr.
+    pub(crate) pty: Option<(u16, u16)>,
 }
 
 /// A started run: its I/O ends and its supervisor.
@@ -41,6 +52,8 @@ pub(crate) struct Launched {
     pub(crate) stdin: Option<OwnedFd>,
     pub(crate) stdout: Option<OwnedFd>,
     pub(crate) stderr: Option<OwnedFd>,
+    pub(crate) pid: u32,
+    pub(crate) pty: Option<OwnedFd>,
     pub(crate) supervisor: Supervisor,
     pub(crate) start: Instant,
 }
@@ -102,6 +115,8 @@ impl Supervisor {
             stdin: handles.stdin,
             stdout: handles.stdout,
             stderr: handles.stderr,
+            pid: handles.pid,
+            pty: handles.pty,
             supervisor: Supervisor {
                 pid: handles.pid,
                 done: done_read,
@@ -124,6 +139,16 @@ impl Supervisor {
             libc::kill(pid, libc::SIGKILL);
             libc::kill(-pid, libc::SIGKILL);
         }
+    }
+
+    /// Whether the run has ended and been cleaned up.
+    pub(crate) fn is_done(&self) -> bool {
+        let mut pfd = libc::pollfd {
+            fd: self.done.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        unsafe { libc::poll(&mut pfd, 1, 0) > 0 }
     }
 
     /// Blocks until the run has ended and been cleaned up.
@@ -237,6 +262,7 @@ pub(crate) fn collect(
         stderr,
         supervisor,
         start,
+        ..
     } = launched;
     let mut streams = [stdout, stderr];
     let mut captured = [Captured::new(max_output), Captured::new(max_output)];

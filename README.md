@@ -36,6 +36,25 @@ let result = sandbox.run("python3", &["-c", "print('hello')"])?;
 println!("{}", result.stdout);  // hello
 ```
 
+### Streaming and interactive runs
+
+`run` collects everything. `spawn` hands you the pipes while the command
+runs, with nothing cut at `max_output`; `spawn_pty` gives it a terminal of
+its own (Linux and macOS):
+
+```rust
+use std::io::{BufRead, BufReader, Write};
+
+let mut child = sandbox.spawn("cargo", &["build"])?;
+for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+    println!("{}", line?);
+}
+let result = child.wait()?;
+
+let mut shell = sandbox.spawn_pty("bash", &[], 24, 80)?;
+shell.stdin.as_mut().unwrap().write_all(b"ls\n")?;
+```
+
 ### Presets
 
 ```rust

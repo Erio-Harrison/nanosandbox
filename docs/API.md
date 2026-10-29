@@ -70,6 +70,38 @@ let result = sandbox.run_with_input("cat", &[], Some(b"hello world"))?;
 assert_eq!(result.stdout, "hello world");
 ```
 
+#### `spawn` / `spawn_pty` (Linux, macOS)
+
+Start a command and work with it while it runs. `run` is `spawn` plus
+reading everything; the limits, the cleanup and the audit record are the
+same.
+
+```rust
+pub fn spawn(&self, cmd: &str, args: &[&str]) -> Result<Child>
+pub fn spawn_pty(&self, cmd: &str, args: &[&str], rows: u16, cols: u16) -> Result<Child>
+```
+
+`spawn` gives the command pipes: `Child::stdin`, `stdout` and `stderr`
+implement `Write`/`Read` (and `AsRawFd`). Nothing is cut at `max_output`:
+a command that writes faster than the caller reads waits on its pipe.
+
+`spawn_pty` gives it a pseudo-terminal of `rows` by `cols` instead, its
+own controlling terminal (never the caller's): `stdin` and `stdout` are the
+terminal, `stderr` is `None`. For shells, REPLs, and programs that behave
+differently on a tty. `Child::resize` changes the size; a terminal has no
+EOF to send, so write `0x04` to end input. A shell may flush pending input
+while it sets the terminal up, so type after its prompt.
+
+```rust
+use std::io::{BufRead, BufReader};
+
+let mut child = sandbox.spawn("cargo", &["test"])?;
+for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+    println!("{}", line?);
+}
+let result = child.wait()?;
+```
+
 #### `id`
 
 ```rust
@@ -77,6 +109,34 @@ pub fn id(&self) -> &str
 ```
 
 A unique identifier for this sandbox.
+
+## Child
+
+What `spawn`/`spawn_pty` return.
+
+```rust
+pub struct Child {
+    pub stdin: Option<ChildStdin>,
+    pub stdout: Option<ChildStdout>,
+    pub stderr: Option<ChildStderr>,   // None with a PTY
+}
+
+impl Child {
+    pub fn id(&self) -> u32;                                   // host pid of its first process
+    pub fn kill(&mut self) -> Result<()>;                      // SIGKILL; result has signal 9
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()>;  // PTY only
+    pub fn try_wait(&mut self) -> Result<Option<ExecutionResult>>;
+    pub fn wait(self) -> Result<ExecutionResult>;
+    pub fn wait_with_output(self) -> Result<ExecutionResult>;
+}
+```
+
+`wait` reads and drops what the command still writes to the streams the
+`Child` holds (so it can't block on them) and returns a result with empty
+`stdout`/`stderr`; `wait_with_output` collects them (up to `max_output`
+each) like `run`. A stream the caller took out is the caller's to drain.
+`try_wait` doesn't block. Dropping a `Child` kills the command and waits
+for its cleanup.
 
 ### Presets
 

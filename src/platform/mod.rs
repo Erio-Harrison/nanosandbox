@@ -16,6 +16,9 @@ pub(crate) mod output;
 #[cfg(unix)]
 pub(crate) mod private_tmp;
 #[cfg(unix)]
+#[cfg(unix)]
+pub(crate) mod pty;
+#[cfg(unix)]
 pub(crate) mod read_rules;
 #[cfg(unix)]
 pub(crate) mod supervise;
@@ -51,15 +54,15 @@ pub(crate) use macos::cloexec_pipe;
 /// Platform-specific sandbox executor.
 pub trait PlatformExecutor: Send + Sync {
     /// Starts a command on its own supervisor thread (see `supervise.rs`) and hands back its
-    /// I/O ends. `stdin`: whether to give it a pipe (else `/dev/null`). `proxy` is the sandbox's
-    /// running proxy when `network_mode` is `Proxied`, shared by every run.
+    /// I/O ends. `proxy` is the sandbox's running proxy when `network_mode` is `Proxied`,
+    /// shared by every run.
     #[cfg(unix)]
     fn launch(
         &self,
         config: Arc<SandboxConfig>,
         cmd: &str,
         args: &[&str],
-        stdin: bool,
+        io: supervise::Io,
         proxy: Option<Arc<ProxiedNetwork>>,
     ) -> Result<supervise::Launched>;
 
@@ -74,7 +77,11 @@ pub trait PlatformExecutor: Send + Sync {
         stdin: Option<&[u8]>,
         proxy: Option<&Arc<ProxiedNetwork>>,
     ) -> Result<ExecutionResult> {
-        let launched = self.launch(Arc::clone(config), cmd, args, stdin.is_some(), proxy.cloned())?;
+        let io = supervise::Io {
+            stdin: stdin.is_some(),
+            pty: None,
+        };
+        let launched = self.launch(Arc::clone(config), cmd, args, io, proxy.cloned())?;
         supervise::collect(launched, stdin, config.max_output)
     }
 

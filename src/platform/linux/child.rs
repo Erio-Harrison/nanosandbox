@@ -57,6 +57,9 @@ pub(super) struct ChildSetup {
     pub(super) write_rules: Option<WriteRules>,
     pub(super) rlimits: Vec<(u32, u64, &'static [u8])>,
     pub(super) syscall_filter: Option<SyscallFilter>,
+    /// A pseudo-terminal's slave device, opened here (see `pty::Pty::slave_path`): the
+    /// command's controlling terminal and stdio.
+    pub(super) pty_slave: Option<CString>,
 }
 
 impl ChildSetup {
@@ -107,7 +110,26 @@ impl ChildSetup {
 
         // Stdin: /dev/null if none given, not our inherited stdin (e.g. an MCP client's stream),
         // whose shared file description let an O_NONBLOCK set by the command break the host's reads.
-        if let Some(stdin_fd) = self.stdin_read {
+        if let Some(path) = &self.pty_slave {
+            // The terminal is the session's (setsid above) and all three streams. Opened now,
+            // while the host's /dev/pts is still what /dev/pts is.
+            let slave = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+                )
+            };
+            if slave < 0
+                || unsafe { libc::ioctl(slave, libc::TIOCSCTTY as _, 0) } != 0
+                || unsafe { libc::dup2(slave, libc::STDIN_FILENO) } < 0
+                || unsafe { libc::dup2(slave, libc::STDOUT_FILENO) } < 0
+                || unsafe { libc::dup2(slave, libc::STDERR_FILENO) } < 0
+            {
+                let _ = write_raw(2, b"Failed to take the terminal\n");
+                return 1;
+            }
+            let _ = close_raw(slave);
+        } else if let Some(stdin_fd) = self.stdin_read {
             if unsafe { libc::dup2(stdin_fd, libc::STDIN_FILENO) } < 0 {
                 let _ = write_raw(2, b"Failed to redirect stdin\n");
                 return 1;
@@ -128,8 +150,9 @@ impl ChildSetup {
         }
 
         // A failed redirect would leave output uncaptured: fail instead.
-        if unsafe { libc::dup2(self.stdout_write, libc::STDOUT_FILENO) } < 0
-            || unsafe { libc::dup2(self.stderr_write, libc::STDERR_FILENO) } < 0
+        if self.pty_slave.is_none()
+            && (unsafe { libc::dup2(self.stdout_write, libc::STDOUT_FILENO) } < 0
+                || unsafe { libc::dup2(self.stderr_write, libc::STDERR_FILENO) } < 0)
         {
             let _ = write_raw(2, b"Failed to redirect output\n");
             return 1;

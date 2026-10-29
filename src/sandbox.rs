@@ -1,7 +1,11 @@
 //! Sandbox: the high-level API.
 
 use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
+#[cfg(unix)]
+use crate::child::Child;
 use crate::error::Result;
+#[cfg(unix)]
+use crate::platform::supervise::Io;
 use crate::network::ProxiedNetwork;
 use crate::platform::{PlatformExecutor, get_executor};
 use crate::result::ExecutionResult;
@@ -124,6 +128,90 @@ impl Sandbox {
             crate::audit::end(hook, &self.id, run, &result);
         }
         result
+    }
+
+    /// Starts `cmd` and returns a [`Child`] whose stdin, stdout and stderr are pipes the caller
+    /// reads and writes while it runs; `wait` or `wait_with_output` gives the same result as
+    /// `run`. Limits, cleanup and the audit record are as for `run`. Output is not cut at
+    /// `max_output`: a command that writes faster than the caller reads waits on its pipe.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use nanosandbox::Sandbox;
+    /// use std::io::{BufRead, BufReader};
+    ///
+    /// let sandbox = Sandbox::builder().build().unwrap();
+    /// let mut child = sandbox.spawn("cargo", &["build"]).unwrap();
+    /// for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+    ///     println!("{}", line.unwrap());
+    /// }
+    /// let result = child.wait().unwrap();
+    /// assert!(result.success());
+    /// ```
+    #[cfg(unix)]
+    pub fn spawn(&self, cmd: &str, args: &[&str]) -> Result<Child> {
+        self.spawn_with(cmd, args, Io { stdin: true, pty: None })
+    }
+
+    /// Like [`spawn`](Self::spawn), but on a pseudo-terminal of `rows` by `cols`: the command
+    /// has a controlling terminal of its own (not the caller's), and `stdin`/`stdout` are
+    /// its master; `stderr` is `None`. For shells, REPLs and programs that behave differently
+    /// on a tty. [`Child::resize`] changes the size later.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use nanosandbox::Sandbox;
+    /// use std::io::{Read, Write};
+    ///
+    /// let sandbox = Sandbox::builder().build().unwrap();
+    /// let mut child = sandbox.spawn_pty("bash", &[], 24, 80).unwrap();
+    /// child.stdin.as_mut().unwrap().write_all(b"ls\nexit\n").unwrap();
+    /// let mut screen = String::new();
+    /// child.stdout.take().unwrap().read_to_string(&mut screen).unwrap();
+    /// let result = child.wait().unwrap();
+    /// ```
+    #[cfg(unix)]
+    pub fn spawn_pty(&self, cmd: &str, args: &[&str], rows: u16, cols: u16) -> Result<Child> {
+        self.spawn_with(
+            cmd,
+            args,
+            Io {
+                stdin: true,
+                pty: Some((rows, cols)),
+            },
+        )
+    }
+
+    #[cfg(unix)]
+    fn spawn_with(&self, cmd: &str, args: &[&str], io: Io) -> Result<Child> {
+        self.config.check_pinned()?;
+        let run = self.runs.fetch_add(1, Ordering::SeqCst);
+        let audit = self
+            .config
+            .audit
+            .as_ref()
+            .map(|hook| (hook.clone(), self.id.clone(), run));
+        if let Some((hook, id, run)) = &audit {
+            crate::audit::begin(hook, id, *run, &self.config, cmd, args, None)?;
+        }
+        match self
+            .executor
+            .launch(Arc::clone(&self.config), cmd, args, io, self.proxy.clone())
+        {
+            Ok(launched) => Ok(Child::new(launched, self.config.max_output, audit)),
+            Err(e) => {
+                let failed: Result<ExecutionResult> = Err(e);
+                if let Some((hook, id, run)) = &audit {
+                    crate::audit::end(hook, id, *run, &failed);
+                }
+                Err(match failed {
+                    Err(e) => e,
+                    Ok(_) => unreachable!("built as Err above"),
+                })
+            }
+        }
     }
 
     /// Get the sandbox ID
