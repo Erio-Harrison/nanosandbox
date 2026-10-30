@@ -633,8 +633,9 @@ fn test_network_settings_are_checked_at_build() {
     ] {
         assert!(config_error(builder).contains(name), "{name}");
     }
-    // Under AppArmor's userns restriction allow_network() itself is refused (Unsupported).
-    if crate::common::skip_without_userns_privileges() {
+    // Under AppArmor's userns restriction allow_network() itself is refused (Unsupported), and
+    // Windows supports host_network() only.
+    if cfg!(not(unix)) || crate::common::skip_without_userns_privileges() {
         return;
     }
     assert!(
