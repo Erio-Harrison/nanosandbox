@@ -228,7 +228,7 @@ fn launch_in_thread(
             source: Box::new(e),
         })?;
 
-    let marker = RunMarker::create().map_err(|e| SandboxError::ExecutionFailed {
+    let mut marker = RunMarker::create().map_err(|e| SandboxError::ExecutionFailed {
         context: "create run marker".into(),
         source: Box::new(e),
     })?;
@@ -420,6 +420,15 @@ fn launch_in_thread(
         let network_refusals = proxy_run.map(|(_, a)| a.finish()).unwrap_or_default();
         let denied_paths = denials.map(|d| d.finish(first_pid)).unwrap_or_default();
         drop(private_tmp);
+        if ended.survivors > 0 {
+            // Can't be killed right now (or forked faster than the kill loop ran): the marker
+            // pair stays, and the next sweep kills whatever still carries it.
+            tracing::warn!(
+                "{} process(es) of the run survived its kill; their run marker is kept for the sweep",
+                ended.survivors
+            );
+            marker.keep();
+        }
         drop(marker);
 
         let rusage = ended.rusage;

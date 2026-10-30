@@ -411,3 +411,39 @@ fn test_a_command_cannot_touch_any_runs_markers() {
         "the temp directory was moved"
     );
 }
+
+/// macOS has no PID namespace and no process-count limit, so a fork bomb outruns a plain kill
+/// loop (90 of its processes used to outlive the run); the kill stops every member before
+/// killing it. The bomb is bounded by `ulimit -u` inside the sandbox so the host's own process
+/// count isn't reached; its processes carry a unique name to count afterwards.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_a_fork_bomb_is_killed_to_the_last_process() {
+    let tag = format!("bomb{}", std::process::id());
+    let count = || {
+        let out = Command::new("pgrep").args(["-f", &tag]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).lines().count()
+    };
+    let sandbox = Sandbox::builder()
+        .wall_time_limit(Duration::from_millis(500))
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                &format!("ulimit -u 500; {tag}(){{ {tag}|{tag} & }}; {tag}"),
+            ],
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    let left = count();
+    if left > 0 {
+        let _ = Command::new("pkill").args(["-9", "-f", &tag]).status();
+    }
+    assert_eq!(
+        left, 0,
+        "{left} processes of the bomb outlived the run ({result:?})"
+    );
+}

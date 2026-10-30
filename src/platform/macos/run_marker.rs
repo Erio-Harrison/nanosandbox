@@ -45,6 +45,8 @@ pub(super) struct RunMarker {
     /// Held for the run's life so a sweep can tell live markers from a killed host's.
     /// `None` where the fs can't lock.
     _lease: Option<std::fs::File>,
+    /// Leave the files for the sweep: processes of the run outlived its kill.
+    keep: bool,
 }
 
 impl RunMarker {
@@ -87,6 +89,7 @@ impl RunMarker {
                         allowed,
                         allowed_c,
                         _lease: lease,
+                        keep: false,
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -183,8 +186,19 @@ pub(crate) fn kill_orphans(denied: &Path, allowed: &Path) -> usize {
     killed.len()
 }
 
+impl RunMarker {
+    /// Don't remove the marker files on drop: processes still carry them, and the next sweep
+    /// (`kill_orphans`, once the lease is seen released) kills what they mark.
+    pub(super) fn keep(&mut self) {
+        self.keep = true;
+    }
+}
+
 impl Drop for RunMarker {
     fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
         let _ = std::fs::remove_file(&self.denied);
         let _ = std::fs::remove_file(&self.allowed);
     }

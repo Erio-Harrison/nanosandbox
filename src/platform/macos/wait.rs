@@ -25,6 +25,8 @@ pub(super) struct Ended {
     pub(super) killed_by_oom: bool,
     pub(super) killed_by_tmp_limit: bool,
     pub(super) rusage: libc::rusage,
+    /// Processes of the run still alive when the final kill gave up (see `kill_run`).
+    pub(super) survivors: usize,
 }
 
 impl MacOSExecutor {
@@ -70,7 +72,7 @@ impl MacOSExecutor {
 
             if result == child_pid {
                 // Sweep descendants the child backgrounded (`cmd & exit 0`); they'd outlive run().
-                Self::kill_run(child_pid, marker);
+                let survivors = Self::kill_run(child_pid, marker);
 
                 let (exit_code, signal) = if libc::WIFEXITED(status) {
                     (libc::WEXITSTATUS(status), None)
@@ -87,6 +89,7 @@ impl MacOSExecutor {
                     killed_by_oom,
                     killed_by_tmp_limit,
                     rusage,
+                    survivors,
                 });
             } else if result == 0 {
                 let now = Instant::now();
@@ -211,22 +214,69 @@ impl MacOSExecutor {
         seen.into_iter().collect()
     }
 
-    /// Kill the tree under `root`, then whatever the run's sandbox still holds; repeat until
-    /// none are left, since one may fork meanwhile. Gives up after `KILL_RUN_LIMIT`.
-    fn kill_run(root: i32, marker: &RunMarker) {
+    /// Kills the tree under `root`, then whatever the run's sandbox still holds. Without a PID
+    /// namespace or a process-count limit, a process that forks as fast as it is killed can
+    /// outrun a kill loop, so each round first `SIGSTOP`s every member found, repeating until
+    /// no new one turns up (a stopped process can't fork; this part isn't on a clock, since
+    /// stopping must finish or the bomb goes on), then `SIGKILL`s them all. `KILL_RUN_LIMIT`
+    /// bounds only the wait for killed processes to exit: one stuck in an uninterruptible exit
+    /// (a binary terminated by a launch constraint) never will. Returns how many such were
+    /// left, 0 when the run is gone; the caller keeps the run's marker in that case so a later
+    /// sweep can finish the job.
+    fn kill_run(root: i32, marker: &RunMarker) -> usize {
         Self::kill_process_tree(root);
         let deadline = Instant::now() + KILL_RUN_LIMIT;
-        while Instant::now() < deadline {
-            let members = marker.members();
-            if members.is_empty() {
-                return;
+        let mut killed: HashSet<i32> = HashSet::new();
+        loop {
+            let mut stopped: HashSet<i32> = HashSet::new();
+            loop {
+                let new: Vec<i32> = marker
+                    .members()
+                    .into_iter()
+                    .filter(|pid| !stopped.contains(pid) && !killed.contains(pid))
+                    .collect();
+                if new.is_empty() {
+                    break;
+                }
+                for &pid in &new {
+                    unsafe {
+                        libc::kill(pid, libc::SIGSTOP);
+                    }
+                    stopped.insert(pid);
+                }
             }
+            let members: Vec<i32> = stopped.into_iter().collect();
             for &pid in &members {
                 unsafe {
                     libc::kill(pid, libc::SIGKILL);
                 }
+                killed.insert(pid);
             }
-            wait_for_exits(&members, deadline);
+            if !members.is_empty() {
+                wait_for_exits(
+                    &members,
+                    deadline.max(Instant::now() + Duration::from_millis(20)),
+                );
+            }
+            let left = marker.members();
+            if left.is_empty() {
+                return 0;
+            }
+            // Only processes already killed are left: they're exiting, or can't. Give them the
+            // rest of the budget, then count them.
+            if left.iter().all(|pid| killed.contains(pid)) {
+                if Instant::now() >= deadline {
+                    return left.len();
+                }
+                wait_for_exits(&left, deadline);
+                if marker.members().is_empty() {
+                    return 0;
+                }
+                if Instant::now() >= deadline {
+                    return marker.members().len();
+                }
+            }
+            // Otherwise new processes appeared since the stop round: go round again.
         }
     }
 

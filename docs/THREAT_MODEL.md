@@ -238,6 +238,7 @@ can't. See [platform-macos.md](platform-macos.md)'s own comparison table.
 | Can't write outside granted paths, except the temp directories | SBPL `file-write*` denial, default-deny. `/tmp`, `/private/tmp`, `/private/var/tmp` and the user's own `/private/var/folders/.../T` are writable by default and are the host's own, shared with every sandbox and the host: what a program writes there by name stays, and `private_tmp`'s limit doesn't apply to it. The user's cache directory (`.../C`) and daemon state (`.../0`) next to it are not writable. `private_tmp` gives each run its own directory through `$TMPDIR` (not a mount, so it can't hide `/tmp`). `shared_tmp(false)` makes the shared ones read-only, at the cost of some programs (see [platform-macos.md](platform-macos.md#shared_tmpfalse)) | `tests/security/sbpl_rules.rs: test_read_only_filesystem`, `src/platform/macos/profile.rs: test_shared_tmp_false_leaves_only_the_private_directory_writable` |
 | Can't read, write, remove or rename another run's private temp directory (where it's a directory, not a tmpfs) | every run's directory is in one container that each run's rules deny, with only the run's own directory allowed back | `tests/security/private_tmp.rs: test_a_run_cannot_reach_another_runs_private_tmp` |
 | Processes of a run that left its process group are still found and killed, at the end of the run and, if the host died, by the next run's sweep; no command can strip any run's marker files to hide them | each run's processes are told apart by a marker file pair under `$TMPDIR/nanosandbox-markers/`, which every run's profile denies writing (and denies renaming anything above it); the sweep of a dead run's pair kills what it still marks before removing it | `src/platform/macos/run_marker.rs` tests, `tests/security/process_management.rs: test_a_command_cannot_touch_any_runs_markers`, `crates/nanosandbox-mcp/tests/stdio.rs: a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep` |
+| A run that forks faster than it can be killed (a fork bomb) doesn't outlive its end | every process carrying the run's marker is stopped first, repeatedly until no new one appears, then killed; what survives the 250 ms budget is logged and the marker kept for the next sweep to finish | `tests/security/process_management.rs: test_a_fork_bomb_is_killed_to_the_last_process` |
 | Can't redirect a writable directory by swapping it, or a directory above it, for a symlink | the profile is made from where each path led at build, a run is refused if that changed, and a writable directory and every directory above it can't be removed or renamed (`file-write-unlink` denied) | `tests/security/workspace_swap.rs` |
 | Can't reach the network outside `allow_network` | SBPL denies all network except the loopback proxy port | `tests/security/sbpl_rules.rs: test_no_network_blocks_connections` |
 | Can't make the system fetch a URL for it outside the allowlist | the proxied profile leaves out `trustd` and `ocspd`, which fetch a certificate's OCSP and issuer URLs for whoever asks them to evaluate it, unless `allow_trustd()` | `src/platform/macos/profile.rs: test_proxied_profile_drops_trust_services_unless_allowed` |
@@ -261,7 +262,11 @@ equivalent):**
   but memory enforcement is a poll loop with a window (a short
   burst can exceed the limit before the next check catches it), and CPU
   time is `RLIMIT_CPU` per-process only -- nothing sums CPU across a
-  process tree the way Linux's cgroup accounting does.
+  process tree the way Linux's cgroup accounting does. A fork bomb runs
+  until the user's own process limit, the run's wall-time limit or the
+  memory limit ends the run; it is then killed to the last process
+  (stop-then-kill, see [platform-macos.md](platform-macos.md#process-cleanup)),
+  but until then it competes with the user's other programs for process slots.
 - `private_tmp` on macOS is a private directory with size checked every
   250ms (100ms once past 60% of the limit) and the run killed if over, not
   a real tmpfs with `ENOSPC` on write -- a short burst can exceed the

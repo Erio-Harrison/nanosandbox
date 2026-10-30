@@ -285,6 +285,19 @@ the first and allowed the second are the run's. Asking about only one isn't
 enough: apps' own sandboxes can't read the temp directory at all. If the
 check doesn't behave as expected on this process itself, nothing is killed.
 
+Finding them isn't the whole job: with no PID namespace and no process-count
+limit, a fork bomb forks faster than a loop of "find, kill, wait" can run,
+and a plain loop left 90 of its processes alive after one run. So each round
+first sends `SIGSTOP` to every process found, repeating until no new one turns
+up (a stopped process can't fork), then `SIGKILL`s them all and waits for
+their exit, and goes round again if any remain. The whole kill has a 250 ms
+budget; a process it couldn't kill by then (a fork bomb at the user's process
+limit, or one stuck in an uninterruptible exit, as a binary terminated by a
+launch constraint can be) is counted, logged, and the run's marker pair is
+left in place instead of removed, so the sweep that handles dead hosts'
+leftovers (`kill_orphans`) kills what still carries it. The fork-bomb case is
+tested with a bomb bounded by `ulimit -u` inside the sandbox.
+
 The same lookup also finds every process of the run *while it's still
 running*, for `memory_limit`'s own periodic check (below): walking the
 process tree from the root the same way used to miss a daemonized
