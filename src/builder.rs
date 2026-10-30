@@ -608,8 +608,17 @@ impl SandboxBuilder {
     }
 
     /// Build the sandbox
-    pub fn build(self) -> Result<Sandbox> {
+    pub fn build(mut self) -> Result<Sandbox> {
         self.validate()?;
+        // Toolchains kept readable in a hidden home are found through these, since `HOME` won't
+        // be the real one; a value the caller set wins.
+        if self.config.expose_toolchains
+            && let Some(home) = crate::platform::read_rules::home_dir()
+        {
+            for (var, value) in crate::platform::read_rules::toolchain_env(&home) {
+                self.config.env.entry(var).or_insert(value);
+            }
+        }
         Sandbox::from_builder(self)
     }
 

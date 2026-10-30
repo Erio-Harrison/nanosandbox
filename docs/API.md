@@ -259,13 +259,22 @@ whole home directory instead, except what `read_only`, `writable` or
 the toolchains and caches readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`,
 `~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`,
 `~/Library/Caches`, `~/Library/Developer` and the like, of those that exist,
-plus the home subtree of every `PATH` entry under home (`~/.cargo/bin` on
-`PATH` brings `~/.cargo`). The credentials above stay hidden inside them
-(`~/.cargo/credentials`). That's what `agent_executor` and `data_analysis`
-use: a command's output goes into a model's context, so what it can read, it
-can leak, and a sandbox for an agent should start from nothing. A tool in an
-unusual place needs one `read_only`. On Linux file names stay visible, only
-contents aren't.
+plus the install root of every `PATH` entry under home (`~/.cargo/bin` brings
+`~/.cargo`, `~/dev/flutter/bin` brings `~/dev/flutter`, not `~/dev`), and
+git's `~/.gitconfig` and `~/.config/git`, which git won't run without. The
+credentials above stay hidden inside them (`~/.cargo/credentials`). Since
+`HOME` isn't the real home for the command (it's the run's private directory,
+or what `env` says), the variables these toolchains find themselves through
+are set for the ones that exist, unless `env` set them: `CARGO_HOME`,
+`RUSTUP_HOME`, `GOPATH`, `NVM_DIR`, `PYENV_ROOT`, `BUN_INSTALL`,
+`DENO_INSTALL`, `VOLTA_HOME`, `SDKMAN_DIR`, `GRADLE_USER_HOME`, `PNPM_HOME`.
+That's what `agent_executor`, `data_analysis` and `nanosandbox-mcp` use: a
+command's output goes into a model's context, so what it can read, it can leak,
+and a sandbox for an agent should start from nothing. A tool in an unusual
+place needs one `read_only`. A hidden path reads as "permission denied", not
+as missing; a program that insists on reading one (git with a `HOME` pointing
+at the real, hidden home) fails rather than carries on. On Linux file names
+stay visible, only contents aren't.
 
 A hard link made on the host is another name for the same file, and every
 rule here is by name. So at `build()` the denied files with more than one name

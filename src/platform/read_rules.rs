@@ -193,26 +193,57 @@ pub(crate) fn toolchain_dirs(home: &Path, path_var: Option<&std::ffi::OsStr>) ->
         "Library/Android",
         "Library/pnpm",
     ];
+    // Configuration tools read from home and can't do without; nothing secret in them.
+    const CONFIG: &[&str] = &[".gitconfig", ".config/git"];
     let mut out: Vec<PathBuf> = KNOWN
         .iter()
+        .chain(CONFIG)
         .map(|k| home.join(k))
-        .filter(|p| p.is_dir())
+        .filter(|p| p.exists())
         .collect();
     if let Some(path_var) = path_var {
         for entry in std::env::split_paths(path_var) {
-            let Ok(rest) = entry.strip_prefix(home) else {
+            if !entry.starts_with(home) || entry == home {
                 continue;
+            }
+            // The tool's install root: `~/x/flutter/bin` brings `~/x/flutter`, not `~/x`.
+            let root = match entry.file_name().and_then(|n| n.to_str()) {
+                Some("bin" | "sbin") if entry.parent() != Some(home) => entry.parent().unwrap(),
+                _ => entry.as_path(),
             };
-            let Some(first) = rest.components().next() else {
-                continue; // home itself
-            };
-            let top = home.join(first);
-            if top.is_dir() && !out.contains(&top) {
-                out.push(top);
+            if root.is_dir() && !out.iter().any(|o| o == root) {
+                out.push(root.to_path_buf());
             }
         }
     }
     out
+}
+
+/// Where each toolchain is, for the programs that look for it under `$HOME` (rustup's proxies,
+/// nvm, pyenv...): with the home directory hidden, `HOME` is the run's own directory, so they'd
+/// look in the wrong place. Only for the directories that exist.
+pub(crate) fn toolchain_env(home: &Path) -> Vec<(String, String)> {
+    const VARS: &[(&str, &str)] = &[
+        ("CARGO_HOME", ".cargo"),
+        ("RUSTUP_HOME", ".rustup"),
+        ("GOPATH", "go"),
+        ("NVM_DIR", ".nvm"),
+        ("PYENV_ROOT", ".pyenv"),
+        ("BUN_INSTALL", ".bun"),
+        ("DENO_INSTALL", ".deno"),
+        ("VOLTA_HOME", ".volta"),
+        ("SDKMAN_DIR", ".sdkman"),
+        ("GRADLE_USER_HOME", ".gradle"),
+        #[cfg(target_os = "macos")]
+        ("PNPM_HOME", "Library/pnpm"),
+        #[cfg(not(target_os = "macos"))]
+        ("PNPM_HOME", ".local/share/pnpm"),
+    ];
+    VARS.iter()
+        .map(|(var, dir)| (var, home.join(dir)))
+        .filter(|(_, dir)| dir.is_dir())
+        .map(|(var, dir)| (var.to_string(), dir.to_string_lossy().into_owned()))
+        .collect()
 }
 
 /// Roots covering the whole fs except `denied`, for allow-list (Landlock) use.
@@ -400,7 +431,9 @@ pub(crate) fn linked_secrets(config: &SandboxConfig) -> Result<Vec<PathBuf>, Str
         let seen = counts.get(key).copied().unwrap_or(0);
         if seen < *links {
             return Err(format!(
-                "{} has {} names (hard links) and {} of them can't be found under the                  sandbox's directories or home, so the sandbox could read it by the other                  name; find it with `find / -samefile '{}'` and remove it",
+                "{} has {} names (hard links); {} of them can't be found under the sandbox's \
+                 directories or home, so a command could read it by that name. Find it with \
+                 `find / -xdev -samefile '{}' 2>/dev/null` and remove it",
                 name.display(),
                 links,
                 links - seen,
@@ -525,24 +558,58 @@ mod tests {
     fn test_toolchain_dirs_are_the_known_ones_that_exist_and_path_entries_under_home() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path();
-        for d in [".cargo/bin", ".nvm", "mytools/bin", ".ssh"] {
+        for d in [
+            ".cargo/bin",
+            ".nvm",
+            "mytools/bin",
+            "develop/flutter/bin",
+            "bin",
+            "Desktop/proj/bin",
+            ".ssh",
+            ".config/git",
+        ] {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
+        std::fs::write(home.join(".gitconfig"), "").unwrap();
         let path = std::env::join_paths([
             home.join(".cargo/bin"),
             home.join("mytools/bin"),
+            home.join("develop/flutter/bin"),
+            home.join("bin"),
+            home.join("Desktop/proj/bin"),
             home.join("missing/bin"),
             home.to_path_buf(),
             PathBuf::from("/usr/bin"),
         ])
         .unwrap();
         let dirs = toolchain_dirs(home, Some(&path));
-        for expected in [".cargo", ".nvm", "mytools"] {
+        for expected in [
+            ".cargo",
+            ".nvm",
+            "mytools",
+            "develop/flutter",
+            "bin",
+            "Desktop/proj",
+            ".gitconfig",
+            ".config/git",
+        ] {
             assert!(dirs.contains(&home.join(expected)), "{expected}: {dirs:?}");
         }
-        for not in [".rustup", "missing", ".ssh", ""] {
+        // Not the whole of ~/develop or ~/Desktop for one tool in them.
+        for not in [".rustup", "missing", ".ssh", "develop", "Desktop", ""] {
             assert!(!dirs.contains(&home.join(not)), "{not}: {dirs:?}");
         }
+        std::fs::create_dir_all(home.join(".rustup")).unwrap();
+        let env = toolchain_env(home);
+        assert!(env.contains(&(
+            "CARGO_HOME".into(),
+            home.join(".cargo").to_string_lossy().into_owned()
+        )));
+        assert!(env.contains(&(
+            "RUSTUP_HOME".into(),
+            home.join(".rustup").to_string_lossy().into_owned()
+        )));
+        assert!(!env.iter().any(|(k, _)| k == "GOPATH"));
         assert_eq!(
             denied_inside(
                 &home.join(".cargo"),
