@@ -374,7 +374,9 @@ impl Config {
         // The agent preset (home hidden except toolchains and caches), or a plain writable
         // workspace with --no-hide-home; the flags below override the preset's limits.
         let mut b: SandboxBuilder = if self.no_hide_home {
-            Sandbox::builder().working_dir(&workspace).writable(&workspace)
+            Sandbox::builder()
+                .working_dir(&workspace)
+                .writable(&workspace)
         } else {
             Sandbox::agent_executor(&workspace)
         };

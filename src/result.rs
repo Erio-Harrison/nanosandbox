@@ -127,6 +127,7 @@ impl RefusalReason {
 
 impl NetworkRefusal {
     /// The policy-refused hosts among `refusals`, sorted, each once.
+    #[cfg_attr(not(unix), allow(dead_code))] // Windows has no proxy
     pub(crate) fn blocked_hosts(refusals: &[NetworkRefusal]) -> Vec<String> {
         let mut hosts: Vec<String> = refusals
             .iter()

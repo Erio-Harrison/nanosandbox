@@ -3,7 +3,9 @@
 use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 #[cfg(unix)]
 use crate::child::Child;
-use crate::error::{Result, SandboxError};
+use crate::error::Result;
+#[cfg(unix)]
+use crate::error::SandboxError;
 use crate::network::ProxiedNetwork;
 #[cfg(unix)]
 use crate::platform::supervise::Io;

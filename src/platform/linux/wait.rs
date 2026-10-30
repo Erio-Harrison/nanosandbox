@@ -75,7 +75,11 @@ pub(super) fn supervise(
     };
     unsafe {
         let fd = signal_pipe.as_raw_fd();
-        libc::fcntl(fd, libc::F_SETFL, libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK);
+        libc::fcntl(
+            fd,
+            libc::F_SETFL,
+            libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+        );
     }
     let exit_fd = exit_watch(pid);
 

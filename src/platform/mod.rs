@@ -37,9 +37,7 @@ pub(crate) fn rlimit_cpu_secs(limit: std::time::Duration) -> u64 {
 
 /// A pipe whose ends no concurrently started program inherits.
 #[cfg(target_os = "linux")]
-pub(crate) fn cloexec_pipe(
-    what: &str,
-) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+pub(crate) fn cloexec_pipe(what: &str) -> Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
     nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(|e| {
         crate::error::SandboxError::Internal {
             context: format!("create {what} pipe"),

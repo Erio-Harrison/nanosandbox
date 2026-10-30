@@ -615,10 +615,11 @@ impl SandboxBuilder {
     }
 
     /// Build the sandbox
-    pub fn build(mut self) -> Result<Sandbox> {
+    pub fn build(#[cfg_attr(not(unix), allow(unused_mut))] mut self) -> Result<Sandbox> {
         self.validate()?;
         // Toolchains kept readable in a hidden home are found through these, since `HOME` won't
         // be the real one; a value the caller set wins.
+        #[cfg(unix)]
         if self.config.expose_toolchains
             && let Some(home) = crate::platform::read_rules::home_dir()
         {

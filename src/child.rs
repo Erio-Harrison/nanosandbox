@@ -181,7 +181,11 @@ impl Child {
         }
         let outcome = self.supervisor.take().expect("checked above").wait();
         let result = outcome.map(|o| {
-            supervise::finish(o, [Captured::new(0), Captured::new(0)], self.start.elapsed())
+            supervise::finish(
+                o,
+                [Captured::new(0), Captured::new(0)],
+                self.start.elapsed(),
+            )
         });
         self.record(result).map(Some)
     }

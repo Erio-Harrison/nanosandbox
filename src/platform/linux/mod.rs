@@ -280,7 +280,8 @@ fn launch_in_thread(
     let proxy_link_child = proxy_link.as_ref().map(ProxyLink::child_side);
 
     // Without a rootfs: writes only to ReadWrite mounts, tmpfs and temp dirs.
-    let write_rules = landlock::WriteRules::new(config, private_tmp.as_ref().map(PrivateTmp::path))?;
+    let write_rules =
+        landlock::WriteRules::new(config, private_tmp.as_ref().map(PrivateTmp::path))?;
 
     // check_support refused seccomp(true) where there's no filter.
     let syscall_filter = if config.seccomp {

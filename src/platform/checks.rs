@@ -67,8 +67,14 @@ mod tests {
     #[test]
     fn test_memory_checks_speed_up_near_the_limit() {
         let now = Instant::now();
-        assert_eq!(memory_check_due(now, 10, 100) - now, Duration::from_millis(10));
-        assert_eq!(memory_check_due(now, 61, 100) - now, Duration::from_millis(2));
+        assert_eq!(
+            memory_check_due(now, 10, 100) - now,
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            memory_check_due(now, 61, 100) - now,
+            Duration::from_millis(2)
+        );
     }
 
     #[test]
@@ -80,6 +86,9 @@ mod tests {
             poll_timeout_ms(Some(now + Duration::from_micros(1500)), now),
             2
         );
-        assert_eq!(poll_timeout_ms(Some(now + Duration::from_millis(3)), now), 3);
+        assert_eq!(
+            poll_timeout_ms(Some(now + Duration::from_millis(3)), now),
+            3
+        );
     }
 }

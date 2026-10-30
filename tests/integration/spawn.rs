@@ -48,7 +48,11 @@ fn test_output_streams_before_the_command_ends() {
     let mut stdout = child.stdout.take().unwrap();
     let first = read_until(&mut stdout, "first", Duration::from_secs(5));
     assert_eq!(first, "first\n");
-    assert!(start.elapsed() < Duration::from_millis(900), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        start.elapsed()
+    );
 
     let second = read_until(&mut stdout, "second", Duration::from_secs(5));
     assert_eq!(second, "second\n");
