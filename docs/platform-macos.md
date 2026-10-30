@@ -199,10 +199,13 @@ was before.
 
 #### `shared_tmp(false)`
 
-With the default, `/tmp`, `/private/tmp`, `/private/var/tmp` and
-`/private/var/folders` are the host's own: a program writing there leaves
-the file after the run, other sandboxes see it, and it can modify the user's
-other temp files. `shared_tmp(false)` (`--strict-tmp` in `nanosandbox-mcp`)
+With the default, `/tmp`, `/private/tmp`, `/private/var/tmp` and the user's
+own temp directory `/private/var/folders/.../T` are the host's own: a program
+writing there leaves the file after the run, other sandboxes see it, it can
+modify the user's other temp files, and `private_tmp`'s size limit doesn't
+apply (it covers `$TMPDIR` only). The cache directory `.../C` and the daemon
+state directory `.../0` next to it are not writable: other programs' caches
+and launchd's sockets aren't a command's to touch. `shared_tmp(false)` (`--strict-tmp` in `nanosandbox-mcp`)
 makes them read-only, leaving only the run's private directory writable. It
 needs `private_tmp`, which is on unless turned off.
 

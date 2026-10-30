@@ -11,12 +11,30 @@ const BASE_POLICY: &str = include_str!("policy/seatbelt_base_policy.sbpl");
 const NETWORK_POLICY: &str = include_str!("policy/seatbelt_network_policy.sbpl");
 const PREFERENCES_POLICY: &str = include_str!("policy/seatbelt_preferences_policy.sbpl");
 
-const DEFAULT_WRITABLE: [&str; 4] = [
-    "/tmp",
-    "/private/tmp",
-    "/private/var/folders",
-    "/private/var/tmp",
-];
+/// Writable by default with `shared_tmp`, plus the user's own temp directory (`user_temp_dir`).
+/// Not the whole of `/private/var/folders`: next to that `T/` are the user's cache directory
+/// `C/` (other programs' caches) and `0/` (launchd's and other daemons' sockets and state),
+/// which a command has no business writing.
+const DEFAULT_WRITABLE: [&str; 3] = ["/tmp", "/private/tmp", "/private/var/tmp"];
+
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)`: `/var/folders/xx/yyy/T/`, where `mktemp -t` and the
+/// `xcrun` shims write.
+pub(crate) fn user_temp_dir() -> Option<PathBuf> {
+    let mut buf = vec![0u8; libc::PATH_MAX as usize];
+    let n = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    if n == 0 || n as usize > buf.len() {
+        return None;
+    }
+    buf.truncate(n as usize - 1);
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(buf)))
+}
 
 /// Base-policy gaps found with real programs: sysctl metadata nodes, clang's dirhelper,
 /// and `/dev/fd/1` for `echo > /dev/stdout`. `/dev/tty` is the run's own controlling terminal
@@ -78,14 +96,17 @@ impl MacOSExecutor {
         // A working dir isn't writable just by being one (default "/", or a ReadOnly mount); use a ReadWrite mount.
         let mut roots: Vec<PathBuf> = Vec::new();
         // Without shared tmp only the private dir (below) is writable; roots stay unlisted.
-        let defaults: &[&str] = if config.shared_tmp {
-            &DEFAULT_WRITABLE
+        let defaults: Vec<PathBuf> = if config.shared_tmp {
+            DEFAULT_WRITABLE
+                .iter()
+                .map(PathBuf::from)
+                .chain(user_temp_dir())
+                .collect()
         } else {
-            &[]
+            Vec::new()
         };
         let candidates = defaults
-            .iter()
-            .map(PathBuf::from)
+            .into_iter()
             .chain(
                 config
                     .mounts
@@ -352,8 +373,15 @@ mod tests {
 
         let shared = MacOSExecutor::new().generate_profile(&config, None, Some(&private), None);
         assert!(writable(&shared).iter().any(|w| w == "/private/tmp"));
+        // The user's own T/, not the whole of /private/var/folders (C/ caches, 0/ daemons).
+        let user_tmp = canonical_path(&user_temp_dir().unwrap());
         assert!(
+            writable(&shared).iter().any(|w| Path::new(w) == user_tmp),
+            "{:?}",
             writable(&shared)
+        );
+        assert!(
+            !writable(&shared)
                 .iter()
                 .any(|w| w == "/private/var/folders")
         );
