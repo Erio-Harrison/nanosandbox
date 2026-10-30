@@ -193,10 +193,20 @@ fn test_pty_runs_an_interactive_shell() {
     stdin.write_all(b"echo hi-$((20+3))\n").unwrap();
     let seen = read_until(&mut stdout, "hi-23\r\n", Duration::from_secs(5));
     assert!(seen.contains("hi-23\r\n"), "{seen:?}");
+    // Resize with the shell idle at its prompt (SIGWINCH makes readline redraw it), and ask
+    // again if the shell answers before it has taken the new size in.
+    read_until(&mut stdout, "$ ", Duration::from_secs(5));
     child.resize(40, 100).unwrap();
-    stdin.write_all(b"stty size; exit 5\n").unwrap();
-    let seen = read_until(&mut stdout, "40 100", Duration::from_secs(5));
+    let mut seen = String::new();
+    for _ in 0..5 {
+        stdin.write_all(b"stty size\n").unwrap();
+        seen = read_until(&mut stdout, "$ ", Duration::from_secs(5));
+        if seen.contains("40 100") {
+            break;
+        }
+    }
     assert!(seen.contains("40 100"), "{seen:?}");
+    stdin.write_all(b"exit 5\n").unwrap();
     // The caller took stdout, so it's the caller's to drain: a shell restoring the terminal on
     // exit waits for its output to be read (macOS).
     stdout.read_to_end(&mut Vec::new()).unwrap();
