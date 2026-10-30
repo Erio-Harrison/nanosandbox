@@ -192,7 +192,10 @@ A `read_only` path inside a `writable` one (the workspace, say) is read-only
 again: it can't be changed, replaced or moved, and neither can the directories
 above it, up to the writable one, nor can their mode, owner, flags or ACL be
 changed (so the host isn't kept out of it; on Linux a `chmod` of those
-directories isn't refused, see THREAT_MODEL). The rest stays writable. That's how to keep
+directories isn't refused, see THREAT_MODEL). So a `chmod -R` from the
+workspace root reports a failure for the root and those directories, and
+changes everything else; a workspace with nothing protected inside can be
+re-permissioned freely. The rest stays writable. That's how to keep
 the project's own settings out of reach of the commands the sandbox runs (a
 lockfile, a CI config, `.git/hooks`). On macOS it's a deny rule. On Linux it's a read-only mount, so
 it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`

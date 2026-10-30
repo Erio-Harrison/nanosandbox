@@ -59,9 +59,9 @@ fn without_trust_services(policy: &str) -> String {
         .collect()
 }
 
-/// What a pinned directory (a writable root, or a directory above a protected path) must not
-/// have done to it: removed or renamed, and its mode, owner, flags or ACL changed, which would
-/// keep the host (or the rules, which match paths) from reaching what's inside.
+/// What a directory above a protected path must not have done to it: removed or renamed, and
+/// its mode, owner, flags or ACL changed, which would keep the host (or the rules, which match
+/// paths) from reaching what's inside.
 const PIN_OPS: &str =
     "file-write-unlink file-write-mode file-write-owner file-write-flags file-write-acl";
 
@@ -174,10 +174,14 @@ impl MacOSExecutor {
             }
         }
         if !fixed.is_empty() {
+            // Only their names: a root's mode is the command's to change (`chmod -R` from the
+            // workspace root must succeed) unless a protected path inside pins it, below.
             let mut rules = String::from("; the writable roots stay where they are\n");
             for (i, dir) in fixed.iter().enumerate() {
                 let key = format!("FIXED_ROOT_{i}");
-                rules.push_str(&format!("(deny {PIN_OPS} (literal (param \"{key}\")))\n"));
+                rules.push_str(&format!(
+                    "(deny file-write-unlink (literal (param \"{key}\")))\n"
+                ));
                 params.push((key, dir.to_string_lossy().into_owned()));
             }
             sections.push(rules);
@@ -502,6 +506,54 @@ mod tests {
 
         let p = profile(&config, None);
         assert!(!p.policy.contains("(allow network-outbound"));
+    }
+
+    /// A writable root is pinned by name only; the mode pin comes with a protected path
+    /// inside it, on the directories above that path.
+    #[test]
+    fn test_root_mode_is_pinned_only_above_a_protected_path() {
+        let ws = std::env::temp_dir().join("nanosandbox-pin-test");
+        std::fs::create_dir_all(ws.join("cfg")).unwrap();
+        std::fs::write(ws.join("cfg/settings.json"), "").unwrap();
+        let root = canonical_path(&ws);
+        let mut config = SandboxConfig::default();
+        config.mounts.push(Mount {
+            source: ws.clone(),
+            target: ws.clone(),
+            permission: Permission::ReadWrite,
+        });
+        let plain = MacOSExecutor::new().generate_profile(&config, None, None, None);
+        let pinned_mode = |p: &SeatbeltProfile, path: &Path| {
+            p.params
+                .iter()
+                .filter(|(k, v)| Path::new(v) == path && k.starts_with("READ_ONLY_"))
+                .any(|(k, _)| {
+                    p.policy
+                        .contains(&format!("(deny {PIN_OPS} (literal (param \"{k}\")))"))
+                })
+        };
+        let root_pin = |p: &SeatbeltProfile| {
+            p.policy
+                .lines()
+                .find(|l| l.contains("FIXED_ROOT_0"))
+                .unwrap_or("")
+                .to_string()
+        };
+        assert_eq!(
+            root_pin(&plain),
+            "(deny file-write-unlink (literal (param \"FIXED_ROOT_0\")))"
+        );
+
+        config.mounts.push(Mount {
+            source: ws.join("cfg/settings.json"),
+            target: ws.join("cfg/settings.json"),
+            permission: Permission::ReadOnly,
+        });
+        let with = MacOSExecutor::new().generate_profile(&config, None, None, None);
+        assert!(pinned_mode(&with, &root.join("cfg")), "{}", with.policy);
+        assert!(pinned_mode(&with, &root), "{}", with.policy);
+        assert_eq!(root_pin(&with), root_pin(&plain));
+        let _ = std::fs::remove_dir_all(&ws);
     }
 
     /// trustd fetches URLs for the program outside the allowlist, so the proxied profile leaves

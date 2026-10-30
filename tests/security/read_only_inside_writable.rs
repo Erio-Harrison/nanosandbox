@@ -183,3 +183,32 @@ fn test_the_workspace_itself_cannot_be_swapped_out() {
     );
     assert!(!outer_root.join("ws.bak").exists());
 }
+
+/// A workspace with nothing protected inside is the command's to re-permission from the top:
+/// `chmod -R` from its root succeeds (a protected path inside pins its ancestors instead).
+#[test]
+fn test_a_plain_workspace_can_be_chmodded_from_its_root() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let ws = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    let root = ws.path().canonicalize().unwrap();
+    if crate::common::skip_if_unreachable_by_nobody(&root) {
+        return;
+    }
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/script.sh"), "#!/bin/sh\n").unwrap();
+    let sandbox = Sandbox::builder()
+        .working_dir(&root)
+        .writable(&root)
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let r = sandbox
+        .run(
+            "sh",
+            &["-c", "chmod -R g+w . && chmod +x sub/script.sh && echo ok"],
+        )
+        .unwrap();
+    assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
+}
