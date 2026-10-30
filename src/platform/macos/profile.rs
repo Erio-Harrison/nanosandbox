@@ -29,6 +29,18 @@ const EXTRA_BASE_POLICY: &str = r#"
 (allow file-read* file-write* file-ioctl (literal "/dev/tty"))
 "#;
 
+/// The certificate-verification daemons fetch OCSP and issuer URLs for a program outside the
+/// allowlist; a certificate it evaluates can name any host. Dropped unless `allow_trustd`.
+const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.ocspd"];
+
+fn without_trust_services(policy: &str) -> String {
+    policy
+        .lines()
+        .filter(|line| !TRUST_SERVICES.iter().any(|s| line.contains(s)))
+        .map(|line| format!("{line}\n"))
+        .collect()
+}
+
 pub(super) struct SeatbeltProfile {
     pub(super) policy: String,
     pub(super) params: Vec<(String, String)>,
@@ -271,8 +283,13 @@ impl MacOSExecutor {
             // Only the local proxy is reachable, so the allowlist can't be bypassed; no port, nothing open.
             NetworkMode::Proxied { .. } => {
                 if let Some(port) = proxy_port {
+                    let network_policy = if config.allow_trustd {
+                        NETWORK_POLICY.to_string()
+                    } else {
+                        without_trust_services(NETWORK_POLICY)
+                    };
                     sections.push(format!(
-                        "(allow network-outbound (remote ip \"localhost:{port}\"))\n{NETWORK_POLICY}"
+                        "(allow network-outbound (remote ip \"localhost:{port}\"))\n{network_policy}"
                     ));
                 }
             }
@@ -446,5 +463,40 @@ mod tests {
 
         let p = profile(&config, None);
         assert!(!p.policy.contains("(allow network-outbound"));
+    }
+
+    /// trustd fetches URLs for the program outside the allowlist, so the proxied profile leaves
+    /// it out unless asked; the host profile keeps it.
+    #[test]
+    fn test_proxied_profile_drops_trust_services_unless_allowed() {
+        let proxied = || SandboxConfig {
+            network_mode: NetworkMode::Proxied {
+                allowed_domains: vec!["example.com".into()],
+            },
+            ..Default::default()
+        };
+        let p = profile(&proxied(), Some(8080));
+        for service in TRUST_SERVICES {
+            assert!(!p.policy.contains(service), "{service}");
+        }
+        assert!(p.policy.contains("com.apple.SecurityServer"));
+        assert!(p.policy.contains("com.apple.networkd"));
+
+        let p = profile(
+            &SandboxConfig {
+                allow_trustd: true,
+                ..proxied()
+            },
+            Some(8080),
+        );
+        assert!(p.policy.contains("com.apple.trustd.agent"));
+        let p = profile(
+            &SandboxConfig {
+                network_mode: NetworkMode::Host,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(p.policy.contains("com.apple.trustd.agent"));
     }
 }
