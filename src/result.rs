@@ -56,6 +56,22 @@ pub struct ExecutionResult {
     /// Every destination the `allow_network` proxy didn't connect to this run, with why,
     /// sorted by host and port.
     pub network_refusals: Vec<NetworkRefusal>,
+
+    /// File accesses the sandbox refused this run, with `report_denials()` (macOS only so far;
+    /// empty elsewhere), sorted by path.
+    pub denied_paths: Vec<DeniedPath>,
+}
+
+/// A file access the sandbox refused a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeniedPath {
+    pub path: std::path::PathBuf,
+    /// What was refused, as the platform names it: `file-read-data`, `file-write-create`,
+    /// `file-write-unlink`, `process-exec`...
+    pub operation: String,
+    /// How many times.
+    pub count: u32,
 }
 
 /// A destination the `allow_network` proxy didn't connect a run to.
@@ -140,6 +156,7 @@ impl ExecutionResult {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         }
@@ -201,6 +218,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -224,6 +242,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -247,6 +266,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -270,6 +290,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -293,6 +314,7 @@ mod tests {
             cpu_time: None,
             blocked_hosts: Vec::new(),
             network_refusals: Vec::new(),
+            denied_paths: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };

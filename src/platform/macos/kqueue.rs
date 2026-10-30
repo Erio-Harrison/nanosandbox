@@ -12,6 +12,8 @@ pub(crate) enum Event {
     Readable(RawFd),
     Writable(RawFd),
     Exited(libc::pid_t),
+    /// A process watched with `watch_tree` forked (its children are listed by the caller).
+    Forked(libc::pid_t),
 }
 
 impl Kqueue {
@@ -81,6 +83,21 @@ impl Kqueue {
         }
     }
 
+    /// Fires when `pid` exits, and each time it forks (`Event::Forked`; the caller lists the
+    /// children, XNU doesn't name them). False if `pid` has already exited.
+    pub(crate) fn watch_tree(&self, pid: libc::pid_t) -> std::io::Result<bool> {
+        match self.change(
+            pid as usize,
+            libc::EVFILT_PROC,
+            libc::EV_ADD | libc::EV_CLEAR,
+            libc::NOTE_EXIT | libc::NOTE_FORK,
+        ) {
+            Ok(()) => Ok(true),
+            Err(e) if e.raw_os_error() == Some(libc::ESRCH) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Blocks until something fires or `timeout` passes (`None`: no limit).
     pub(crate) fn wait(&self, timeout: Option<Duration>) -> std::io::Result<Vec<Event>> {
         let ts = timeout.map(|t| libc::timespec {
@@ -107,15 +124,23 @@ impl Kqueue {
                 return Err(err);
             }
         };
-        Ok(events[..n]
-            .iter()
-            .filter_map(|e| match e.filter {
-                libc::EVFILT_READ => Some(Event::Readable(e.ident as RawFd)),
-                libc::EVFILT_WRITE => Some(Event::Writable(e.ident as RawFd)),
-                libc::EVFILT_PROC => Some(Event::Exited(e.ident as libc::pid_t)),
-                _ => None,
-            })
-            .collect())
+        let mut out = Vec::with_capacity(n);
+        for e in &events[..n] {
+            match e.filter {
+                libc::EVFILT_READ => out.push(Event::Readable(e.ident as RawFd)),
+                libc::EVFILT_WRITE => out.push(Event::Writable(e.ident as RawFd)),
+                libc::EVFILT_PROC => {
+                    if e.fflags & libc::NOTE_FORK != 0 {
+                        out.push(Event::Forked(e.ident as libc::pid_t));
+                    }
+                    if e.fflags & libc::NOTE_EXIT != 0 || e.fflags == 0 {
+                        out.push(Event::Exited(e.ident as libc::pid_t));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -166,7 +191,10 @@ mod tests {
         let start = Instant::now();
         wait_for_exits(&pids, start + Duration::from_secs(5));
         let took = start.elapsed();
-        assert!(took >= Duration::from_millis(40) && took < Duration::from_secs(2), "{took:?}");
+        assert!(
+            took >= Duration::from_millis(40) && took < Duration::from_secs(2),
+            "{took:?}"
+        );
         for k in &mut kids {
             k.wait().unwrap();
         }

@@ -3,6 +3,9 @@
 
 use crate::error::{Result, SandboxError};
 use crate::platform::checks::memory_check_due;
+
+/// `proc_listpids` kind: the children of a pid (libproc.h).
+const PROC_PPID_ONLY: u32 = 6;
 use crate::platform::private_tmp::PrivateTmp;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -37,6 +40,7 @@ impl MacOSExecutor {
         memory_limit: Option<u64>,
         mut private_tmp: Option<&mut PrivateTmp>,
         marker: &RunMarker,
+        mut denials: Option<&mut super::denials::RunDenials>,
     ) -> Result<Ended> {
         let child_pid = child.id() as i32;
         let start = Instant::now();
@@ -49,7 +53,12 @@ impl MacOSExecutor {
             source: Box::new(e),
         })?;
         // Already gone: don't sleep before the wait4 that reaps it. A failed watch keeps a tick.
-        let exit_watched = kq.watch_exit(child_pid);
+        // With denials to report, the process tree is followed fork by fork, so each denial
+        // can be attributed by pid.
+        let exit_watched = match denials {
+            Some(_) => kq.watch_tree(child_pid),
+            None => kq.watch_exit(child_pid),
+        };
         let mut exited = matches!(exit_watched, Ok(false));
         let mut deadline = Some(start + timeout);
         let mut memory_due = memory_limit.map(|_| start);
@@ -129,6 +138,19 @@ impl MacOSExecutor {
                     .wait(wake.map(|w| w.saturating_duration_since(Instant::now())))
                     .unwrap_or_default();
                 exited = events.contains(&Event::Exited(child_pid));
+                if let Some(run) = denials.as_deref_mut() {
+                    // A watched process forked: its children are the run's too, and watched
+                    // in turn. One that exits before this runs is missed (best effort).
+                    for event in &events {
+                        if let Event::Forked(parent) = event {
+                            for child in Self::list_pids(PROC_PPID_ONLY, *parent as u32) {
+                                if run.saw(child) {
+                                    let _ = kq.watch_tree(child);
+                                }
+                            }
+                        }
+                    }
+                }
             } else {
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() == Some(libc::EINTR) {

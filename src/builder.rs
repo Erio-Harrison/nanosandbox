@@ -66,6 +66,11 @@ pub(crate) struct SandboxConfig {
     pub(crate) linked_secrets: Vec<PathBuf>,
     /// [`SandboxBuilder::allow_vcs_hook_writes`]: protect `.git/hooks` in writable dirs.
     pub(crate) protect_vcs_hooks: bool,
+    /// [`SandboxBuilder::report_denials`].
+    pub(crate) report_denials: bool,
+    /// macOS: the unified-log stream behind `report_denials`, started by `Sandbox::new`.
+    #[cfg(target_os = "macos")]
+    pub(crate) denial_log: Option<std::sync::Arc<crate::platform::macos::denials::DenialLog>>,
 
     pub(crate) memory_limit: Option<u64>,
     pub(crate) cpu_limit: Option<f64>,
@@ -208,6 +213,9 @@ impl Default for SandboxConfig {
             hide_home: false,
             expose_toolchains: false,
             linked_secrets: Vec::new(),
+            report_denials: false,
+            #[cfg(target_os = "macos")]
+            denial_log: None,
 
             memory_limit: None,
             cpu_limit: None,
@@ -347,6 +355,17 @@ impl SandboxBuilder {
     /// pyenv) then need `read_only`.
     pub fn hide_home(mut self) -> Self {
         self.config.hide_home = true;
+        self
+    }
+
+    /// Report the file accesses the sandbox refuses in `ExecutionResult::denied_paths`, so a
+    /// caller can tell what a failing command wanted (and, say, ask its user whether to grant
+    /// it with `read_only`). Off by default: on macOS it reads the unified log, which adds
+    /// the log's delay (tens of milliseconds) to each run's end, and tracks the run's process
+    /// tree to attribute each denial by pid; `build()` fails if the log isn't delivering. Not
+    /// reported on Linux yet.
+    pub fn report_denials(mut self) -> Self {
+        self.config.report_denials = true;
         self
     }
 

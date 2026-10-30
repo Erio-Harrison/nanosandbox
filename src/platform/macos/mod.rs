@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+pub(crate) mod denials;
 pub(crate) mod kqueue;
 mod profile;
 pub(crate) mod run_marker;
@@ -314,7 +315,11 @@ fn launch_in_thread(
             command.stderr(slave()?);
         }
         None => {
-            command.stdin(if io.stdin { Stdio::piped() } else { Stdio::null() });
+            command.stdin(if io.stdin {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
             command.stdout(Stdio::piped());
             command.stderr(Stdio::piped());
         }
@@ -399,17 +404,21 @@ fn launch_in_thread(
     };
     let timeout = config.wall_time_limit.unwrap_or(Duration::from_secs(3600));
     let memory_limit = config.memory_limit;
+    let mut denials = config.denial_log.as_ref().map(|log| log.begin());
 
     let supervise = move || {
         let _watchdog = watchdog;
+        let first_pid = child.id() as i32;
         let ended = MacOSExecutor::supervise(
             &mut child,
             timeout,
             memory_limit,
             private_tmp.as_mut(),
             &marker,
+            denials.as_mut(),
         )?;
         let network_refusals = proxy_run.map(|(_, a)| a.finish()).unwrap_or_default();
+        let denied_paths = denials.map(|d| d.finish(first_pid)).unwrap_or_default();
         drop(private_tmp);
         drop(marker);
 
@@ -434,6 +443,7 @@ fn launch_in_thread(
             cpu_time: Some(user_time + sys_time),
             proc_isolated: true,
             network_refusals,
+            denied_paths,
         })
     };
     Ok((handles, supervise))

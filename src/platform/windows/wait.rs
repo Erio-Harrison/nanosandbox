@@ -94,6 +94,7 @@ pub(super) fn wait(
         cpu_time: job.cpu_time(),
         blocked_hosts: Vec::new(),
         network_refusals: Vec::new(),
+        denied_paths: Vec::new(),
         proc_isolated: true,
     })
 }

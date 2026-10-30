@@ -25,6 +25,8 @@ FILES
     --writable <PATH>       Also let commands write PATH (repeatable)
     --deny-read <PATH>      Hide PATH from commands (repeatable)
     --no-hide-home          Don't hide the home directory
+    --report-denials        List the paths a command was refused in its result
+                            (macOS; adds the log's delay to each call)
 
 NETWORK (off by default)
     --allow-network <HOST>  Allow connecting to HOST, comma-separated or
@@ -105,6 +107,7 @@ pub struct Config {
     pub allow_network: Vec<String>,
     pub deny_network: Vec<String>,
     pub host_network: bool,
+    pub report_denials: bool,
     pub memory: u64,
     pub timeout: f64,
     pub cpu: Option<f64>,
@@ -193,6 +196,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
             "--writable" => cfg.writable.push(PathBuf::from(value("a path")?)),
             "--deny-read" => cfg.deny_read.push(PathBuf::from(value("a path")?)),
             "--no-hide-home" => cfg.no_hide_home = true,
+            "--report-denials" => cfg.report_denials = true,
             "--no-cache" => cfg.no_cache = true,
             "--allow-network" => cfg.allow_network.extend(
                 value("a host")?
@@ -374,6 +378,9 @@ impl Config {
             .wall_time_limit(Duration::from_secs_f64(self.timeout));
         if !self.no_hide_home {
             b = b.hide_home_except_toolchains();
+        }
+        if self.report_denials {
+            b = b.report_denials();
         }
         for p in &self.read_only {
             b = b.read_only(p);
@@ -575,6 +582,15 @@ impl Runner for Sandbox {
             tmp_limit_hit: r.killed_by_tmp_limit,
             output_truncated: r.output_truncated,
             blocked_hosts: r.blocked_hosts,
+            denied_paths: r
+                .denied_paths
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "path": d.path, "operation": d.operation, "count": d.count,
+                    })
+                })
+                .collect(),
             network_refusals: r
                 .network_refusals
                 .iter()

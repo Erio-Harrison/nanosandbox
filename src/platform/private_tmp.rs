@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-const PREFIX: &str = "nanosandbox-tmp-";
+pub(crate) const PREFIX: &str = "nanosandbox-tmp-";
 
 /// Younger dirs aren't swept: the creator may not have taken the lock yet.
 const STALE_AFTER: Duration = Duration::from_secs(120);
@@ -103,7 +103,7 @@ impl Drop for PrivateTmp {
 }
 
 /// Non-blocking exclusive `flock`. `Ok(None)`: fs has no locks; `Err(WouldBlock)`: held.
-fn take_lease(dir: &Path) -> std::io::Result<Option<File>> {
+pub(crate) fn take_lease(dir: &Path) -> std::io::Result<Option<File>> {
     let file = File::open(dir)?;
     match try_flock(&file) {
         Ok(true) => Ok(Some(file)),

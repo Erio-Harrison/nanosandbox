@@ -64,6 +64,15 @@ impl Sandbox {
         // Where the paths it names lead, fixed now: see `SandboxConfig::pin`.
         #[cfg(unix)]
         config.pin();
+        #[cfg(target_os = "macos")]
+        if config.report_denials {
+            config.denial_log = Some(crate::platform::macos::denials::DenialLog::start().map_err(
+                |e| SandboxError::Internal {
+                    context: "start the denial log (`log stream`) for report_denials".into(),
+                    source: Box::new(e),
+                },
+            )?);
+        }
         // A hard link made on the host is another name for a denied file; deny those too.
         #[cfg(unix)]
         {

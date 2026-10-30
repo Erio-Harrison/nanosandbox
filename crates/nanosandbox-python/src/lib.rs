@@ -184,6 +184,14 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.allow_trustd()))
     }
 
+    fn report_denials(&mut self) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.report_denials()))
+    }
+
+    fn hide_home_except_toolchains(&mut self) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.hide_home_except_toolchains()))
+    }
+
     #[cfg(target_os = "linux")]
     fn seccomp(&mut self, enabled: bool) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.seccomp(enabled)))
@@ -396,6 +404,22 @@ impl ExecutionResult {
                 )?;
                 d.set_item("attempts", r.attempts)?;
                 Ok(d)
+            })
+            .collect()
+    }
+
+    /// Each refused file access as a dict: `path`, `operation`, `count` (with `report_denials`).
+    #[getter]
+    fn denied_paths<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .denied_paths
+            .iter()
+            .map(|d| {
+                let dict = PyDict::new(py);
+                dict.set_item("path", d.path.to_string_lossy().into_owned())?;
+                dict.set_item("operation", &d.operation)?;
+                dict.set_item("count", d.count)?;
+                Ok(dict)
             })
             .collect()
     }

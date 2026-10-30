@@ -197,6 +197,16 @@ impl SandboxBuilder {
     }
 
     #[napi]
+    pub fn report_denials(&mut self) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.report_denials()))
+    }
+
+    #[napi]
+    pub fn hide_home_except_toolchains(&mut self) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.hide_home_except_toolchains()))
+    }
+
+    #[napi]
     pub fn env(&mut self, key: String, value: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.env(key, value)))
     }
@@ -407,6 +417,14 @@ pub struct NetworkRefusal {
     pub attempts: u32,
 }
 
+/// One `ExecutionResult.deniedPaths` entry (with `reportDenials`).
+#[napi(object)]
+pub struct DeniedPath {
+    pub path: String,
+    pub operation: String,
+    pub count: u32,
+}
+
 /// See `nanosandbox::ExecutionResult`; `success`/`failureReason` call the core methods.
 #[napi]
 pub struct ExecutionResult {
@@ -483,6 +501,19 @@ impl ExecutionResult {
     #[napi(getter)]
     pub fn blocked_hosts(&self) -> Vec<String> {
         self.inner.blocked_hosts.clone()
+    }
+
+    #[napi(getter)]
+    pub fn denied_paths(&self) -> Vec<DeniedPath> {
+        self.inner
+            .denied_paths
+            .iter()
+            .map(|d| DeniedPath {
+                path: d.path.to_string_lossy().into_owned(),
+                operation: d.operation.clone(),
+                count: d.count,
+            })
+            .collect()
     }
 
     #[napi(getter)]

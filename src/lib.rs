@@ -46,7 +46,7 @@ pub use builder::{DEFAULT_MAX_OUTPUT, DEFAULT_PRIVATE_TMP_SIZE, SandboxBuilder};
 #[cfg(unix)]
 pub use child::{Child, ChildStderr, ChildStdin, ChildStdout};
 pub use error::{Result, SandboxError};
-pub use result::{ExecutionResult, NetworkRefusal, RefusalReason};
+pub use result::{DeniedPath, ExecutionResult, NetworkRefusal, RefusalReason};
 pub use sandbox::Sandbox;
 
 /// Removes private temp directories left by killed runs (this user's, unheld). Also runs as new runs start; returns the count removed.

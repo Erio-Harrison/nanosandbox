@@ -38,6 +38,8 @@ pub struct RunOutput {
     pub blocked_hosts: Vec<String>,
     /// Each as `{host, port, reason, detail?, attempts}`.
     pub network_refusals: Vec<serde_json::Value>,
+    /// Each as `{path, operation, count}`; filled with `--report-denials`.
+    pub denied_paths: Vec<serde_json::Value>,
     pub failure_reason: Option<String>,
 }
 
@@ -303,6 +305,7 @@ impl<R: Runner> Server<R> {
             "tmp_limit_hit": out.tmp_limit_hit,
             "blocked_hosts": out.blocked_hosts,
             "network_refusals": out.network_refusals,
+            "denied_paths": out.denied_paths,
         });
         if self.log_io {
             line["stdin"] = json!(stdin);
@@ -370,6 +373,7 @@ fn run_result(out: &RunOutput) -> Value {
         "output_truncated": out.output_truncated,
         "blocked_hosts": out.blocked_hosts,
         "network_refusals": out.network_refusals,
+        "denied_paths": out.denied_paths,
     });
     if let Some(reason) = &out.failure_reason {
         structured["failure_reason"] = json!(reason);

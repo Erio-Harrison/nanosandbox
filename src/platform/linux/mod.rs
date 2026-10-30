@@ -477,6 +477,7 @@ fn launch_in_thread(
             cpu_time,
             proc_isolated: !userns_restricted && !proc_mount_failed,
             network_refusals,
+            denied_paths: Vec::new(),
         })
     };
     Ok((handles, supervise))

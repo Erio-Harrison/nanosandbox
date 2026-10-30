@@ -369,3 +369,60 @@ fn test_agent_preset_hides_home_except_toolchains() {
     let plain = Sandbox::builder().build().unwrap();
     assert!(can_read(&plain, &in_home));
 }
+
+/// With `report_denials()` the result says which paths the sandbox refused, and how.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_denied_paths_are_reported_when_asked() {
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    let secret = dir.path().join("secret");
+    std::fs::write(&secret, "s").unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let script = format!(
+        "cat '{}' >/dev/null 2>&1; cat '{}' >/dev/null 2>&1; echo x > '{}/new' 2>/dev/null; echo done",
+        secret.display(),
+        secret.display(),
+        dir.path().display()
+    );
+
+    // The reporting sandbox goes first: the log coalesces a denial repeated within about a
+    // second, so a quiet run's denials just before could hide the reporting run's.
+    let reporting = Sandbox::builder()
+        .deny_read(&secret)
+        .writable(&ws)
+        .working_dir(&ws)
+        .report_denials()
+        .build()
+        .unwrap();
+    let r = reporting.run("sh", &["-c", &script]).unwrap();
+    assert_eq!(r.stdout.trim(), "done");
+    let real = |p: &std::path::Path| p.canonicalize().unwrap();
+    let read = r
+        .denied_paths
+        .iter()
+        .find(|d| d.path == real(&secret) && d.operation == "file-read-data")
+        .unwrap_or_else(|| panic!("{:?}", r.denied_paths));
+    assert!(read.count >= 1, "{read:?}");
+    assert!(
+        r.denied_paths.iter().any(|d| {
+            d.path == real(dir.path()).join("new") && d.operation.starts_with("file-write")
+        }),
+        "{:?}",
+        r.denied_paths
+    );
+    // Only this run's: the next one starts empty.
+    let r = reporting.run("true", &[]).unwrap();
+    assert!(r.denied_paths.is_empty(), "{:?}", r.denied_paths);
+
+    // Without the flag, nothing is collected.
+    let quiet = Sandbox::builder()
+        .deny_read(&secret)
+        .writable(&ws)
+        .working_dir(&ws)
+        .build()
+        .unwrap();
+    let r = quiet.run("sh", &["-c", &script]).unwrap();
+    assert_eq!(r.stdout.trim(), "done");
+    assert!(r.denied_paths.is_empty());
+}

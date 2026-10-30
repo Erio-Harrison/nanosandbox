@@ -242,6 +242,7 @@ can't see or touch another's temp files.
 pub fn deny_read(self, path: impl Into<PathBuf>) -> Self
 pub fn hide_home(self) -> Self
 pub fn hide_home_except_toolchains(self) -> Self
+pub fn report_denials(self) -> Self
 ```
 
 By default the sandbox can read everything except credentials in the home
@@ -275,6 +276,31 @@ place needs one `read_only`. A hidden path reads as "permission denied", not
 as missing; a program that insists on reading one (git with a `HOME` pointing
 at the real, hidden home) fails rather than carries on. On Linux file names
 stay visible, only contents aren't.
+
+`report_denials()` puts the file accesses the sandbox refused into
+`ExecutionResult::denied_paths`: each path with the operation refused
+(`file-read-data`, `file-write-create`, `process-exec`...) and how many
+times. That's how a caller finds out what a failing command wanted, and can
+decide (or ask its user) whether to grant it with `read_only` and run again;
+the decision and its memory belong to the caller, the sandbox only reports.
+Off by default. On macOS it reads the unified log (`log stream`, no privileges
+needed). The log delivers late and a fresh stream may be silent for a while, so
+the sandbox probes it: a denial it provokes itself, at `build()` (which fails if
+the probe never arrives) and after each run as a barrier, so the run's events
+are all in before they're taken. That costs the log's delay at the end of each
+run, tens of milliseconds. Each denial is attributed by pid: the run's process
+tree is followed fork by fork (kqueue `NOTE_FORK`, then the children listed),
+so other sandboxed programs' denials on the machine, and other runs', are never
+taken for the run's; a child that exits within the moment between its fork and
+the listing is missed. The log line is text in which the process's name and
+the path are the command's to choose, so the pid is read as the one that is
+the run's; a process named to look like a log line can garble the path
+reported for its own denial, not hide the denial. The
+kernel coalesces a denial repeated within about a second (same program,
+operation and path), so `count` is a lower bound, and a run that repeats one
+right after another run may not see it at all. Not reported on Linux yet
+(Landlock denials aren't observable without privileges before kernel 6.15's
+audit support); the field is empty there.
 
 A hard link made on the host is another name for the same file, and every
 rule here is by name. So at `build()` the denied files with more than one name
@@ -570,6 +596,7 @@ pub struct ExecutionResult {
     pub cpu_time: Option<Duration>,    // user + system
     pub blocked_hosts: Vec<String>,    // hosts the allow_network proxy refused by policy
     pub network_refusals: Vec<NetworkRefusal>, // every refusal: host, port, reason, attempts
+    pub denied_paths: Vec<DeniedPath>,  // refused file accesses, with report_denials (macOS)
     pub output_truncated: bool,        // stdout or stderr went past max_output
     pub proc_isolated: bool,           // Linux: false where the sandbox sees the host's /proc
 }

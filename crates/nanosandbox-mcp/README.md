@@ -48,6 +48,7 @@ is refused.
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
 | `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). A `--read-only` path inside the workspace is read-only again, so a settings file there, or `.git/hooks` and `.git/config` (both: `core.hooksPath` in the config runs code from anywhere), can't be changed by a command (on Linux this needs mounting, refused where AppArmor denies it) | |
 | `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory (hidden except toolchains and caches by default) | home hidden |
+| `--report-denials` | Put the paths a command was refused in its result (`denied_paths`; macOS, adds tens of milliseconds per call) | off |
 | `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` and `host:port` work (not `*.com`) | network off |
 | `--deny-network <HOST>` | Refuse these even if allowed, same syntax (`github.com:22`) | none |
 | `--host-network` | Unrestricted network. Use with care. | |
@@ -135,7 +136,9 @@ for `nanosandbox-mcp`. Until one of those, the allowlist isn't available there.
 `network_refusals` has one entry per destination the `--allow-network` proxy didn't connect
 to: `{"host", "port", "reason", "attempts"}`, with `"detail"` for a deny entry's reason. The
 `reason` codes are `not-allowed`, `denied`, `non-public-address`, `host-mismatch`,
-`unreachable` and `timed-out`.
+`unreachable` and `timed-out`. With `--report-denials`, `denied_paths` lists the file accesses
+the sandbox refused: `{"path", "operation", "count"}`, where `operation` is the platform's
+name for it (`file-read-data`, `file-write-create`...).
 
 A command that runs and fails (non-zero exit, killed by a limit) is a normal result, so the model
 can read the output and react. Only a call that couldn't run at all comes back with `isError`.

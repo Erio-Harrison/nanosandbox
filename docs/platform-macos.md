@@ -229,6 +229,34 @@ That list is the 15 cases tried, not a guarantee: `swiftc`, `ld`,
 equivalent option, since there `/tmp`, `/var/tmp` and `/dev/shm` already get
 a private tmpfs per run where the kernel allows mounting.
 
+### Reporting denials
+
+Seatbelt logs every refusal to the unified log as
+`Sandbox: NAME(PID) deny(1) OPERATION PATH`, and `log stream` reads it without
+privileges. With `report_denials()` each `Sandbox` keeps one such stream for
+its lifetime. The stream delivers in order but late (30-50 ms, more under
+load), and a fresh one can stay silent for seconds, so the sandbox probes it:
+`sandbox-exec` reading a file of the sandbox's own under a profile that forbids
+it, then a wait for that event. At `build()` the probe proves the stream live
+(three tries, else `build()` fails); after each run it's the barrier that says
+the run's events have all arrived. A run notes its start and end, learns the
+pids of its process tree from the wait loop's kqueue (`NOTE_FORK` on each
+watched process, then its children listed with `proc_listpids` and watched in
+turn; XNU no longer supports `NOTE_TRACK`), and then takes the `file-*` and
+`process-exec` events from those pids in its window; every other sandboxed
+program on the machine logs to the same place, so nothing else is taken. A
+child that exits before the listing reaches it isn't attributed. `/dev/dtracehelper`,
+which every process writes to, is left out. The line is text, and the process
+name and path in it are the command's: the pid is taken as the split at
+`) deny(` that names one of the run's pids, so a process named like a log line
+can garble its own path, not vanish; a probe's event is told apart by the
+probe's pid. The kernel coalesces a denial
+repeated within about a second (same program, operation and path; the live
+stream then gets one report), so counts are lower bounds and a repeat right
+after an earlier run can be missing. The probe files live in a directory named
+and leased like a private temp directory, so the sweep removes it if the host
+dies. The result is `ExecutionResult::denied_paths`.
+
 ### Local servers
 
 A sandboxed program can neither bind a loopback port nor connect to one

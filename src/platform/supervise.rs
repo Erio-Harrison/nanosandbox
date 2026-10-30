@@ -25,6 +25,7 @@ pub(crate) struct Outcome {
     pub(crate) cpu_time: Option<Duration>,
     pub(crate) proc_isolated: bool,
     pub(crate) network_refusals: Vec<crate::result::NetworkRefusal>,
+    pub(crate) denied_paths: Vec<crate::result::DeniedPath>,
 }
 
 /// The caller's ends of a started command.
@@ -218,6 +219,7 @@ pub(crate) fn finish(
         cpu_time: outcome.cpu_time,
         blocked_hosts: crate::result::NetworkRefusal::blocked_hosts(&outcome.network_refusals),
         network_refusals: outcome.network_refusals,
+        denied_paths: outcome.denied_paths,
         proc_isolated: outcome.proc_isolated,
     }
 }
@@ -451,7 +453,7 @@ impl Poller {
             match e {
                 Event::Readable(fd) => readable.push(fd),
                 Event::Writable(fd) => writable.push(fd),
-                Event::Exited(_) => {}
+                Event::Exited(_) | Event::Forked(_) => {}
             }
         }
         Ok((readable, writable))
