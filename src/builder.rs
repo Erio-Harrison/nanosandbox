@@ -60,6 +60,10 @@ pub(crate) struct SandboxConfig {
     pub(crate) deny_read: Vec<PathBuf>,
     /// [`SandboxBuilder::hide_home`].
     pub(crate) hide_home: bool,
+    /// [`SandboxBuilder::hide_home_except_toolchains`].
+    pub(crate) expose_toolchains: bool,
+    /// Other names of denied files, found at build (`read_rules::linked_secrets`).
+    pub(crate) linked_secrets: Vec<PathBuf>,
     /// [`SandboxBuilder::allow_vcs_hook_writes`]: protect `.git/hooks` in writable dirs.
     pub(crate) protect_vcs_hooks: bool,
 
@@ -202,6 +206,8 @@ impl Default for SandboxConfig {
             rootfs: None,
             deny_read: Vec::new(),
             hide_home: false,
+            expose_toolchains: false,
+            linked_secrets: Vec::new(),
 
             memory_limit: None,
             cpu_limit: None,
@@ -344,7 +350,18 @@ impl SandboxBuilder {
         self
     }
 
-    /// Let the sandbox write `.git/hooks` inside a [`writable`](Self::writable) directory. Off by
+    /// [`hide_home`](Self::hide_home), but the toolchains and caches in the home directory
+    /// stay readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`, `~/.pyenv`, `~/.local`,
+    /// `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`, `~/Library/Caches` and the like, of those that
+    /// exist, and the home subtree of every `PATH` entry under home. The credentials hidden by
+    /// default stay hidden inside them (`~/.cargo/credentials`). What the agent presets use.
+    pub fn hide_home_except_toolchains(mut self) -> Self {
+        self.config.hide_home = true;
+        self.config.expose_toolchains = true;
+        self
+    }
+
+    /// Let the sandbox write `.git/hooks` and `.git/config` inside a [`writable`](Self::writable) directory. Off by
     /// default: a command that writes a hook there would otherwise run on the host the next time
     /// the user runs `git`. On Linux the protection is a read-only mount, so it's absent where
     /// mounting isn't possible (AppArmor `unprivileged_userns`); on macOS it always applies.

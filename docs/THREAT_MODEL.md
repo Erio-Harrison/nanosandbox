@@ -72,7 +72,9 @@ filesystem writes outside a `rootfs`. See
 | Can't connect to host services over Unix sockets (`docker.sock`, the systemd bus, `ssh-agent`, ...), or to a hypervisor host over vsock | seccomp denies `socket(AF_UNIX, ...)` (Landlock governs creating a socket file, not connecting to one, and the filter can't read a `connect()` path) and `socket(AF_VSOCK, ...)`, which the network namespace doesn't cover. Other address families and `socketpair()` are untouched | `tests/security/syscall_filter.rs: test_filter_blocks_kernel_entry_points`, `test_denying_af_unix_sockets_does_not_break_dns_or_compilation` |
 | A command can signal itself and its children normally | the command runs as PID 2 under a small init shim (PID 1), which relays signals and reaps orphans -- see "The init shim" below | `tests/security/process_management.rs: test_self_sigterm_now_works_like_anywhere_else`, `test_sandboxed_command_is_pid_2_under_the_init_shim` |
 | Can't read credentials/history/`deny_read` paths by default, including one inside a writable directory, renamed or not | read-rule allowlist; inside a writable area, a read-only mount over the path and its parents pinned (refused where mounting isn't possible) | `tests/security/read_rules.rs: test_credentials_unreadable_by_default`, `test_deny_read_inside_a_writable_dir` |
-| Can't plant a `.git/hooks` script for the host's git to run later | `.git/hooks` in a writable area is read-only (a mount, its parents pinned), unless `allow_vcs_hook_writes`; absent where mounting isn't possible (see Known gaps) | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
+| Can't plant a `.git/hooks` script, or a `.git/config` entry that runs a command (`core.hooksPath`, `core.fsmonitor`...), for the host's git to run later | `.git/hooks` and `.git/config` in a writable area are read-only (mounts, their parents pinned), unless `allow_vcs_hook_writes`; absent where mounting isn't possible (see Known gaps) | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
+| Can't read or write a denied file through a hard link made on the host beforehand | at `build()` the denied files with more than one name are looked for under the sandbox's directories and home, and the other names denied; a link that isn't found refuses the build | `tests/security/read_rules.rs: test_a_hard_link_to_a_denied_file_is_denied_or_refused` |
+| A path granted back inside a hidden home (a toolchain directory) doesn't bring the credentials inside it | the Landlock grant is split around the denied paths inside it | `tests/security/read_rules.rs: test_a_denied_path_inside_a_granted_one_stays_denied` |
 | Can't read or write the caller's terminal, or inject input into it (`TIOCSTI`) | the command runs in a new session (`setsid`), so it has no controlling terminal | `tests/security/process_management.rs: test_command_runs_in_its_own_session` |
 | Can't exceed memory/CPU/PID/wall-time limits | cgroups v2 (`memory.max`, `cpu.max`, `pids.max`) + wall-clock poll | `tests/security/resource_exhaustion.rs`, `tests/security/resource_enforcement.rs` |
 | Can't reach the network outside `allow_network`'s allowlist, including via direct connection bypassing the proxy | own network namespace; the proxy is the only route out | `tests/security/network_security.rs: test_ip_bypass_blocked` |
@@ -119,9 +121,12 @@ that's not what this protects. Run them in separate sandboxes.
 
 ### Known gaps
 
-- `.git/hooks` protection inside a writable directory is a read-only mount, so
+- `.git/hooks` and `.git/config` protection inside a writable directory is a read-only mount, so
   under the AppArmor restriction (where nothing can be mounted) it's absent and
   a command can write there. macOS, which doesn't need a mount, is unaffected.
+- The hard-link search at `build()` skips home's bulk (`Library`, `.cache`,
+  `node_modules`, `target`, `.git`...) and the rest of the file system; a link
+  there isn't found, and the build is refused rather than the link read.
 - Without a mount (so: no `rootfs`, or under the AppArmor restriction), a
   command can change the metadata -- mode, owner, timestamps, xattrs -- of
   files outside its writable areas that its uid owns or may change. Landlock
@@ -184,9 +189,11 @@ can't. See [platform-macos.md](platform-macos.md)'s own comparison table.
 | Claim | Mechanism | Verified by |
 |---|---|---|
 | Can't read credentials/`deny_read`/hidden-home paths, including one inside a writable root after renaming it or a directory above it | SBPL `file-read-data` denial; `file-write-unlink` denied on such a path and its parents up to the root | `tests/security/sbpl_rules.rs`, `tests/security/read_rules.rs` |
-| Can't plant a `.git/hooks` script for the host's git to run later | `.git/hooks` in a writable root gets `file-write*` denied and its parents' `file-write-unlink` denied, unless `allow_vcs_hook_writes` | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
+| Can't plant a `.git/hooks` script, or a `.git/config` entry that runs a command, for the host's git to run later | `.git/hooks` and `.git/config` in a writable root get `file-write*` denied and their parents' `file-write-unlink` denied, unless `allow_vcs_hook_writes` | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
+| Can't read or write a denied file through a hard link made on the host beforehand | as on Linux: found at `build()` and denied by name (`file-read-data` and `file-write*`), or the build refused | `tests/security/read_rules.rs: test_a_hard_link_to_a_denied_file_is_denied_or_refused` |
+| A path granted back inside a hidden home (a toolchain directory) doesn't bring the credentials inside it | a `file-read-data` deny for each denied path inside a grant, after the grant | `tests/security/read_rules.rs: test_a_denied_path_inside_a_granted_one_stays_denied` |
 | Can't read or write the caller's terminal, or inject input into it (`TIOCSTI`) | the command runs in a new session (`setsid`), so it has no controlling terminal | `tests/security/process_management.rs: test_command_runs_in_its_own_session` |
-| Can't write outside granted paths, except the temp directories | SBPL `file-write*` denial, default-deny. `/tmp`, `/private/tmp`, `/private/var/tmp` and `/private/var/folders` are writable by default and are the host's own, shared with every sandbox and the host: what a program writes there by name stays. `private_tmp` gives each run its own directory through `$TMPDIR` (not a mount, so it can't hide `/tmp`). `shared_tmp(false)` makes the shared ones read-only, at the cost of some programs (see [platform-macos.md](platform-macos.md#shared_tmpfalse)) | `tests/security/sbpl_rules.rs: test_read_only_filesystem` |
+| Can't write outside granted paths, except the temp directories | SBPL `file-write*` denial, default-deny. `/tmp`, `/private/tmp`, `/private/var/tmp` and the user's own `/private/var/folders/.../T` are writable by default and are the host's own, shared with every sandbox and the host: what a program writes there by name stays, and `private_tmp`'s limit doesn't apply to it. The user's cache directory (`.../C`) and daemon state (`.../0`) next to it are not writable. `private_tmp` gives each run its own directory through `$TMPDIR` (not a mount, so it can't hide `/tmp`). `shared_tmp(false)` makes the shared ones read-only, at the cost of some programs (see [platform-macos.md](platform-macos.md#shared_tmpfalse)) | `tests/security/sbpl_rules.rs: test_read_only_filesystem`, `src/platform/macos/profile.rs: test_shared_tmp_false_leaves_only_the_private_directory_writable` |
 | Can't read, write, remove or rename another run's private temp directory (where it's a directory, not a tmpfs) | every run's directory is in one container that each run's rules deny, with only the run's own directory allowed back | `tests/security/private_tmp.rs: test_a_run_cannot_reach_another_runs_private_tmp` |
 | Processes of a run that left its process group are still found and killed, at the end of the run and, if the host died, by the next run's sweep; no command can strip any run's marker files to hide them | each run's processes are told apart by a marker file pair under `$TMPDIR/nanosandbox-markers/`, which every run's profile denies writing (and denies renaming anything above it); the sweep of a dead run's pair kills what it still marks before removing it | `src/platform/macos/run_marker.rs` tests, `tests/security/process_management.rs: test_a_command_cannot_touch_any_runs_markers`, `crates/nanosandbox-mcp/tests/stdio.rs: a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep` |
 | Can't redirect a writable directory by swapping it, or a directory above it, for a symlink | the profile is made from where each path led at build, a run is refused if that changed, and a writable directory and every directory above it can't be removed or renamed (`file-write-unlink` denied) | `tests/security/workspace_swap.rs` |
@@ -203,7 +210,8 @@ equivalent):**
   permissions allowing it -- SBPL still denies `process-fork`/mach lookups
   it doesn't grant -- but it can *see* them, unlike Linux).
 - No private `/tmp`: there are no mount namespaces to give each run its own, so a program
-  that writes to `/tmp` (or `/var/folders`) by name reaches the host's, unless
+  that writes to `/tmp` (or `/var/folders/.../T`) by name reaches the host's, with no
+  size limit and nothing cleaned up afterwards, unless
   `shared_tmp(false)` takes them away. Linux, where mounting
   is possible, gives `/tmp`, `/var/tmp` and `/dev/shm` a private tmpfs per run.
 - No hard memory/CPU/process-count limit. `max_pids` is refused by `build()`

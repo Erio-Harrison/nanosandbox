@@ -228,23 +228,22 @@ impl MacOSExecutor {
                 ));
                 params.push((key, path.to_string_lossy().into_owned()));
             }
-            // In a writable root a denied path, or a directory above it, could be renamed to where
-            // no deny applies; none of them can be removed or renamed.
+            // In a writable root a denied path can't be written either (as on Linux, where a
+            // mount hides it: a hard link to a secret must not be appended to), and neither it
+            // nor a directory above it can be removed or renamed to where no deny applies.
             let in_root = |dir: &Path| roots.iter().any(|r| dir.starts_with(r));
-            let mut fixed_denied: Vec<(&str, &Path)> = Vec::new();
+            let mut fixed_denied: Vec<(&str, &str, &Path)> = Vec::new();
             for path in denied.iter().filter(|p| in_root(p)) {
-                fixed_denied.push(("subpath", path));
+                fixed_denied.push(("file-write*", "subpath", path));
                 for dir in path.ancestors().skip(1).take_while(|d| in_root(d)) {
-                    if !fixed_denied.iter().any(|(_, f)| *f == dir) {
-                        fixed_denied.push(("literal", dir));
+                    if !fixed_denied.iter().any(|(_, _, f)| *f == dir) {
+                        fixed_denied.push(("file-write-unlink", "literal", dir));
                     }
                 }
             }
-            for (i, (filter, dir)) in fixed_denied.iter().enumerate() {
+            for (i, (op, filter, dir)) in fixed_denied.iter().enumerate() {
                 let key = format!("DENY_READ_FIXED_{i}");
-                read_rules.push_str(&format!(
-                    "(deny file-write-unlink ({filter} (param \"{key}\")))\n"
-                ));
+                read_rules.push_str(&format!("(deny {op} ({filter} (param \"{key}\")))\n"));
                 params.push((key, dir.to_string_lossy().into_owned()));
             }
             let mut granted = read_rules::granted(config, &denied);
@@ -256,9 +255,24 @@ impl MacOSExecutor {
                 ));
                 params.push((key, path.to_string_lossy().into_owned()));
             }
+            // A grant doesn't bring the denied paths inside it (a toolchain's credentials file).
+            for (n, path) in granted
+                .iter()
+                .flat_map(|g| read_rules::denied_inside(g, &denied))
+                .enumerate()
+            {
+                let key = format!("DENY_READ_IN_GRANT_{n}");
+                read_rules.push_str(&format!(
+                    "(deny file-read-data (subpath (param \"{key}\")))\n"
+                ));
+                params.push((key, path.to_string_lossy().into_owned()));
+            }
+            // The private temp container is denied above (other runs' directories, inside the
+            // user's temp directory); this run's own comes back for reading and writing.
             if let Some(own) = private_tmp {
-                read_rules
-                    .push_str("(allow file-read-data (subpath (param \"PRIVATE_TMP_OWN\")))\n");
+                read_rules.push_str(
+                    "(allow file-read-data file-write* (subpath (param \"PRIVATE_TMP_OWN\")))\n",
+                );
                 params.push((
                     "PRIVATE_TMP_OWN".into(),
                     canonical_path(own).to_string_lossy().into_owned(),

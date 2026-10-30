@@ -224,9 +224,13 @@ impl WriteRules {
             paths.push((target, handled));
         }
         if read != 0 {
-            let readable = read_rules::allowed_roots(&denied)
-                .into_iter()
-                .chain(read_rules::granted(config, &denied));
+            // A granted path comes back without the denied paths inside it (a toolchain's
+            // credentials file): Landlock only adds access, so the grant is split around them.
+            let readable = read_rules::allowed_roots(&denied).into_iter().chain(
+                read_rules::granted(config, &denied)
+                    .into_iter()
+                    .flat_map(|g| read_rules::allowed_roots_under(&g, &denied)),
+            );
             for p in readable {
                 paths.push((Target::Path(path(&p)?), read));
             }

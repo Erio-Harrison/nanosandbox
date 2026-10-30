@@ -148,8 +148,8 @@ CPU share and process count are left out on macOS, which can't limit them.
 | Preset | Files | Private /tmp | Memory | CPU | Wall time | Processes |
 |---|---|---|---|---|---|---|
 | `code_judge(dir)` | `dir` read-only, working dir; rest of home hidden | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
-| `agent_executor(ws)` | `ws` writable, working dir, `HOME` | 512 MB | 4 GB | 4 cores | 600 s | 256 |
-| `data_analysis(in, out)` | `in` read-only, `out` writable and working dir | 256 MB | 2 GB | 2 cores | 300 s | 100 |
+| `agent_executor(ws)` | `ws` writable, working dir, `HOME`; rest of home hidden except toolchains | 512 MB | 4 GB | 4 cores | 600 s | 256 |
+| `data_analysis(in, out)` | `in` read-only, `out` writable and working dir; rest of home hidden except toolchains | 256 MB | 2 GB | 2 cores | 300 s | 100 |
 | `interactive(ws)` | `ws` writable, working dir, `HOME` | 1 GB | 8 GB | 4 cores | none | 512 |
 
 All have no network; add it with `allow_network`.
@@ -191,10 +191,8 @@ the host user `host_uid`/`host_gid` name.
 A `read_only` path inside a `writable` one (the workspace, say) is read-only
 again: it can't be changed, replaced or moved, and neither can the directories
 above it, up to the writable one. The rest stays writable. That's how to keep
-the project's own settings, or `.git/hooks`, out of reach of the commands the
-sandbox runs. For git, protect `.git/config` as well: its `core.hooksPath` (or
-`core.fsmonitor`) runs code from anywhere. Commits, branches and stashes still
-work with both read-only; `git config` and `git remote add` don't. On macOS it's a deny rule. On Linux it's a read-only mount, so
+the project's own settings out of reach of the commands the sandbox runs
+(`.git/hooks` and `.git/config` get this by default, see below). On macOS it's a deny rule. On Linux it's a read-only mount, so
 it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`
 restriction denies that, rather than leave the path writable.
 
@@ -243,28 +241,53 @@ can't see or touch another's temp files.
 ```rust
 pub fn deny_read(self, path: impl Into<PathBuf>) -> Self
 pub fn hide_home(self) -> Self
+pub fn hide_home_except_toolchains(self) -> Self
 ```
 
 By default the sandbox can read everything except credentials in the home
 directory: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`, `~/.config/gcloud`,
 `~/.kube`, `~/.docker/config.json`, `~/.netrc`, `~/.git-credentials`,
-`~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.env`, shell and
-REPL histories, keyrings and browser profiles. Toolchains, package caches and
-projects in the home directory stay readable, so builds work.
+`~/.config/gh`, `~/.npmrc`, `~/.pypirc`, `~/.cargo/credentials*`, `~/.env`, AI coding
+tools' logins (`~/.codex`, `~/.claude`, `~/.cursor`, `~/.gemini`, ...), shell and
+REPL histories, keyrings and browser profiles. Everything else in the home
+directory stays readable: toolchains and caches, but also other projects and
+their `.env` files, and whatever credential store isn't on the list.
 
 `deny_read(path)` adds a file or directory to that. `hide_home()` hides the
 whole home directory instead, except what `read_only`, `writable` or
-`working_dir` name. On Linux file names stay visible, only contents aren't.
+`working_dir` name. `hide_home_except_toolchains()` does the same but keeps
+the toolchains and caches readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`,
+`~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`,
+`~/Library/Caches`, `~/Library/Developer` and the like, of those that exist,
+plus the home subtree of every `PATH` entry under home (`~/.cargo/bin` on
+`PATH` brings `~/.cargo`). The credentials above stay hidden inside them
+(`~/.cargo/credentials`). That's what `agent_executor` and `data_analysis`
+use: a command's output goes into a model's context, so what it can read, it
+can leak, and a sandbox for an agent should start from nothing. A tool in an
+unusual place needs one `read_only`. On Linux file names stay visible, only
+contents aren't.
+
+A hard link made on the host is another name for the same file, and every
+rule here is by name. So at `build()` the denied files with more than one name
+are looked for under the sandbox's directories and home (minus its bulk:
+`Library`, `.cache`, `node_modules`, `target`, `.git`...), and the other names
+are denied too, reading and writing. One that can't be found is refused with
+`SandboxError::Config` naming the file: it's somewhere readable, and only the
+host can remove it (`find / -samefile <file>`). GnuPG's lock files, which are
+hard links to each other inside `~/.gnupg`, don't trigger this.
 A denied path inside a `writable` directory can't be renamed, removed or
 linked out from under the rule either. On Linux that takes a mount over it
 (an empty read-only directory, or `/dev/null` for a file), so it's refused
 where AppArmor denies mounting, like `read_only` inside a writable directory;
 a path the config names inside such a denied path is refused too.
 
-`.git/hooks` inside a `writable` directory is kept read-only the same way, so a
-command can't plant a hook the host's git would run later (resolving a `.git`
-file's `gitdir:` pointer for worktrees). `allow_vcs_hook_writes()` turns this
-off. On Linux it needs a mount, so it's absent under the AppArmor restriction;
+`.git/hooks` and `.git/config` (and `.git/config.worktree`) inside a `writable`
+directory are kept read-only the same way, so a command can't plant a hook the
+host's git would run later, nor a config entry that runs a command
+(`core.hooksPath`, `core.fsmonitor`, `core.pager`, `diff.external`,
+`filter.*`, `include.path`...); a `.git` file's `gitdir:` pointer is followed
+for worktrees. Commits, branches and stashes work; `git config --local` and
+`git remote add` don't. `allow_vcs_hook_writes()` turns this off. On Linux it needs a mount, so it's absent under the AppArmor restriction;
 on macOS it always applies.
 
 #### `working_dir`
@@ -521,7 +544,7 @@ pub struct ExecutionResult {
     pub duration: Duration,            // wall clock
     pub killed_by_timeout: bool,
     pub killed_by_oom: bool,
-    pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows
+    pub killed_by_tmp_limit: bool,     // wrote more than private_tmp allows ($TMPDIR only, where it's a directory)
     pub killed_by_cpu_limit: bool,     // Linux: the whole cgroup's CPU time, not just one process
     pub signal: Option<i32>,           // the signal that killed the process; see below
     pub peak_memory: Option<u64>,      // bytes
@@ -562,9 +585,12 @@ if result.success() {
 pub fn shared_tmp(self, shared: bool) -> Self
 ```
 
-`true` by default: `/tmp`, `/private/tmp`, `/private/var/tmp` and
-`/private/var/folders` are the host's own and writable. `false` makes them
-read-only, leaving only `private_tmp` (through `$TMPDIR`). It breaks programs
+`true` by default: `/tmp`, `/private/tmp`, `/private/var/tmp` and the user's
+own temp directory (`/private/var/folders/.../T`, where `mktemp -t` and the
+`xcrun` shims write) are the host's own and writable; not the user's cache
+directory (`.../C`, other programs' caches) or `.../0` (daemons' sockets and
+state) next to it. `false` makes them read-only, leaving only `private_tmp`
+(through `$TMPDIR`). It breaks programs
 that write `/tmp` by name, `mktemp -t`, and Apple's `/usr/bin/clang`/`cc`
 shims; see [platform-macos.md](platform-macos.md#shared_tmpfalse).
 

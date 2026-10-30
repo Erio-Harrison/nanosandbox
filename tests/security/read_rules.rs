@@ -9,6 +9,12 @@ fn can_read(sandbox: &Sandbox, file: &std::path::Path) -> bool {
     sandbox.run("sh", &["-c", &script]).unwrap().exit_code == 0
 }
 
+/// What the sandbox sees in `file` (on Linux a hidden file reads as empty rather than failing).
+fn contents(sandbox: &Sandbox, file: &std::path::Path) -> String {
+    let script = format!("cat '{}' 2>/dev/null", file.display());
+    sandbox.run("sh", &["-c", &script]).unwrap().stdout
+}
+
 fn home() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("HOME").unwrap())
 }
@@ -132,9 +138,10 @@ fn test_credentials_unreadable_by_default() {
     );
 }
 
-/// `.git/hooks` in a writable directory can't be written, replaced or moved out of the way, so a
-/// hook can't be planted for the host's git to run; the rest of the workspace stays writable.
-/// `allow_vcs_hook_writes()` turns it off.
+/// `.git/hooks` and `.git/config` in a writable directory can't be written, replaced or moved out
+/// of the way, so neither a hook nor a config entry naming a command (`core.hooksPath`,
+/// `core.fsmonitor`) can be planted for the host's git to run; the rest of the workspace stays
+/// writable. `allow_vcs_hook_writes()` turns it off.
 #[test]
 #[cfg(unix)]
 fn test_git_hooks_in_a_writable_dir_are_protected() {
@@ -163,6 +170,10 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
         "rm .git/hooks/pre-commit",
         "mv .git/hooks .git/hooks.bak",
         "mv .git h && echo x > h/hooks/evil",
+        "echo '[core]\n\thooksPath = evil' >> .git/config",
+        "git config core.fsmonitor /tmp/evil",
+        "rm .git/config",
+        "mv .git/config .git/config.bak",
     ] {
         let r = sandbox.run("sh", &["-c", cmd]).unwrap();
         assert!(
@@ -176,11 +187,18 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
         std::fs::read_to_string(ws.join(".git/hooks/pre-commit")).unwrap(),
         "#!/bin/sh\n"
     );
-    // The workspace outside .git/hooks is still writable.
+    assert_eq!(
+        std::fs::read_to_string(ws.join(".git/config")).unwrap(),
+        "[core]\n"
+    );
+    // The workspace outside those is still writable, .git included.
     let r = sandbox
         .run(
             "sh",
-            &["-c", "echo ok > file && echo y >> .git/config && cat file"],
+            &[
+                "-c",
+                "echo ok > file && echo y >> .git/description && cat file",
+            ],
         )
         .unwrap();
     assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
@@ -194,8 +212,148 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
     let r = off
         .run(
             "sh",
-            &["-c", "echo x > .git/hooks/pre-commit && echo wrote"],
+            &[
+                "-c",
+                "echo x > .git/hooks/pre-commit && echo y >> .git/config && echo wrote",
+            ],
         )
         .unwrap();
     assert_eq!(r.stdout.trim(), "wrote", "{}", r.stderr);
+}
+
+/// A path granted back inside a denied one doesn't bring the denied paths inside it: a
+/// toolchain directory comes back without its credentials file.
+#[test]
+#[cfg(unix)]
+fn test_a_denied_path_inside_a_granted_one_stays_denied() {
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(dir.path()) {
+        return;
+    }
+    std::fs::create_dir_all(dir.path().join("tool/bin")).unwrap();
+    std::fs::write(dir.path().join("tool/bin/x"), "x").unwrap();
+    std::fs::write(dir.path().join("tool/credentials"), "s").unwrap();
+    let sandbox = Sandbox::builder()
+        .deny_read(dir.path())
+        .read_only(dir.path().join("tool"))
+        .deny_read(dir.path().join("tool/credentials"))
+        .build()
+        .unwrap();
+    assert!(can_read(&sandbox, &dir.path().join("tool/bin/x")));
+    assert!(!can_read(&sandbox, &dir.path().join("tool/credentials")));
+}
+
+/// A hard link made on the host is another name for a denied file. At build the denied files
+/// with more than one name are looked for under the sandbox's directories, and the other names
+/// denied too; one that can't be found refuses the build.
+#[test]
+#[cfg(unix)]
+fn test_a_hard_link_to_a_denied_file_is_denied_or_refused() {
+    let dir = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(dir.path()) {
+        return;
+    }
+    // Linux: a mount over the link in a writable directory, so not under the AppArmor restriction.
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let vault = dir.path().join("vault");
+    let ws = dir.path().join("ws");
+    let elsewhere = dir.path().join("elsewhere");
+    for d in [&vault, &ws, &elsewhere] {
+        std::fs::create_dir(d).unwrap();
+    }
+    std::fs::write(vault.join("key"), "secret").unwrap();
+    std::fs::hard_link(vault.join("key"), ws.join("innocent.txt")).unwrap();
+
+    let sandbox = Sandbox::builder()
+        .deny_read(&vault)
+        .writable(&ws)
+        .working_dir(&ws)
+        .build()
+        .unwrap();
+    assert!(!contents(&sandbox, &vault.join("key")).contains("secret"));
+    assert!(!contents(&sandbox, &ws.join("innocent.txt")).contains("secret"));
+    // Writing through the link doesn't reach the secret (macOS refuses it; on Linux the mount
+    // over the link swallows it).
+    let _ = sandbox
+        .run("sh", &["-c", "echo pwned >> innocent.txt"])
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(vault.join("key")).unwrap(),
+        "secret"
+    );
+    // Siblings are untouched.
+    let r = sandbox
+        .run("sh", &["-c", "echo ok > other && cat other"])
+        .unwrap();
+    assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
+
+    // A second name the sandbox can't find: refused, naming the file.
+    std::fs::hard_link(vault.join("key"), elsewhere.join("copy")).unwrap();
+    match Sandbox::builder()
+        .deny_read(&vault)
+        .writable(&ws)
+        .working_dir(&ws)
+        .build()
+    {
+        Err(nanosandbox::SandboxError::Config { context, .. }) => {
+            assert!(context.contains("hard links"), "{context}");
+            assert!(context.contains("key"), "{context}");
+        }
+        Err(e) => panic!("{e:?}"),
+        Ok(_) => panic!("built with a link to the secret somewhere readable"),
+    }
+    // Named as a directory of the sandbox, it's found and denied.
+    let sandbox = Sandbox::builder()
+        .deny_read(&vault)
+        .writable(&ws)
+        .read_only(&elsewhere)
+        .working_dir(&ws)
+        .build()
+        .unwrap();
+    assert!(!contents(&sandbox, &elsewhere.join("copy")).contains("secret"));
+}
+
+/// The agent preset hides the home directory but keeps the toolchains and caches in it.
+#[test]
+#[cfg(unix)]
+fn test_agent_preset_hides_home_except_toolchains() {
+    let ws = crate::common::sandbox_tempdir_in(env!("CARGO_TARGET_TMPDIR"));
+    if crate::common::skip_if_unreachable_by_nobody(ws.path()) {
+        return;
+    }
+    let home = home();
+    let tag = format!("nanosandbox-test-{}", std::process::id());
+    let in_home = home.join(format!(".{tag}"));
+    let cache = home.join(".cache");
+    let was_there = cache.is_dir();
+    std::fs::create_dir_all(&cache).unwrap();
+    let in_cache = cache.join(&tag);
+    std::fs::write(&in_home, "home").unwrap();
+    std::fs::write(&in_cache, "cache").unwrap();
+    struct Cleanup(Vec<std::path::PathBuf>, Option<std::path::PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = std::fs::remove_file(p);
+            }
+            if let Some(d) = &self.1 {
+                let _ = std::fs::remove_dir(d);
+            }
+        }
+    }
+    let _cleanup = Cleanup(
+        vec![in_home.clone(), in_cache.clone()],
+        (!was_there).then(|| cache.clone()),
+    );
+
+    let sandbox = Sandbox::agent_executor(ws.path()).build().unwrap();
+    assert!(!can_read(&sandbox, &in_home), "home root readable");
+    assert!(can_read(&sandbox, &in_cache), "~/.cache not readable");
+    std::fs::write(ws.path().join("file"), "ws").unwrap();
+    assert!(can_read(&sandbox, &ws.path().join("file")));
+
+    let plain = Sandbox::builder().build().unwrap();
+    assert!(can_read(&plain, &in_home));
 }
