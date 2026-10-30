@@ -148,11 +148,28 @@ CPU share and process count are left out on macOS, which can't limit them.
 | Preset | Files | Private /tmp | Memory | CPU | Wall time | Processes |
 |---|---|---|---|---|---|---|
 | `code_judge(dir)` | `dir` read-only, working dir; rest of home hidden | 64 MB | 256 MB | 1 core, 5 s CPU time | 10 s | 10 |
-| `agent_executor(ws)` | `ws` writable, working dir, `HOME`; rest of home hidden except toolchains | 512 MB | 4 GB | 4 cores | 600 s | 256 |
+| `agent_executor(ws)` | `ws` writable, working dir; rest of home hidden except toolchains (below) | 512 MB | 4 GB | 4 cores | 600 s | 256 |
 | `data_analysis(in, out)` | `in` read-only, `out` writable and working dir; rest of home hidden except toolchains | 256 MB | 2 GB | 2 cores | 300 s | 100 |
 | `interactive(ws)` | `ws` writable, working dir, `HOME` | 1 GB | 8 GB | 4 cores | none | 512 |
 
 All have no network; add it with `allow_network`.
+
+`agent_executor` and `data_analysis` hide the home directory but keep the
+toolchains and caches in it readable: `~/.cargo`, `~/.rustup`, `~/.nvm`,
+`~/.npm`, `~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`,
+`~/Library/Caches`, `~/Library/Developer` and the like, of those that exist,
+the install root of every `bin`/`sbin` directory on `PATH` under home
+(`~/.cargo/bin` brings `~/.cargo`, `~/dev/flutter/bin` brings `~/dev/flutter`;
+a `PATH` entry that isn't a `bin` directory brings nothing), and git's
+`~/.gitconfig` and `~/.config/git/{config,ignore,attributes}`. The credentials
+hidden by default stay hidden inside them (`~/.cargo/credentials`). Since the
+command's `HOME` is the run's private directory, `CARGO_HOME`, `RUSTUP_HOME`,
+`GOPATH`, `NVM_DIR`, `PYENV_ROOT`, `BUN_INSTALL`, `DENO_INSTALL`, `VOLTA_HOME`,
+`SDKMAN_DIR`, `GRADLE_USER_HOME` and `PNPM_HOME` are set for the ones that
+exist, unless `env` set them. This is an opinion about what a developer's
+machine looks like, which is why it lives in the presets and not in a builder
+method: a caller composing its own policy uses `hide_home` and names what to
+keep with `read_only`. A tool in an unusual place needs one `read_only`.
 
 ```rust
 let sandbox = Sandbox::code_judge("/submissions/123")
@@ -246,7 +263,6 @@ can't see or touch another's temp files.
 ```rust
 pub fn deny_read(self, path: impl Into<PathBuf>) -> Self
 pub fn hide_home(self) -> Self
-pub fn hide_home_except_toolchains(self) -> Self
 pub fn report_denials(self) -> Self
 ```
 
@@ -261,25 +277,8 @@ their `.env` files, and whatever credential store isn't on the list.
 
 `deny_read(path)` adds a file or directory to that. `hide_home()` hides the
 whole home directory instead, except what `read_only`, `writable` or
-`working_dir` name. `hide_home_except_toolchains()` does the same but keeps
-the toolchains and caches readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`,
-`~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`,
-`~/Library/Caches`, `~/Library/Developer` and the like, of those that exist,
-plus the install root of every `bin`/`sbin` directory on `PATH` under home
-(`~/.cargo/bin` brings `~/.cargo`, `~/dev/flutter/bin` brings `~/dev/flutter`,
-not `~/dev`; a `PATH` entry that isn't a `bin` directory, like `~/Desktop`,
-brings nothing), and git's `~/.gitconfig` and `~/.config/git/{config,ignore,attributes}`,
-which git won't run without (`~/.config/git/credentials` stays hidden). The
-credentials above stay hidden inside them (`~/.cargo/credentials`). Since
-`HOME` isn't the real home for the command (it's the run's private directory,
-or what `env` says), the variables these toolchains find themselves through
-are set for the ones that exist, unless `env` set them: `CARGO_HOME`,
-`RUSTUP_HOME`, `GOPATH`, `NVM_DIR`, `PYENV_ROOT`, `BUN_INSTALL`,
-`DENO_INSTALL`, `VOLTA_HOME`, `SDKMAN_DIR`, `GRADLE_USER_HOME`, `PNPM_HOME`.
-That's what `agent_executor`, `data_analysis` and `nanosandbox-mcp` use: a
-command's output goes into a model's context, so what it can read, it can leak,
-and a sandbox for an agent should start from nothing. A tool in an unusual
-place needs one `read_only`. A hidden path reads as "permission denied", not
+`working_dir` name (the agent presets keep toolchains readable on top of this,
+see [Presets](#presets)). A hidden path reads as "permission denied", not
 as missing; a program that insists on reading one (git with a `HOME` pointing
 at the real, hidden home) fails rather than carries on. On Linux file names
 stay visible, only contents aren't.

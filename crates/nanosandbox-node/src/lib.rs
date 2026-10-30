@@ -202,11 +202,6 @@ impl SandboxBuilder {
     }
 
     #[napi]
-    pub fn hide_home_except_toolchains(&mut self) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.hide_home_except_toolchains()))
-    }
-
-    #[napi]
     pub fn env(&mut self, key: String, value: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.env(key, value)))
     }

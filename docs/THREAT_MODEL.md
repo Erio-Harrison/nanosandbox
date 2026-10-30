@@ -22,6 +22,31 @@ compromised by one tenant and must not affect another; nanosandbox's
 boundary is enforced *by* the host kernel, not a second one underneath it.
 If that's your requirement, use a VM-based sandbox instead.
 
+### What is in the box, and what isn't
+
+Three layers, kept apart on purpose:
+
+1. **The boundary (this library).** What a command's processes may read and
+   write (paths), reach (network destinations), consume (resources) and how
+   long they live; and the fact of a refusal reported back to the caller
+   (`network_refusals`, `denied_paths`). Every claim here has a row in the
+   tables below and a test; nothing else is claimed.
+2. **Defaults (the presets).** Opinions about what an agent's or a judge's
+   machine looks like: which directories count as toolchains, which files as
+   credentials, how much `/tmp`. They live in `Sandbox::agent_executor` and
+   its siblings, can be overridden, and never add a guarantee of their own.
+3. **Not this library's.** What the host does with the command's output
+   afterwards (running git, make or an editor over a workspace the command
+   wrote to); deciding whether to grant a path the command was refused, and
+   remembering that decision; copying, versioning or merging workspaces. A
+   product built on nanosandbox does these with the two things the boundary
+   gives it: `read_only` to pin what must not change, and `denied_paths` to
+   learn what a failing command wanted.
+
+Rules that keep it so: a builder method is added for a mechanism, never for an
+opinion; a review finding is placed in a layer before it is acted on, and a
+finding in the third layer is answered by this document, not by code.
+
 ## Attacker model
 
 The attacker is the program being sandboxed, or code it runs. It has:
@@ -133,8 +158,11 @@ that's not what this protects. Run them in separate sandboxes.
   implied more than it gave). Integrators who need a file kept can name it
   `read_only` inside the writable workspace
   (`tests/security/read_only_inside_writable.rs` does this for `.git/hooks`).
-  The design answer is a workspace the host never runs tools in: the command
-  works on a copy and its changes come back to be reviewed (planned).
+  The structural answer is a workspace the host never runs tools in: the
+  command works on a copy, and what comes back is reviewed before it's used.
+  That is a workspace-management concern (LayerFS and similar tools do it),
+  outside this library: nanosandbox takes a directory and confines what runs
+  in it, whoever made the directory.
 - The hard-link search at `build()` skips home's bulk (`Library`, `.cache`,
   `node_modules`, `target`, `.git`...) and the rest of the file system; a link
   there isn't found, and the build is refused rather than the link read.

@@ -188,10 +188,6 @@ impl SandboxBuilder {
         Ok(Self::wrap(self.take()?.report_denials()))
     }
 
-    fn hide_home_except_toolchains(&mut self) -> PyResult<Self> {
-        Ok(Self::wrap(self.take()?.hide_home_except_toolchains()))
-    }
-
     #[cfg(target_os = "linux")]
     fn seccomp(&mut self, enabled: bool) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.seccomp(enabled)))

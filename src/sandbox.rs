@@ -312,9 +312,13 @@ impl Sandbox {
     }
 
     /// AI agent preset: writable workspace, moderate limits, network set by the caller. The
-    /// home directory is hidden except for toolchains and caches
-    /// ([`hide_home_except_toolchains`](SandboxBuilder::hide_home_except_toolchains)): what
-    /// the command prints goes into a model's context, so what it can read, it can leak.
+    /// home directory is hidden except for toolchains and caches (`~/.cargo`, `~/.rustup`,
+    /// `~/.nvm`, `~/.npm`, `~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/Library/Caches`...
+    /// of those that exist, the install root of each `bin`/`sbin` directory on `PATH` under
+    /// home, and git's `~/.gitconfig`), with `CARGO_HOME`, `RUSTUP_HOME` and the like set so
+    /// they're found from the run's own `HOME`: what the command prints goes into a model's
+    /// context, so what it can read, it can leak. The credentials hidden by default stay
+    /// hidden inside them.
     ///
     /// # Example
     ///
@@ -328,7 +332,8 @@ impl Sandbox {
     /// ```
     pub fn agent_executor(workspace: impl Into<PathBuf>) -> SandboxBuilder {
         let workspace: PathBuf = workspace.into();
-        let home = workspace.to_string_lossy().into_owned();
+        // HOME is left at the default, the run's private temp directory: tool caches and
+        // global config written there go with the run instead of landing in the workspace.
         cpu_and_pids(Sandbox::builder(), 4.0, 256)
             .writable(workspace.clone())
             .hide_home_except_toolchains()
@@ -336,7 +341,6 @@ impl Sandbox {
             .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB
             .wall_time_limit(Duration::from_secs(600)) // 10 minutes
-            .env("HOME", home)
             .env("USER", "sandbox")
     }
 

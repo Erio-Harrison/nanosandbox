@@ -366,12 +366,12 @@ impl SandboxBuilder {
         self
     }
 
-    /// [`hide_home`](Self::hide_home), but the toolchains and caches in the home directory
-    /// stay readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`, `~/.pyenv`, `~/.local`,
-    /// `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`, `~/Library/Caches` and the like, of those that
-    /// exist, and the home subtree of every `PATH` entry under home. The credentials hidden by
-    /// default stay hidden inside them (`~/.cargo/credentials`). What the agent presets use.
-    pub fn hide_home_except_toolchains(mut self) -> Self {
+    /// What the agent presets use: [`hide_home`](Self::hide_home) with the toolchains and
+    /// caches in the home directory kept readable (`read_rules::toolchain_dirs`), and the
+    /// variables they're found through set (`read_rules::toolchain_env`). An opinion about
+    /// what a developer's machine looks like, so not part of the builder's public surface:
+    /// a caller composing its own policy names the directories with `read_only`.
+    pub(crate) fn hide_home_except_toolchains(mut self) -> Self {
         self.config.hide_home = true;
         self.config.expose_toolchains = true;
         self

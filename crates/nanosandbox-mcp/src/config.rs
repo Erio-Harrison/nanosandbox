@@ -371,14 +371,16 @@ impl Config {
             Some(path) => Some(self.open_audit_dir(path, &workspace)?),
             None => None,
         };
-        let mut b: SandboxBuilder = Sandbox::builder()
-            .working_dir(&workspace)
-            .writable(&workspace)
+        // The agent preset (home hidden except toolchains and caches), or a plain writable
+        // workspace with --no-hide-home; the flags below override the preset's limits.
+        let mut b: SandboxBuilder = if self.no_hide_home {
+            Sandbox::builder().working_dir(&workspace).writable(&workspace)
+        } else {
+            Sandbox::agent_executor(&workspace)
+        };
+        b = b
             .memory_limit(self.memory)
             .wall_time_limit(Duration::from_secs_f64(self.timeout));
-        if !self.no_hide_home {
-            b = b.hide_home_except_toolchains();
-        }
         if self.report_denials {
             b = b.report_denials();
         }

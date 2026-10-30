@@ -47,7 +47,7 @@ is refused.
 |---|---|---|
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
 | `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). A `--read-only` path inside the workspace is read-only again, so a settings file there (or `.git/hooks` and `.git/config`, if you want git's entry points pinned) can't be changed by a command (on Linux this needs mounting, refused where AppArmor denies it) | |
-| `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory (hidden except toolchains and caches by default) | home hidden |
+| `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory (the server builds on the `agent_executor` preset, which hides it except toolchains and caches) | home hidden |
 | `--report-denials` | Put the paths a command was refused in its result (`denied_paths`; macOS, adds tens of milliseconds per call) | off |
 | `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` and `host:port` work (not `*.com`) | network off |
 | `--deny-network <HOST>` | Refuse these even if allowed, same syntax (`github.com:22`) | none |
