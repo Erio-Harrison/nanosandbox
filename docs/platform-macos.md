@@ -242,15 +242,16 @@ it, then a wait for that event. At `build()` the probe proves the stream live
 the run's events have all arrived. A run notes its start and end, learns the
 pids of its process tree from the wait loop's kqueue (`NOTE_FORK` on each
 watched process, then its children listed with `proc_listpids` and watched in
-turn; XNU no longer supports `NOTE_TRACK`), and then takes the `file-*` and
+turn; XNU no longer supports `NOTE_TRACK`), and then takes the file and
 `process-exec` events from those pids in its window; every other sandboxed
 program on the machine logs to the same place, so nothing else is taken. A
 child that exits before the listing reaches it isn't attributed. `/dev/dtracehelper`,
 which every process writes to, is left out. The line is text, and the process
 name and path in it are the command's: the pid is taken as the split at
-`) deny(` that names one of the run's pids, so a process named like a log line
-can garble its own path, not vanish; a probe's event is told apart by the
-probe's pid. The kernel coalesces a denial
+`) deny(` that names one of the run's pids and a Seatbelt operation the
+kernel reports (`file-read-data`, `file-write-create`, `process-exec`...), so
+a process named like a log line can garble its own path, not vanish or pass
+off a made-up operation; a probe's event is told apart by the probe's pid. The kernel coalesces a denial
 repeated within about a second (same program, operation and path; the live
 stream then gets one report), so counts are lower bounds and a repeat right
 after an earlier run can be missing. The probe files live in a directory named

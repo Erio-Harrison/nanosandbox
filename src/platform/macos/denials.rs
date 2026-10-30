@@ -34,6 +34,39 @@ const KEEP: Duration = Duration::from_secs(60);
 /// Paths every process trips over, which say nothing about the policy.
 const NOISE: &[&str] = &["/dev/dtracehelper"];
 
+/// The Seatbelt file and exec operations as the kernel names them in a report. Only these are
+/// taken, so a process whose name spells out a fake operation can't pass it off as one.
+const OPERATIONS: &[&str] = &[
+    "file-read-data",
+    "file-read-metadata",
+    "file-read-xattr",
+    "file-write-data",
+    "file-write-create",
+    "file-write-unlink",
+    "file-write-mode",
+    "file-write-owner",
+    "file-write-flags",
+    "file-write-acl",
+    "file-write-xattr",
+    "file-write-times",
+    "file-write-setugid",
+    "file-write-finderinfo",
+    "file-write-unmount",
+    "file-ioctl",
+    "file-link",
+    "file-clone",
+    "file-mknod",
+    "file-mount",
+    "file-unmount",
+    "file-revoke",
+    "file-search",
+    "file-issue-extension",
+    "file-map-executable",
+    "file-test-existence",
+    "process-exec",
+    "process-exec-interpreter",
+];
+
 /// A `Sandbox:` log line, kept as text: its process name and path are the command's to
 /// choose, so where the name ends and the pid begins is only known once the run's pids are.
 #[derive(Debug, Clone)]
@@ -53,8 +86,9 @@ struct State {
 }
 
 /// `NAME(PID) deny(N) OPERATION PATH` read against `pids`: the first split at a `) deny(` that
-/// yields one of them and a file operation. A process can put `) deny(` in its own name or in a
-/// path, which can garble the path reported for it, but not make the event belong to no pid.
+/// yields one of them and a known file operation. A process can put `) deny(` in its own name
+/// or in a path, which can garble the path reported for it, but not make the event belong to
+/// no pid; a made-up operation name isn't taken, so the real split is the one found.
 fn resolve(message: &str, pids: &[i32]) -> Option<(i32, String, String)> {
     let mut from = 0;
     while let Some(k) = message[from..].find(") deny(") {
@@ -75,7 +109,7 @@ fn resolve(message: &str, pids: &[i32]) -> Option<(i32, String, String)> {
         let Some((operation, path)) = tail.split_once(' ') else {
             continue;
         };
-        if !(operation.starts_with("file-") || operation.starts_with("process-exec")) {
+        if !OPERATIONS.contains(&operation) {
             continue;
         }
         if NOISE.contains(&path) {
@@ -474,6 +508,29 @@ mod tests {
         .unwrap();
         assert_eq!(r.0, 85739);
         assert!(r.2.ends_with("/c"));
+        // A made-up operation in the name isn't one: the real split is taken, and an event
+        // that isn't a file operation stays filtered.
+        assert_eq!(
+            resolve(
+                "x(85739) deny(1) file-a b(85739) deny(1) file-read-data /c",
+                own
+            ),
+            Some((85739, "file-read-data".into(), "/c".into()))
+        );
+        assert_eq!(
+            resolve(
+                "x(85739) deny(1) file-a b(85739) deny(1) sysctl-read kern.x",
+                own
+            ),
+            None
+        );
+        assert_eq!(
+            resolve(
+                "x(85739) deny(1) file-a b(85739) deny(1) file-write-data /dev/dtracehelper",
+                own
+            ),
+            None
+        );
         // A path containing the pattern keeps the first, correct split.
         assert_eq!(
             resolve(
