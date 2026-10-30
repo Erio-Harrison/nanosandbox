@@ -153,6 +153,10 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
     std::fs::create_dir_all(ws.join(".git/hooks")).unwrap();
     std::fs::write(ws.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
     std::fs::write(ws.join(".git/config"), "[core]\n").unwrap();
+    // A submodule's git dir, which the host's `git status` and `git submodule update` read too.
+    std::fs::create_dir_all(ws.join(".git/modules/sub/hooks")).unwrap();
+    std::fs::write(ws.join(".git/modules/sub/config"), "[core]\n").unwrap();
+    std::fs::write(ws.join(".git/modules/sub/HEAD"), "ref: refs/heads/main\n").unwrap();
 
     // On Linux the protection is a read-only mount; where mounting is refused (AppArmor) it's
     // best-effort and absent, so there's nothing to check there.
@@ -174,6 +178,9 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
         "git config core.fsmonitor /tmp/evil",
         "rm .git/config",
         "mv .git/config .git/config.bak",
+        "echo x > .git/modules/sub/hooks/post-checkout",
+        "echo '[core]\n\tfsmonitor = evil' >> .git/modules/sub/config",
+        "mv .git/modules/sub .git/modules/sub.bak",
     ] {
         let r = sandbox.run("sh", &["-c", cmd]).unwrap();
         assert!(
@@ -191,6 +198,11 @@ fn test_git_hooks_in_a_writable_dir_are_protected() {
         std::fs::read_to_string(ws.join(".git/config")).unwrap(),
         "[core]\n"
     );
+    assert_eq!(
+        std::fs::read_to_string(ws.join(".git/modules/sub/config")).unwrap(),
+        "[core]\n"
+    );
+    assert!(!ws.join(".git/modules/sub/hooks/post-checkout").exists());
     // The workspace outside those is still writable, .git included.
     let r = sandbox
         .run(

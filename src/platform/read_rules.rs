@@ -430,19 +430,57 @@ pub(crate) fn vcs_protected_paths(config: &SandboxConfig) -> Vec<PathBuf> {
         // Rooted at the mount target as given, so it lines up with the writable areas each backend
         // compares against (Linux: raw; macOS resolves both).
         if let Some(git_dir) = resolve_git_dir(&m.target) {
-            let hooks = git_dir.join("hooks");
-            if hooks.is_dir() && !out.contains(&hooks) {
-                out.push(hooks);
-            }
-            for name in ["config", "config.worktree"] {
-                let file = git_dir.join(name);
-                if file.is_file() && !out.contains(&file) {
-                    out.push(file);
+            protect_git_dir(&git_dir, &mut out, 0);
+            // Linked worktrees keep their own config.worktree under the main git dir.
+            if let Ok(worktrees) = std::fs::read_dir(git_dir.join("worktrees")) {
+                for wt in worktrees.flatten() {
+                    let file = wt.path().join("config.worktree");
+                    if file.is_file() && !out.contains(&file) {
+                        out.push(file);
+                    }
                 }
             }
         }
     }
     out
+}
+
+/// `hooks`, `config` and `config.worktree` of `git_dir`, and of every submodule's git dir under
+/// its `modules/` (recursively: submodules of submodules), which the host's `git status` and
+/// `git submodule update` read and run just the same.
+fn protect_git_dir(git_dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
+    let hooks = git_dir.join("hooks");
+    if hooks.is_dir() && !out.contains(&hooks) {
+        out.push(hooks);
+    }
+    for name in ["config", "config.worktree"] {
+        let file = git_dir.join(name);
+        if file.is_file() && !out.contains(&file) {
+            out.push(file);
+        }
+    }
+    if depth >= 8 {
+        return;
+    }
+    // modules/<path/with/slashes>/ mirrors the submodule's path; a git dir is where `config`
+    // or `HEAD` is.
+    let mut stack = vec![git_dir.join("modules")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path.join("HEAD").is_file() || path.join("config").is_file() {
+                protect_git_dir(&path, out, depth + 1);
+            } else {
+                stack.push(path);
+            }
+        }
+    }
 }
 
 /// The git directory for `workspace`: `<workspace>/.git` if a directory, or the `gitdir:` it
@@ -516,6 +554,58 @@ mod tests {
             ),
             vec![home.join(".cargo/credentials")]
         );
+    }
+
+    #[test]
+    fn test_vcs_protected_paths_cover_submodules_and_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let git = ws.join(".git");
+        for d in [
+            "hooks",
+            "modules/lib/hooks",
+            "modules/lib/modules/inner/hooks",
+            "modules/group/deep/hooks",
+            "worktrees/wt",
+        ] {
+            std::fs::create_dir_all(git.join(d)).unwrap();
+        }
+        for f in [
+            "config",
+            "modules/lib/config",
+            "modules/lib/HEAD",
+            "modules/lib/modules/inner/config",
+            "modules/group/deep/config",
+            "worktrees/wt/config.worktree",
+        ] {
+            std::fs::write(git.join(f), "").unwrap();
+        }
+        let config = SandboxConfig {
+            mounts: vec![crate::builder::Mount {
+                source: ws.clone(),
+                target: ws.clone(),
+                permission: Permission::ReadWrite,
+            }],
+            ..Default::default()
+        };
+        let mut got = vcs_protected_paths(&config);
+        got.sort();
+        let mut want: Vec<PathBuf> = [
+            "config",
+            "hooks",
+            "modules/group/deep/config",
+            "modules/group/deep/hooks",
+            "modules/lib/config",
+            "modules/lib/hooks",
+            "modules/lib/modules/inner/config",
+            "modules/lib/modules/inner/hooks",
+            "worktrees/wt/config.worktree",
+        ]
+        .iter()
+        .map(|p| git.join(p))
+        .collect();
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]

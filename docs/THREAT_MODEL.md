@@ -124,6 +124,12 @@ that's not what this protects. Run them in separate sandboxes.
 - `.git/hooks` and `.git/config` protection inside a writable directory is a read-only mount, so
   under the AppArmor restriction (where nothing can be mounted) it's absent and
   a command can write there. macOS, which doesn't need a mount, is unaffected.
+- A git repository the command creates (`git init`, `git clone`) has whatever
+  `.git/config` and hooks the command wrote: path rules can't protect them
+  without breaking `init` and `clone`, which write `.git/config` themselves.
+  Only repositories that exist at `build()`, their submodules and worktrees,
+  are protected. The host's git (an editor auto-detecting nested
+  repositories) shouldn't run in a repository the command made.
 - The hard-link search at `build()` skips home's bulk (`Library`, `.cache`,
   `node_modules`, `target`, `.git`...) and the rest of the file system; a link
   there isn't found, and the build is refused rather than the link read.

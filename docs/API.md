@@ -285,9 +285,19 @@ a path the config names inside such a denied path is refused too.
 directory are kept read-only the same way, so a command can't plant a hook the
 host's git would run later, nor a config entry that runs a command
 (`core.hooksPath`, `core.fsmonitor`, `core.pager`, `diff.external`,
-`filter.*`, `include.path`...); a `.git` file's `gitdir:` pointer is followed
-for worktrees. Commits, branches and stashes work; `git config --local` and
-`git remote add` don't. `allow_vcs_hook_writes()` turns this off. On Linux it needs a mount, so it's absent under the AppArmor restriction;
+`filter.*`, `include.path`...). The same goes for every submodule's git dir
+under `.git/modules/` (the host's `git status` and `git submodule update` read
+those too) and linked worktrees' `config.worktree`; a `.git` file's `gitdir:`
+pointer is followed. Commits, branches and stashes work; `git config --local`
+and `git remote add` don't. `allow_vcs_hook_writes()` turns this off.
+
+This covers the repositories that exist when the sandbox is built. A repository
+the command itself creates (`git init`, `git clone`, in the workspace or a
+subdirectory of it) is the command's own: its config and hooks are whatever the
+command wrote, and can't be protected without breaking `init` and `clone`
+themselves (both write `.git/config`). Treat such a repository as untrusted
+input: don't run the host's git in it (editors that auto-detect nested
+repositories do) before looking at its `.git/config`. On Linux it needs a mount, so it's absent under the AppArmor restriction;
 on macOS it always applies.
 
 #### `working_dir`
