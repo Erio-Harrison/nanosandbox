@@ -65,7 +65,7 @@
 - [ ] **Optional Prometheus export**
 
 ### Audit
-- [ ] **Security audit log** - Log blocked network requests, permission denials
+- [x] **Security audit log** - `ExecutionResult::network_refusals` (every refused destination with reason) and `denied_paths` (`report_denials`, macOS); both in the audit events
 - [ ] **Configurable audit destination** - File, syslog, custom handler
 
 ## P3: Platform Completeness
@@ -103,7 +103,7 @@
 
 ### Performance Testing
 - [x] **Benchmark suite** - `benches/sandbox_bench.rs`
-- [ ] **Startup latency** - Target <100ms
+- [x] **Startup latency** - `run("true")` p50 0.9 ms on Linux, 8.3 ms on macOS (event-driven wait loop)
 - [ ] **Memory overhead** - Measure per-sandbox overhead
 - [ ] **Concurrent scaling** - 10, 100, 1000 parallel sandboxes
 
