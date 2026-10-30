@@ -64,8 +64,6 @@ pub(crate) struct SandboxConfig {
     pub(crate) expose_toolchains: bool,
     /// Other names of denied files, found at build (`read_rules::linked_secrets`).
     pub(crate) linked_secrets: Vec<PathBuf>,
-    /// [`SandboxBuilder::allow_vcs_hook_writes`]: protect `.git/hooks` in writable dirs.
-    pub(crate) protect_vcs_hooks: bool,
     /// [`SandboxBuilder::report_denials`].
     pub(crate) report_denials: bool,
     /// macOS: the unified-log stream behind `report_denials`, started by `Sandbox::new`.
@@ -206,7 +204,6 @@ impl Default for SandboxConfig {
             // Windows has no file system isolation to make it private with.
             private_tmp: (!cfg!(windows)).then_some(DEFAULT_PRIVATE_TMP_SIZE),
             shared_tmp: true,
-            protect_vcs_hooks: true,
             working_dir: PathBuf::from("/"),
             rootfs: None,
             deny_read: Vec::new(),
@@ -377,15 +374,6 @@ impl SandboxBuilder {
     pub fn hide_home_except_toolchains(mut self) -> Self {
         self.config.hide_home = true;
         self.config.expose_toolchains = true;
-        self
-    }
-
-    /// Let the sandbox write `.git/hooks` and `.git/config` inside a [`writable`](Self::writable) directory. Off by
-    /// default: a command that writes a hook there would otherwise run on the host the next time
-    /// the user runs `git`. On Linux the protection is a read-only mount, so it's absent where
-    /// mounting isn't possible (AppArmor `unprivileged_userns`); on macOS it always applies.
-    pub fn allow_vcs_hook_writes(mut self) -> Self {
-        self.config.protect_vcs_hooks = false;
         self
     }
 

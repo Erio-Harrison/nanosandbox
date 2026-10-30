@@ -2,7 +2,7 @@
 //! all of home with `hide_home`. Config-granted paths stay readable inside those. The rest of
 //! the fs stays readable so toolchains and projects work; the network settings limit egress.
 
-use crate::builder::{Permission, SandboxConfig};
+use crate::builder::SandboxConfig;
 use std::path::{Path, PathBuf};
 
 /// Under home: credentials, tokens, keys, shell histories and browser profiles.
@@ -16,6 +16,7 @@ const SECRETS: &[&str] = &[
     ".docker/config.json",
     ".netrc",
     ".git-credentials",
+    ".config/git/credentials",
     ".config/gh",
     ".config/hub",
     ".npmrc",
@@ -193,8 +194,14 @@ pub(crate) fn toolchain_dirs(home: &Path, path_var: Option<&std::ffi::OsStr>) ->
         "Library/Android",
         "Library/pnpm",
     ];
-    // Configuration tools read from home and can't do without; nothing secret in them.
-    const CONFIG: &[&str] = &[".gitconfig", ".config/git"];
+    // Configuration git reads from home and won't run without; `~/.config/git/credentials`
+    // next to these is a credential store and stays hidden.
+    const CONFIG: &[&str] = &[
+        ".gitconfig",
+        ".config/git/config",
+        ".config/git/ignore",
+        ".config/git/attributes",
+    ];
     let mut out: Vec<PathBuf> = KNOWN
         .iter()
         .chain(CONFIG)
@@ -203,13 +210,21 @@ pub(crate) fn toolchain_dirs(home: &Path, path_var: Option<&std::ffi::OsStr>) ->
         .collect();
     if let Some(path_var) = path_var {
         for entry in std::env::split_paths(path_var) {
-            if !entry.starts_with(home) || entry == home {
+            // Only a `bin`/`sbin` directory names a tool's install root (`~/x/flutter/bin`
+            // brings `~/x/flutter`); anything else on PATH under home (`~/Desktop`) is the
+            // caller's to grant.
+            let (Some(name), Some(parent)) =
+                (entry.file_name().and_then(|n| n.to_str()), entry.parent())
+            else {
+                continue;
+            };
+            if !matches!(name, "bin" | "sbin") || !parent.starts_with(home) {
                 continue;
             }
-            // The tool's install root: `~/x/flutter/bin` brings `~/x/flutter`, not `~/x`.
-            let root = match entry.file_name().and_then(|n| n.to_str()) {
-                Some("bin" | "sbin") if entry.parent() != Some(home) => entry.parent().unwrap(),
-                _ => entry.as_path(),
+            let root = if parent == home {
+                entry.as_path()
+            } else {
+                parent
             };
             if root.is_dir() && !out.iter().any(|o| o == root) {
                 out.push(root.to_path_buf());
@@ -446,93 +461,6 @@ pub(crate) fn linked_secrets(config: &SandboxConfig) -> Result<Vec<PathBuf>, Str
     Ok(found)
 }
 
-/// Existing `.git/hooks` directories and `.git/config` files inside writable, caller-named
-/// dirs, which the sandbox is kept from writing unless `allow_vcs_hook_writes`. A hook written
-/// there runs on the host the next time the user runs git; so does a command named in the
-/// config (`core.hooksPath`, `core.fsmonitor`, `core.pager`, `diff.external`, `filter.*`,
-/// `include.path`...). `.git` may be a file pointing elsewhere (worktree/submodule).
-pub(crate) fn vcs_protected_paths(config: &SandboxConfig) -> Vec<PathBuf> {
-    if !config.protect_vcs_hooks {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for m in &config.mounts {
-        if m.permission != Permission::ReadWrite || m.source != m.target {
-            continue;
-        }
-        // Rooted at the mount target as given, so it lines up with the writable areas each backend
-        // compares against (Linux: raw; macOS resolves both).
-        if let Some(git_dir) = resolve_git_dir(&m.target) {
-            protect_git_dir(&git_dir, &mut out, 0);
-            // Linked worktrees keep their own config.worktree under the main git dir.
-            if let Ok(worktrees) = std::fs::read_dir(git_dir.join("worktrees")) {
-                for wt in worktrees.flatten() {
-                    let file = wt.path().join("config.worktree");
-                    if file.is_file() && !out.contains(&file) {
-                        out.push(file);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// `hooks`, `config` and `config.worktree` of `git_dir`, and of every submodule's git dir under
-/// its `modules/` (recursively: submodules of submodules), which the host's `git status` and
-/// `git submodule update` read and run just the same.
-fn protect_git_dir(git_dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
-    let hooks = git_dir.join("hooks");
-    if hooks.is_dir() && !out.contains(&hooks) {
-        out.push(hooks);
-    }
-    for name in ["config", "config.worktree"] {
-        let file = git_dir.join(name);
-        if file.is_file() && !out.contains(&file) {
-            out.push(file);
-        }
-    }
-    if depth >= 8 {
-        return;
-    }
-    // modules/<path/with/slashes>/ mirrors the submodule's path; a git dir is where `config`
-    // or `HEAD` is.
-    let mut stack = vec![git_dir.join("modules")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            if path.join("HEAD").is_file() || path.join("config").is_file() {
-                protect_git_dir(&path, out, depth + 1);
-            } else {
-                stack.push(path);
-            }
-        }
-    }
-}
-
-/// The git directory for `workspace`: `<workspace>/.git` if a directory, or the `gitdir:` it
-/// points at if a file (git worktrees and submodules use a `.git` file).
-fn resolve_git_dir(workspace: &Path) -> Option<PathBuf> {
-    let dot_git = workspace.join(".git");
-    if dot_git.is_dir() {
-        return Some(dot_git);
-    }
-    let pointer = std::fs::read_to_string(&dot_git).ok()?;
-    let target = pointer.lines().next()?.strip_prefix("gitdir:")?.trim();
-    let target = Path::new(target);
-    Some(if target.is_absolute() {
-        target.to_path_buf()
-    } else {
-        workspace.join(target)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,6 +499,8 @@ mod tests {
             std::fs::create_dir_all(home.join(d)).unwrap();
         }
         std::fs::write(home.join(".gitconfig"), "").unwrap();
+        std::fs::write(home.join(".config/git/config"), "").unwrap();
+        std::fs::write(home.join(".config/git/credentials"), "").unwrap();
         let path = std::env::join_paths([
             home.join(".cargo/bin"),
             home.join("mytools/bin"),
@@ -591,12 +521,27 @@ mod tests {
             "bin",
             "Desktop/proj",
             ".gitconfig",
-            ".config/git",
+            ".config/git/config",
         ] {
             assert!(dirs.contains(&home.join(expected)), "{expected}: {dirs:?}");
         }
-        // Not the whole of ~/develop or ~/Desktop for one tool in them.
-        for not in [".rustup", "missing", ".ssh", "develop", "Desktop", ""] {
+        // Not the whole of ~/develop or ~/Desktop for one tool in them, and not a PATH entry
+        // that isn't a bin directory.
+        for not in [
+            ".rustup",
+            "missing",
+            ".ssh",
+            "develop",
+            "Desktop",
+            "",
+            ".config/git",
+            ".config/git/credentials",
+        ] {
+            assert!(!dirs.contains(&home.join(not)), "{not}: {dirs:?}");
+        }
+        let path = std::env::join_paths([home.join("Desktop"), home.join("mytools")]).unwrap();
+        let dirs = toolchain_dirs(home, Some(&path));
+        for not in ["Desktop", "mytools"] {
             assert!(!dirs.contains(&home.join(not)), "{not}: {dirs:?}");
         }
         std::fs::create_dir_all(home.join(".rustup")).unwrap();
@@ -621,58 +566,6 @@ mod tests {
             ),
             vec![home.join(".cargo/credentials")]
         );
-    }
-
-    #[test]
-    fn test_vcs_protected_paths_cover_submodules_and_worktrees() {
-        let dir = tempfile::tempdir().unwrap();
-        let ws = dir.path().to_path_buf();
-        let git = ws.join(".git");
-        for d in [
-            "hooks",
-            "modules/lib/hooks",
-            "modules/lib/modules/inner/hooks",
-            "modules/group/deep/hooks",
-            "worktrees/wt",
-        ] {
-            std::fs::create_dir_all(git.join(d)).unwrap();
-        }
-        for f in [
-            "config",
-            "modules/lib/config",
-            "modules/lib/HEAD",
-            "modules/lib/modules/inner/config",
-            "modules/group/deep/config",
-            "worktrees/wt/config.worktree",
-        ] {
-            std::fs::write(git.join(f), "").unwrap();
-        }
-        let config = SandboxConfig {
-            mounts: vec![crate::builder::Mount {
-                source: ws.clone(),
-                target: ws.clone(),
-                permission: Permission::ReadWrite,
-            }],
-            ..Default::default()
-        };
-        let mut got = vcs_protected_paths(&config);
-        got.sort();
-        let mut want: Vec<PathBuf> = [
-            "config",
-            "hooks",
-            "modules/group/deep/config",
-            "modules/group/deep/hooks",
-            "modules/lib/config",
-            "modules/lib/hooks",
-            "modules/lib/modules/inner/config",
-            "modules/lib/modules/inner/hooks",
-            "worktrees/wt/config.worktree",
-        ]
-        .iter()
-        .map(|p| git.join(p))
-        .collect();
-        want.sort();
-        assert_eq!(got, want);
     }
 
     #[test]
@@ -710,7 +603,7 @@ mod linked_tests {
             mounts: vec![crate::builder::Mount {
                 source: ws.clone(),
                 target: ws.clone(),
-                permission: Permission::ReadWrite,
+                permission: crate::builder::Permission::ReadWrite,
             }],
             working_dir: ws.clone(),
             ..Default::default()

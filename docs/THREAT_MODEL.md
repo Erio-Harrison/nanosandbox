@@ -72,7 +72,6 @@ filesystem writes outside a `rootfs`. See
 | Can't connect to host services over Unix sockets (`docker.sock`, the systemd bus, `ssh-agent`, ...), or to a hypervisor host over vsock | seccomp denies `socket(AF_UNIX, ...)` (Landlock governs creating a socket file, not connecting to one, and the filter can't read a `connect()` path) and `socket(AF_VSOCK, ...)`, which the network namespace doesn't cover. Other address families and `socketpair()` are untouched | `tests/security/syscall_filter.rs: test_filter_blocks_kernel_entry_points`, `test_denying_af_unix_sockets_does_not_break_dns_or_compilation` |
 | A command can signal itself and its children normally | the command runs as PID 2 under a small init shim (PID 1), which relays signals and reaps orphans -- see "The init shim" below | `tests/security/process_management.rs: test_self_sigterm_now_works_like_anywhere_else`, `test_sandboxed_command_is_pid_2_under_the_init_shim` |
 | Can't read credentials/history/`deny_read` paths by default, including one inside a writable directory, renamed or not | read-rule allowlist; inside a writable area, a read-only mount over the path and its parents pinned (refused where mounting isn't possible) | `tests/security/read_rules.rs: test_credentials_unreadable_by_default`, `test_deny_read_inside_a_writable_dir` |
-| Can't plant a `.git/hooks` script, or a `.git/config` entry that runs a command (`core.hooksPath`, `core.fsmonitor`...), for the host's git to run later | `.git/hooks` and `.git/config` in a writable area are read-only (mounts, their parents pinned), unless `allow_vcs_hook_writes`; absent where mounting isn't possible (see Known gaps) | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
 | Can't read or write a denied file through a hard link made on the host beforehand | at `build()` the denied files with more than one name are looked for under the sandbox's directories and home, and the other names denied; a link that isn't found refuses the build | `tests/security/read_rules.rs: test_a_hard_link_to_a_denied_file_is_denied_or_refused` |
 | A path granted back inside a hidden home (a toolchain directory) doesn't bring the credentials inside it | the Landlock grant is split around the denied paths inside it | `tests/security/read_rules.rs: test_a_denied_path_inside_a_granted_one_stays_denied` |
 | Can't read or write the caller's terminal, or inject input into it (`TIOCSTI`) | the command runs in a new session (`setsid`), so it has no controlling terminal | `tests/security/process_management.rs: test_command_runs_in_its_own_session` |
@@ -121,15 +120,21 @@ that's not what this protects. Run them in separate sandboxes.
 
 ### Known gaps
 
-- `.git/hooks` and `.git/config` protection inside a writable directory is a read-only mount, so
-  under the AppArmor restriction (where nothing can be mounted) it's absent and
-  a command can write there. macOS, which doesn't need a mount, is unaffected.
-- A git repository the command creates (`git init`, `git clone`) has whatever
-  `.git/config` and hooks the command wrote: path rules can't protect them
-  without breaking `init` and `clone`, which write `.git/config` themselves.
-  Only repositories that exist at `build()`, their submodules and worktrees,
-  are protected. The host's git (an editor auto-detecting nested
-  repositories) shouldn't run in a repository the command made.
+- **What the host does with the workspace afterwards is outside the sandbox.**
+  The workspace is the command's output. Anything the host runs against it
+  that takes instructions from files in it executes what the command wrote:
+  git (hooks, `core.hooksPath`, `core.fsmonitor`, `commondir`, the `.git`
+  file's `gitdir:`, submodule links in the index), `make`, `npm install`
+  scripts, `cargo` (`build.rs`, `.cargo/config.toml`), `direnv`, `pre-commit`,
+  an editor's task files. The sandbox confines the command's processes; path
+  rules for one tool's configuration can't cover the class, and aren't
+  attempted (an earlier `.git/hooks`/`.git/config` protection was removed for
+  that reason: it protected one tool against some of its entry points and
+  implied more than it gave). Integrators who need a file kept can name it
+  `read_only` inside the writable workspace
+  (`tests/security/read_only_inside_writable.rs` does this for `.git/hooks`).
+  The design answer is a workspace the host never runs tools in: the command
+  works on a copy and its changes come back to be reviewed (planned).
 - The hard-link search at `build()` skips home's bulk (`Library`, `.cache`,
   `node_modules`, `target`, `.git`...) and the rest of the file system; a link
   there isn't found, and the build is refused rather than the link read.
@@ -139,7 +144,11 @@ that's not what this protects. Run them in separate sandboxes.
   has no right for these and seccomp can't see the path, so only a read-only
   mount (which needs mounting) stops them; `chmod -R`, say, could widen the
   caller's own files. The contents still can't be written. macOS denies these
-  by default (its writes are default-deny).
+  by default (its writes are default-deny). Inside a writable area the same
+  holds for the directories above a `read_only` or denied path: a `chmod 000`
+  on one of them keeps the host out of the protected file until it changes
+  the mode back (the file itself is intact); macOS pins their mode, owner,
+  flags and ACL along with their name.
 - Without a mount, the host's `/dev` is the sandbox's: a command can see and,
   for device nodes its uid may write, write to them, including another of the
   caller's own terminals (`/dev/pts/N`). It cannot inject input into them
@@ -195,7 +204,6 @@ can't. See [platform-macos.md](platform-macos.md)'s own comparison table.
 | Claim | Mechanism | Verified by |
 |---|---|---|
 | Can't read credentials/`deny_read`/hidden-home paths, including one inside a writable root after renaming it or a directory above it | SBPL `file-read-data` denial; `file-write-unlink` denied on such a path and its parents up to the root | `tests/security/sbpl_rules.rs`, `tests/security/read_rules.rs` |
-| Can't plant a `.git/hooks` script, or a `.git/config` entry that runs a command, for the host's git to run later | `.git/hooks` and `.git/config` in a writable root get `file-write*` denied and their parents' `file-write-unlink` denied, unless `allow_vcs_hook_writes` | `tests/security/read_rules.rs: test_git_hooks_in_a_writable_dir_are_protected` |
 | Can't read or write a denied file through a hard link made on the host beforehand | as on Linux: found at `build()` and denied by name (`file-read-data` and `file-write*`), or the build refused | `tests/security/read_rules.rs: test_a_hard_link_to_a_denied_file_is_denied_or_refused` |
 | A path granted back inside a hidden home (a toolchain directory) doesn't bring the credentials inside it | a `file-read-data` deny for each denied path inside a grant, after the grant | `tests/security/read_rules.rs: test_a_denied_path_inside_a_granted_one_stays_denied` |
 | Can't read or write the caller's terminal, or inject input into it (`TIOCSTI`) | the command runs in a new session (`setsid`), so it has no controlling terminal | `tests/security/process_management.rs: test_command_runs_in_its_own_session` |

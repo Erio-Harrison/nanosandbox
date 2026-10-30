@@ -190,9 +190,11 @@ the host user `host_uid`/`host_gid` name.
 
 A `read_only` path inside a `writable` one (the workspace, say) is read-only
 again: it can't be changed, replaced or moved, and neither can the directories
-above it, up to the writable one. The rest stays writable. That's how to keep
-the project's own settings out of reach of the commands the sandbox runs
-(`.git/hooks` and `.git/config` get this by default, see below). On macOS it's a deny rule. On Linux it's a read-only mount, so
+above it, up to the writable one, nor can their mode, owner, flags or ACL be
+changed (so the host isn't kept out of it; on Linux a `chmod` of those
+directories isn't refused, see THREAT_MODEL). The rest stays writable. That's how to keep
+the project's own settings out of reach of the commands the sandbox runs (a
+lockfile, a CI config, `.git/hooks`). On macOS it's a deny rule. On Linux it's a read-only mount, so
 it needs mounting: `build()` refuses it where AppArmor's `unprivileged_userns`
 restriction denies that, rather than leave the path writable.
 
@@ -260,9 +262,11 @@ whole home directory instead, except what `read_only`, `writable` or
 the toolchains and caches readable: `~/.cargo`, `~/.rustup`, `~/.nvm`, `~/.npm`,
 `~/.pyenv`, `~/.local`, `~/.cache`, `~/go`, `~/.m2`, `~/.gradle`,
 `~/Library/Caches`, `~/Library/Developer` and the like, of those that exist,
-plus the install root of every `PATH` entry under home (`~/.cargo/bin` brings
-`~/.cargo`, `~/dev/flutter/bin` brings `~/dev/flutter`, not `~/dev`), and
-git's `~/.gitconfig` and `~/.config/git`, which git won't run without. The
+plus the install root of every `bin`/`sbin` directory on `PATH` under home
+(`~/.cargo/bin` brings `~/.cargo`, `~/dev/flutter/bin` brings `~/dev/flutter`,
+not `~/dev`; a `PATH` entry that isn't a `bin` directory, like `~/Desktop`,
+brings nothing), and git's `~/.gitconfig` and `~/.config/git/{config,ignore,attributes}`,
+which git won't run without (`~/.config/git/credentials` stays hidden). The
 credentials above stay hidden inside them (`~/.cargo/credentials`). Since
 `HOME` isn't the real home for the command (it's the run's private directory,
 or what `env` says), the variables these toolchains find themselves through
@@ -316,24 +320,17 @@ linked out from under the rule either. On Linux that takes a mount over it
 where AppArmor denies mounting, like `read_only` inside a writable directory;
 a path the config names inside such a denied path is refused too.
 
-`.git/hooks` and `.git/config` (and `.git/config.worktree`) inside a `writable`
-directory are kept read-only the same way, so a command can't plant a hook the
-host's git would run later, nor a config entry that runs a command
-(`core.hooksPath`, `core.fsmonitor`, `core.pager`, `diff.external`,
-`filter.*`, `include.path`...). The same goes for every submodule's git dir
-under `.git/modules/` (the host's `git status` and `git submodule update` read
-those too) and linked worktrees' `config.worktree`; a `.git` file's `gitdir:`
-pointer is followed. Commits, branches and stashes work; `git config --local`
-and `git remote add` don't. `allow_vcs_hook_writes()` turns this off.
-
-This covers the repositories that exist when the sandbox is built. A repository
-the command itself creates (`git init`, `git clone`, in the workspace or a
-subdirectory of it) is the command's own: its config and hooks are whatever the
-command wrote, and can't be protected without breaking `init` and `clone`
-themselves (both write `.git/config`). Treat such a repository as untrusted
-input: don't run the host's git in it (editors that auto-detect nested
-repositories do) before looking at its `.git/config`. On Linux it needs a mount, so it's absent under the AppArmor restriction;
-on macOS it always applies.
+Nothing else in a `writable` directory is kept from the command: the workspace
+is the command's output. Anything the host later runs against it that takes
+instructions from files in it runs what the command wrote: git (hooks,
+`core.hooksPath`, `core.fsmonitor`, `commondir`, submodule links...), `make`,
+`npm install` scripts, `cargo` (`build.rs`, `.cargo/config.toml`), `direnv`,
+`pre-commit`, an editor's task files. The sandbox confines the command's
+processes; it doesn't police what the host does with the files afterwards, and
+path rules for one tool's configuration don't cover the class (see
+[THREAT_MODEL.md](THREAT_MODEL.md)). A file that must stay as it is, name
+`read_only`; and treat a workspace an agent has run in as input to review, not
+as a place to run tools unprompted (editors auto-detecting repositories do).
 
 #### `working_dir`
 

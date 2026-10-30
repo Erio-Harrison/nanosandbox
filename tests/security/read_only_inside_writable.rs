@@ -65,8 +65,38 @@ fn test_read_only_inside_writable_cannot_be_changed_or_moved() {
         "rm -f .git/hooks/pre-commit",
         "mv .git/hooks .git/hooks.bak",
         "rm -rf .git/hooks",
+        // The directories above a protected path can't be made unreachable either (macOS;
+        // Linux can't deny a chmod by path, see THREAT_MODEL).
+        #[cfg(target_os = "macos")]
+        "chmod 000 .dc",
+        #[cfg(target_os = "macos")]
+        "chmod +a 'everyone deny search' .dc",
+        #[cfg(target_os = "macos")]
+        "chflags uchg .dc",
+        #[cfg(target_os = "macos")]
+        "chmod 000 .",
     ] {
         let _ = sh(&sandbox, attack);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [".dc", "."] {
+            let mode = std::fs::metadata(root.join(dir))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_ne!(mode & 0o777, 0, "{dir} mode {mode:o}");
+        }
+        let acl = std::process::Command::new("ls")
+            .args(["-led", root.join(".dc").to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&acl.stdout).contains("deny"),
+            "{}",
+            String::from_utf8_lossy(&acl.stdout)
+        );
     }
     let read = |p: &str| std::fs::read_to_string(root.join(p)).ok();
     assert_eq!(read(".dc/settings.json").as_deref(), Some("SAFE"));

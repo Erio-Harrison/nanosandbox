@@ -151,25 +151,9 @@ impl MountPlan {
     pub(super) fn new(config: &SandboxConfig, restricted: bool) -> Result<Self> {
         let rootfs = config.rootfs.as_deref();
         let tmpfs = Self::tmpfs_mounts(config, restricted);
-        // `.git/hooks` in a writable area, made read-only so a hook can't be planted for the
-        // host's git. Needs a mount, so only where one is possible (not under the AppArmor
-        // restriction, and not with a rootfs, where the area is the caller's own tree).
-        let vcs_ro: Vec<Mount> = if rootfs.is_none() && !restricted {
-            crate::platform::read_rules::vcs_protected_paths(config)
-                .into_iter()
-                .map(|p| Mount {
-                    source: p.clone(),
-                    target: p,
-                    permission: Permission::ReadOnly,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
         let binds: Vec<&Mount> = config
             .mounts
             .iter()
-            .chain(vcs_ro.iter())
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
             .collect();
 

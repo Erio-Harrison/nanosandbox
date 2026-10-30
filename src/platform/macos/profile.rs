@@ -59,6 +59,12 @@ fn without_trust_services(policy: &str) -> String {
         .collect()
 }
 
+/// What a pinned directory (a writable root, or a directory above a protected path) must not
+/// have done to it: removed or renamed, and its mode, owner, flags or ACL changed, which would
+/// keep the host (or the rules, which match paths) from reaching what's inside.
+const PIN_OPS: &str =
+    "file-write-unlink file-write-mode file-write-owner file-write-flags file-write-acl";
+
 pub(super) struct SeatbeltProfile {
     pub(super) policy: String,
     pub(super) params: Vec<(String, String)>,
@@ -171,27 +177,20 @@ impl MacOSExecutor {
             let mut rules = String::from("; the writable roots stay where they are\n");
             for (i, dir) in fixed.iter().enumerate() {
                 let key = format!("FIXED_ROOT_{i}");
-                rules.push_str(&format!(
-                    "(deny file-write-unlink (literal (param \"{key}\")))\n"
-                ));
+                rules.push_str(&format!("(deny {PIN_OPS} (literal (param \"{key}\")))\n"));
                 params.push((key, dir.to_string_lossy().into_owned()));
             }
             sections.push(rules);
         }
 
         // A read_only path in a writable root loses write again (later deny wins); it and its
-        // ancestors can't be removed or renamed, or a symlink could stand in for it. `.git/hooks`
-        // is protected the same way, so a hook can't be written for the host's git to run.
+        // ancestors can't be removed or renamed, or a symlink could stand in for it, nor have
+        // their mode, owner, flags or ACL changed, or the host could be kept out of it.
         let narrow: Vec<PathBuf> = config
             .mounts
             .iter()
             .filter(|m| m.permission == Permission::ReadOnly)
             .map(|m| resolve(&m.target))
-            .chain(
-                read_rules::vcs_protected_paths(config)
-                    .iter()
-                    .map(|p| resolve(p)),
-            )
             .collect();
         let mut narrowed = String::from("; read_only inside a writable root\n");
         let mut n = 0;
@@ -205,9 +204,7 @@ impl MacOSExecutor {
             n += 1;
             for ancestor in path.ancestors().skip(1) {
                 let key = format!("READ_ONLY_{n}");
-                narrowed.push_str(&format!(
-                    "(deny file-write-unlink (literal (param \"{key}\")))\n"
-                ));
+                narrowed.push_str(&format!("(deny {PIN_OPS} (literal (param \"{key}\")))\n"));
                 params.push((key, ancestor.to_string_lossy().into_owned()));
                 n += 1;
             }
@@ -237,7 +234,7 @@ impl MacOSExecutor {
                 fixed_denied.push(("file-write*", "subpath", path));
                 for dir in path.ancestors().skip(1).take_while(|d| in_root(d)) {
                     if !fixed_denied.iter().any(|(_, _, f)| *f == dir) {
-                        fixed_denied.push(("file-write-unlink", "literal", dir));
+                        fixed_denied.push((PIN_OPS, "literal", dir));
                     }
                 }
             }
