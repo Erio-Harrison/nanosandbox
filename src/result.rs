@@ -25,7 +25,10 @@ pub struct ExecutionResult {
     /// Whether the process was killed due to out-of-memory
     pub killed_by_oom: bool,
 
-    /// Killed for exceeding `tmpfs("/tmp", size)`. Only where emulated with a private directory (macOS, Linux under AppArmor's userns restriction); a real tmpfs fails with ENOSPC.
+    /// Killed for writing more than `private_tmp` allows. Only where that is a private directory
+    /// rather than a tmpfs (macOS, Linux under AppArmor's userns restriction), and only for what
+    /// goes through `$TMPDIR`: `/tmp` by name is the host's there, unlimited and not cleaned up. A
+    /// real tmpfs fails the write with ENOSPC instead.
     pub killed_by_tmp_limit: bool,
 
     /// Killed for exceeding `cpu_time_limit` summed across all processes (Linux cgroup, Windows Job Object), on top of per-process `RLIMIT_CPU` on Linux/macOS.

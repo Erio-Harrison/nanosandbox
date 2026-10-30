@@ -373,7 +373,7 @@ impl Config {
             .memory_limit(self.memory)
             .wall_time_limit(Duration::from_secs_f64(self.timeout));
         if !self.no_hide_home {
-            b = b.hide_home();
+            b = b.hide_home_except_toolchains();
         }
         for p in &self.read_only {
             b = b.read_only(p);

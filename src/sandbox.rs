@@ -3,7 +3,7 @@
 use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 #[cfg(unix)]
 use crate::child::Child;
-use crate::error::Result;
+use crate::error::{Result, SandboxError};
 use crate::network::ProxiedNetwork;
 #[cfg(unix)]
 use crate::platform::supervise::Io;
@@ -64,6 +64,17 @@ impl Sandbox {
         // Where the paths it names lead, fixed now: see `SandboxConfig::pin`.
         #[cfg(unix)]
         config.pin();
+        // A hard link made on the host is another name for a denied file; deny those too.
+        #[cfg(unix)]
+        {
+            config.linked_secrets =
+                crate::platform::read_rules::linked_secrets(&config).map_err(|context| {
+                    SandboxError::Config {
+                        context,
+                        source: None,
+                    }
+                })?;
+        }
 
         // // After the support check, so a failure doesn't spin up a proxy for nothing.
         let proxy = match &config.network_mode {
@@ -258,6 +269,7 @@ impl Sandbox {
         cpu_and_pids(Sandbox::builder(), 2.0, 100)
             .read_only(input_dir)
             .writable(output_dir.clone())
+            .hide_home_except_toolchains()
             .working_dir(output_dir)
             .memory_limit(2 * 1024 * 1024 * 1024) // 2GB
             .wall_time_limit(Duration::from_secs(300)) // 5 minutes
@@ -290,7 +302,10 @@ impl Sandbox {
             .no_network()
     }
 
-    /// AI agent preset: writable workspace, moderate limits, network set by the caller.
+    /// AI agent preset: writable workspace, moderate limits, network set by the caller. The
+    /// home directory is hidden except for toolchains and caches
+    /// ([`hide_home_except_toolchains`](SandboxBuilder::hide_home_except_toolchains)): what
+    /// the command prints goes into a model's context, so what it can read, it can leak.
     ///
     /// # Example
     ///
@@ -307,6 +322,7 @@ impl Sandbox {
         let home = workspace.to_string_lossy().into_owned();
         cpu_and_pids(Sandbox::builder(), 4.0, 256)
             .writable(workspace.clone())
+            .hide_home_except_toolchains()
             .private_tmp(512 * 1024 * 1024)
             .working_dir(workspace)
             .memory_limit(4 * 1024 * 1024 * 1024) // 4GB

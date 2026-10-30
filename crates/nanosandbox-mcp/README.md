@@ -47,7 +47,7 @@ is refused.
 |---|---|---|
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
 | `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). A `--read-only` path inside the workspace is read-only again, so a settings file there, or `.git/hooks` and `.git/config` (both: `core.hooksPath` in the config runs code from anywhere), can't be changed by a command (on Linux this needs mounting, refused where AppArmor denies it) | |
-| `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory | home hidden |
+| `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory (hidden except toolchains and caches by default) | home hidden |
 | `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` and `host:port` work (not `*.com`) | network off |
 | `--deny-network <HOST>` | Refuse these even if allowed, same syntax (`github.com:22`) | none |
 | `--host-network` | Unrestricted network. Use with care. | |
@@ -105,11 +105,11 @@ above). `npm install` works, and what it downloads is cached in the workspace (s
 private `HOME` and is gone after the call, so if git asks who you are, give it
 `git -c user.name=... -c user.email=...` on the command.
 
-**Rust**: the toolchain lives in your home (`~/.cargo`, `~/.rustup`), which is hidden by default,
-so `cargo` fails with `Operation not permitted`. Add `--no-hide-home` and `~/.cargo/bin` to `PATH`
-(`--env PATH=$HOME/.cargo/bin:/usr/bin:/bin`, with `$HOME` filled in by your shell or client). That
-makes your home readable, apart from the credentials and shell history that stay unreadable
-regardless. Fetching dependencies also needs `--allow-network index.crates.io,static.crates.io`.
+**Rust**: the toolchain lives in your home (`~/.cargo`, `~/.rustup`). The home directory is hidden
+by default, but toolchain and cache directories like those stay readable (`~/.cargo/credentials`
+doesn't), so only `PATH` needs `~/.cargo/bin` (`--env PATH=$HOME/.cargo/bin:/usr/bin:/bin`, with
+`$HOME` filled in by your shell or client). A toolchain somewhere unusual needs `--read-only` on
+it, or `--no-hide-home`. Fetching dependencies also needs `--allow-network index.crates.io,static.crates.io`.
 
 **Starting a server and testing it in the same call** doesn't work on macOS (a program can't bind or
 connect to loopback there, by design) or on Linux without `--allow-network`. With it on Linux, a
