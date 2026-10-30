@@ -124,9 +124,12 @@ Block all network access:
 .no_network()
 ```
 
-Allow specific domains only (uses a local HTTP proxy):
+Allow specific destinations only (through a local HTTP and SOCKS5 proxy; a
+`:port` restricts the port, a deny entry carves out exceptions, and the
+result lists every refusal with its reason):
 ```rust
-.allow_network(&["api.github.com", "*.amazonaws.com"])
+.allow_network(&["api.github.com:443", "*.amazonaws.com"])
+.deny_network_with_reason("github.com:22", "SSH is blocked; use an https remote")
 ```
 
 ## Features

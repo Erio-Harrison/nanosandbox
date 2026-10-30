@@ -76,6 +76,12 @@ pub(crate) struct SandboxConfig {
     pub(crate) network_mode: NetworkMode,
     /// [`SandboxBuilder::allow_private_destinations`].
     pub(crate) allow_private_destinations: bool,
+    /// [`SandboxBuilder::deny_network`] entries with their reasons.
+    pub(crate) denied_destinations: Vec<(String, Option<String>)>,
+    /// [`SandboxBuilder::require_host_match`].
+    pub(crate) require_host_match: bool,
+    /// macOS: [`SandboxBuilder::allow_trustd`].
+    pub(crate) allow_trustd: bool,
 
     /// Linux syscall filter, see [`SandboxBuilder::seccomp`].
     pub(crate) seccomp: bool,
@@ -208,6 +214,9 @@ impl Default for SandboxConfig {
 
             network_mode: NetworkMode::None,
             allow_private_destinations: false,
+            denied_destinations: Vec::new(),
+            require_host_match: false,
+            allow_trustd: false,
             seccomp: true,
             uid: None,
             host_uid: None,
@@ -448,11 +457,53 @@ impl SandboxBuilder {
         self
     }
 
-    /// Allow network access only to specified domains
+    /// Allow network access only to the listed destinations, through a local proxy. An entry
+    /// is a host (`example.com`), `*.example.com` (it and its subdomains), or an IP address,
+    /// with an optional `:port` (`api.example.com:443`); without one any port is allowed.
+    /// Replaces an earlier list.
     pub fn allow_network(mut self, domains: &[&str]) -> Self {
         self.config.network_mode = NetworkMode::Proxied {
             allowed_domains: domains.iter().map(|s| s.to_string()).collect(),
         };
+        self
+    }
+
+    /// With [`allow_network`](Self::allow_network): destinations refused even if an allow
+    /// entry matches them, in the same syntax (`github.com:22`). Adds to earlier entries.
+    pub fn deny_network(mut self, entries: &[&str]) -> Self {
+        self.config
+            .denied_destinations
+            .extend(entries.iter().map(|e| (e.to_string(), None)));
+        self
+    }
+
+    /// [`deny_network`](Self::deny_network) for one entry, with a reason the program is told
+    /// when refused (`"SSH is blocked; use an https remote"`), and that the result records.
+    pub fn deny_network_with_reason(mut self, entry: &str, reason: &str) -> Self {
+        self.config
+            .denied_destinations
+            .push((entry.to_string(), Some(reason.to_string())));
+        self
+    }
+
+    /// With [`allow_network`](Self::allow_network): cut an HTTPS tunnel whose TLS handshake
+    /// names a host other than the one it was opened to (domain fronting through a shared
+    /// CDN). Off by default. The proxy waits up to 5 s for the handshake to start, so a
+    /// tunnel to a protocol where the server speaks first is delayed by that.
+    pub fn require_host_match(mut self) -> Self {
+        self.config.require_host_match = true;
+        self
+    }
+
+    /// macOS, with [`allow_network`](Self::allow_network): let the program use the system's
+    /// certificate-verification service (`trustd`). Off by default: trustd fetches a
+    /// certificate's OCSP and issuer URLs on the program's behalf, outside the allowlist, so a
+    /// certificate the program evaluates can carry data to any host. Without it, Security.framework
+    /// verification fails for programs that use it directly (Go, Swift); the system's curl, and
+    /// clients with their own certificate store (Python, Node, Rust, Java) are unaffected.
+    /// No effect on other platforms.
+    pub fn allow_trustd(mut self) -> Self {
+        self.config.allow_trustd = true;
         self
     }
 
@@ -570,11 +621,31 @@ impl SandboxBuilder {
         }
 
         let c = &self.config;
-        if c.allow_private_destinations && !matches!(c.network_mode, NetworkMode::Proxied { .. }) {
-            return Err(SandboxError::Config {
-                context: "allow_private_destinations() only applies with allow_network()".into(),
-                source: None,
-            });
+        if let NetworkMode::Proxied { allowed_domains } = &c.network_mode {
+            let rules = crate::network::ProxyRules {
+                allowed: allowed_domains.clone(),
+                denied: c.denied_destinations.clone(),
+                ..Default::default()
+            };
+            if let Some((list, entry, why)) = rules.invalid_entry() {
+                return Err(SandboxError::Config {
+                    context: format!("{list} entry {entry:?}: {why}"),
+                    source: None,
+                });
+            }
+        } else {
+            let set = [
+                (c.allow_private_destinations, "allow_private_destinations()"),
+                (!c.denied_destinations.is_empty(), "deny_network()"),
+                (c.require_host_match, "require_host_match()"),
+                (c.allow_trustd, "allow_trustd()"),
+            ];
+            if let Some((_, name)) = set.iter().find(|(on, _)| *on) {
+                return Err(SandboxError::Config {
+                    context: format!("{name} only applies with allow_network()"),
+                    source: None,
+                });
+            }
         }
         if let Some(cpus) = c.cpu_limit {
             // Linux's cpu.max takes at least 1ms per 100ms period.

@@ -91,7 +91,7 @@ fn test_non_whitelisted_domain_blocked() {
         if command -v curl >/dev/null 2>&1; then
             # Proxy env vars should be set by nanosandbox
             response=$(curl -s --connect-timeout 5 http://httpbin.org/get 2>&1)
-            if echo "$response" | grep -q "403\|Domain not in whitelist\|Forbidden"; then
+            if echo "$response" | grep -q "403\|not on the network allowlist\|Forbidden"; then
                 echo "BLOCKED"
             else
                 echo "ALLOWED:$response"
@@ -467,4 +467,212 @@ fn test_blocked_hosts_reported() {
     // And only that run's: the next one starts empty.
     let result = sandbox.run("true", &[]).unwrap();
     assert!(result.blocked_hosts.is_empty());
+}
+
+/// A loopback HTTP server answering "reached" to every request, and how many it got.
+#[cfg(unix)]
+fn loopback_server() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::io::{Read, Write};
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let server_hits = hits.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.read(&mut [0u8; 1024]);
+            let _ = stream.write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 7\r\n\r\nreached");
+        }
+    });
+    (port, hits)
+}
+
+/// An allow entry with a port allows only that port; a deny entry wins and its reason reaches
+/// the program (`X-Proxy-Error`, a plain-text line) and the result, which lists every refusal
+/// with its port, reason and count.
+#[test]
+#[cfg(unix)]
+fn test_ports_deny_reasons_and_refusals_end_to_end() {
+    use nanosandbox::RefusalReason;
+    use std::sync::atomic::Ordering;
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let (port, hits) = loopback_server();
+    let (other, other_hits) = loopback_server();
+    let sandbox = Sandbox::builder()
+        .allow_network(&[&format!("localhost:{port}"), &format!("localhost:{other}")])
+        .deny_network_with_reason(&format!("localhost:{other}"), "the other one is off")
+        .allow_private_destinations()
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         c() {{ curl -s -i -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 \"$@\"; echo; }}
+         c http://localhost:{port}/
+         c http://localhost:{other}/
+         c http://localhost:{other}/again
+         c http://localhost:1/
+         curl -s -x \"$HTTP_PROXY\" --noproxy '' -p http://localhost:1/"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    let out = result.stdout.as_str();
+    if out.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert!(out.contains("reached"), "{out}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(other_hits.load(Ordering::SeqCst), 0);
+    assert!(out.contains("X-Proxy-Error: denied"), "{out}");
+    assert!(
+        out.contains(&format!(
+            "nanosandbox: localhost:{other} is denied: the other one is off"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("X-Proxy-Error: not-allowed"), "{out}");
+    assert!(
+        out.contains("nanosandbox: localhost:1 is not on the network allowlist"),
+        "{out}"
+    );
+
+    let listed: Vec<(String, u16, RefusalReason, u32)> = result
+        .network_refusals
+        .iter()
+        .map(|r| (r.host.clone(), r.port, r.reason.clone(), r.attempts))
+        .collect();
+    let mut expected = vec![
+        ("localhost".to_string(), 1, RefusalReason::NotAllowed, 2),
+        (
+            "localhost".to_string(),
+            other,
+            RefusalReason::Denied(Some("the other one is off".into())),
+            2,
+        ),
+    ];
+    expected.sort();
+    assert_eq!(listed, expected);
+    assert_eq!(result.blocked_hosts, vec!["localhost"]);
+}
+
+/// The proxy port also speaks SOCKS5 (`ALL_PROXY`), under the same policy, for programs that
+/// tunnel other TCP protocols.
+#[test]
+#[cfg(unix)]
+fn test_socks5_on_the_proxy_port() {
+    use nanosandbox::RefusalReason;
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let (port, _) = loopback_server();
+    let sandbox = Sandbox::builder()
+        .allow_network(&["localhost"])
+        .allow_private_destinations()
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         echo \"all=$ALL_PROXY\"
+         curl -s --proxy \"$ALL_PROXY\" --noproxy '' --connect-timeout 3 http://localhost:{port}/; echo \" exit=$?\"
+         curl -s --proxy \"$ALL_PROXY\" --noproxy '' --connect-timeout 3 http://blocked.invalid:8080/; echo \" exit=$?\""
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    let out = result.stdout.as_str();
+    if out.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert!(out.contains("all=socks5h://127.0.0.1:"), "{out}");
+    assert!(out.contains("reached exit=0"), "{out}");
+    // 97: "can't complete SOCKS5 connection", the ruleset refusal.
+    assert!(out.contains(" exit=97"), "{out}");
+    assert_eq!(result.network_refusals.len(), 1);
+    let refusal = &result.network_refusals[0];
+    assert_eq!(
+        (refusal.host.as_str(), refusal.port, refusal.reason.clone()),
+        ("blocked.invalid", 8080, RefusalReason::NotAllowed)
+    );
+}
+
+/// Entries and companions that can't work are refused at build.
+#[test]
+fn test_network_settings_are_checked_at_build() {
+    let config_error = |b: nanosandbox::SandboxBuilder| match b.build() {
+        Err(nanosandbox::SandboxError::Config { context, .. }) => context,
+        Err(other) => panic!("{other:?}"),
+        Ok(_) => panic!("built"),
+    };
+    assert!(
+        config_error(Sandbox::builder().allow_network(&["example.com:0"]))
+            .contains("allow_network entry \"example.com:0\"")
+    );
+    assert!(
+        config_error(
+            Sandbox::builder()
+                .allow_network(&["example.com"])
+                .deny_network(&["*"])
+        )
+        .contains("deny_network entry \"*\"")
+    );
+    for (builder, name) in [
+        (
+            Sandbox::builder().deny_network(&["a.com"]),
+            "deny_network()",
+        ),
+        (
+            Sandbox::builder().require_host_match(),
+            "require_host_match()",
+        ),
+        (Sandbox::builder().allow_trustd(), "allow_trustd()"),
+    ] {
+        assert!(config_error(builder).contains(name), "{name}");
+    }
+    // Under AppArmor's userns restriction allow_network() itself is refused (Unsupported).
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    assert!(
+        Sandbox::builder()
+            .allow_network(&["api.example.com:443", "[::1]:8080", "*.example.org"])
+            .deny_network(&["example.org:22"])
+            .require_host_match()
+            .build()
+            .is_ok()
+    );
+}
+
+/// With trustd left out of the proxied profile, TLS through the proxy still verifies for the
+/// system's curl (it doesn't need trustd for a chain to a public CA).
+#[test]
+#[cfg(target_os = "macos")]
+fn test_https_verifies_without_trustd() {
+    let sandbox = Sandbox::builder()
+        .allow_network(&["example.com"])
+        .wall_time_limit(Duration::from_secs(20))
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"",
+            ],
+        )
+        .unwrap();
+    let out = result.stdout.trim();
+    assert!(
+        !out.ends_with("exit=60") && !out.ends_with("exit=35"),
+        "certificate verification failed: {out} {}",
+        result.stderr
+    );
+    if !out.starts_with("200") {
+        eprintln!("skipping: no network ({out})");
+    }
 }

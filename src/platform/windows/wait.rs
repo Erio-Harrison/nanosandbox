@@ -93,6 +93,7 @@ pub(super) fn wait(
         peak_memory: peak_memory(job, config.memory_limit, seen_memory),
         cpu_time: job.cpu_time(),
         blocked_hosts: Vec::new(),
+        network_refusals: Vec::new(),
         proc_isolated: true,
     })
 }

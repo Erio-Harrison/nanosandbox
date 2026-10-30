@@ -335,32 +335,63 @@ Job Object); macOS has no equivalent.
 
 ```rust
 pub fn no_network(self) -> Self                    // default
-pub fn allow_network(self, domains: &[&str]) -> Self
+pub fn allow_network(self, entries: &[&str]) -> Self
+pub fn deny_network(self, entries: &[&str]) -> Self            // with allow_network
+pub fn deny_network_with_reason(self, entry: &str, reason: &str) -> Self
 pub fn host_network(self) -> Self
 pub fn allow_private_destinations(self) -> Self     // with allow_network
+pub fn require_host_match(self) -> Self             // with allow_network
+pub fn allow_trustd(self) -> Self                   // macOS, with allow_network
 ```
 
-`allow_network` routes all traffic through a local HTTP/HTTPS proxy that
-only lets the listed domains through (`*.example.com` matches
-`example.com` and its subdomains, and only DNS names: an IP address must be
-listed itself). `build()` refuses an entry that could never match or would
-allow too much: one with a port or a path, `*` anywhere but a leading `*.`,
-or `*.` with a single label (`*.com`). The sandbox has no other way out: on
-Linux it gets its own network namespace, on macOS the sandbox profile only
-allows the proxy. `HTTP_PROXY`/`HTTPS_PROXY` are set for the program.
+`allow_network` routes all traffic through a local proxy that only lets the
+listed destinations through. An entry is a host (`example.com`),
+`*.example.com` (it and its subdomains), or an IP address (an IPv6 one in
+brackets if it has a port), with an optional `:port`: `api.example.com:443`
+allows that port only, `api.example.com` any port. `build()` refuses an
+entry that could never match or would allow too much: a path or scheme, a
+port of 0, `*` anywhere but a leading `*.`, or `*.` with a single label
+(`*.com`). The sandbox has no other way out: on Linux it gets its own
+network namespace, on macOS the sandbox profile only allows the proxy.
 
 ```rust
-builder.allow_network(&["api.openai.com", "*.github.com"])
+builder
+    .allow_network(&["api.openai.com:443", "*.github.com"])
+    .deny_network_with_reason("github.com:22", "SSH is blocked; use an https remote")
 ```
+
+`deny_network` entries use the same syntax and are checked first, so a
+deny can carve a port or a subdomain out of an allow. A reason given with
+`deny_network_with_reason` is what the program is told, and what the result
+records.
+
+The proxy speaks HTTP (plain requests and `CONNECT` tunnels) and SOCKS5
+(any TCP, with the name resolved by the proxy) on one port.
+`HTTP_PROXY`/`HTTPS_PROXY` point programs at the first, `ALL_PROXY`
+(`socks5h://...`) at the second: libcurl, Go's `x/net/proxy` and most
+tools that honour a proxy at all use one of them. A program that ignores
+them (plain `ssh`, a database driver) gets nowhere: there is no other route,
+and no DNS inside the sandbox. UDP never leaves.
 
 The proxy connects from the host's network. So an allowed name that
 resolves to a loopback, private (10/8, 172.16/12, 192.168/16), link-local
 (including cloud metadata at 169.254.169.254), Azure's platform endpoint
 (168.63.129.16), one of this machine's own interface addresses, or other
-non-public address is refused with 403: it would reach the host's own services and internal
+non-public address is refused: it would reach the host's own services and internal
 network. `allow_private_destinations()` allows it, for an internal API. The
 proxy resolves each name once and connects to the address it checked, so
 the name can't resolve to something else in between (DNS rebinding).
+
+What a refused program sees: an HTTP `403` (or `502`/`504` when the
+connection failed) with an `X-Proxy-Error` header giving the reason's code
+and a one-line plain-text body saying what was refused and why
+(`nanosandbox: github.com:22 is denied: SSH is blocked; use an https remote`);
+over SOCKS5, reply 2, "connection not allowed by ruleset". The result's
+`network_refusals` lists every destination the proxy didn't connect to,
+with its port, the reason ([`RefusalReason`], whose `code()` is the header's
+value: `not-allowed`, `denied`, `non-public-address`, `host-mismatch`,
+`unreachable`, `timed-out`) and how many times it was asked;
+`blocked_hosts` is the policy-refused hosts among them, each once.
 
 How requests are relayed:
 
@@ -371,11 +402,23 @@ How requests are relayed:
   applies).
 - Plain HTTP is one request per connection: the proxy sends
   `Connection: close`, and sets `Host` to the URL's host, whatever the
-  client sent. HTTPS isn't decrypted, so what a client says inside TLS (its
-  SNI, its `Host`) isn't checked against the `CONNECT` host.
+  client sent. HTTPS isn't decrypted. By default what a client says inside
+  TLS (its SNI) isn't checked against the host the tunnel was opened to;
+  `require_host_match()` cuts a tunnel whose handshake names another host
+  (domain fronting through a CDN both share), at the cost of waiting up to
+  5 s for the handshake on a tunnel to a protocol where the server speaks
+  first.
 - Each run has a proxy listener of its own, closed with the run along with
-  its open connections. `ExecutionResult::blocked_hosts` lists the hosts it
-  refused that run.
+  its open connections.
+
+macOS: the proxied profile leaves out the system's certificate-verification
+services (`trustd`, `ocspd`). They fetch a certificate's OCSP and issuer
+URLs on the program's behalf, outside the allowlist, so a program could
+carry data out in a certificate it asks the system to evaluate. Programs
+that verify through Security.framework directly (Go, Swift) then fail TLS
+verification under `allow_network`; the system's curl, and clients with
+their own certificate store (Python, Node, Rust, Java), don't. `allow_trustd()`
+puts the services back for the programs that need them, reopening that path.
 
 Windows only supports `host_network()`.
 
@@ -483,7 +526,8 @@ pub struct ExecutionResult {
     pub signal: Option<i32>,           // the signal that killed the process; see below
     pub peak_memory: Option<u64>,      // bytes
     pub cpu_time: Option<Duration>,    // user + system
-    pub blocked_hosts: Vec<String>,    // refused by the allow_network proxy
+    pub blocked_hosts: Vec<String>,    // hosts the allow_network proxy refused by policy
+    pub network_refusals: Vec<NetworkRefusal>, // every refusal: host, port, reason, attempts
     pub output_truncated: bool,        // stdout or stderr went past max_output
     pub proc_isolated: bool,           // Linux: false where the sandbox sees the host's /proc
 }

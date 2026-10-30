@@ -4,9 +4,9 @@ use crate::builder::{NetworkMode, SandboxBuilder, SandboxConfig};
 #[cfg(unix)]
 use crate::child::Child;
 use crate::error::Result;
+use crate::network::ProxiedNetwork;
 #[cfg(unix)]
 use crate::platform::supervise::Io;
-use crate::network::ProxiedNetwork;
 use crate::platform::{PlatformExecutor, get_executor};
 use crate::result::ExecutionResult;
 use std::path::PathBuf;
@@ -68,8 +68,12 @@ impl Sandbox {
         // // After the support check, so a failure doesn't spin up a proxy for nothing.
         let proxy = match &config.network_mode {
             NetworkMode::Proxied { allowed_domains } => Some(Arc::new(ProxiedNetwork::setup(
-                allowed_domains.clone(),
-                config.allow_private_destinations,
+                crate::network::ProxyRules {
+                    allowed: allowed_domains.clone(),
+                    denied: config.denied_destinations.clone(),
+                    allow_private_destinations: config.allow_private_destinations,
+                    require_host_match: config.require_host_match,
+                },
             )?)),
             _ => None,
         };
@@ -151,7 +155,14 @@ impl Sandbox {
     /// ```
     #[cfg(unix)]
     pub fn spawn(&self, cmd: &str, args: &[&str]) -> Result<Child> {
-        self.spawn_with(cmd, args, Io { stdin: true, pty: None })
+        self.spawn_with(
+            cmd,
+            args,
+            Io {
+                stdin: true,
+                pty: None,
+            },
+        )
     }
 
     /// Like [`spawn`](Self::spawn), but on a pseudo-terminal of `rows` by `cols`: the command

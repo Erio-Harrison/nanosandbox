@@ -46,8 +46,78 @@ pub struct ExecutionResult {
     /// Whether the sandbox got its own `/proc`. False on Linux under AppArmor's `unprivileged_userns` restriction (see `docs/platform-linux.md`), which also skips the private hostname, or where mounting a fresh procfs failed (e.g. a container that masks parts of its `/proc`); the command then sees the host's.
     pub proc_isolated: bool,
 
-    /// Hosts the `allow_network` proxy refused, sorted: not allowlisted, or resolving only to non-public addresses.
+    /// Hosts the `allow_network` proxy refused by policy, sorted, each once: a summary of
+    /// [`network_refusals`](Self::network_refusals) without the connection failures.
     pub blocked_hosts: Vec<String>,
+
+    /// Every destination the `allow_network` proxy didn't connect to this run, with why,
+    /// sorted by host and port.
+    pub network_refusals: Vec<NetworkRefusal>,
+}
+
+/// A destination the `allow_network` proxy didn't connect a run to.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub struct NetworkRefusal {
+    /// As the program asked for it, lowercased.
+    pub host: String,
+    pub port: u16,
+    pub reason: RefusalReason,
+    /// How many times the run asked for it.
+    pub attempts: u32,
+}
+
+/// Why the proxy didn't connect. [`code`](Self::code) is what the program saw in the
+/// response's `X-Proxy-Error` header.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum RefusalReason {
+    /// Not on the allowlist.
+    NotAllowed,
+    /// On the deny list, with the reason given for the entry, if any.
+    Denied(Option<String>),
+    /// The name resolved only to loopback, private, link-local or other non-public addresses.
+    NonPublicAddress,
+    /// The TLS handshake inside the tunnel named another host (`require_host_match`).
+    HostMismatch,
+    /// Couldn't connect: the name didn't resolve, or the connection was refused.
+    Unreachable,
+    /// Connecting took too long.
+    TimedOut,
+}
+
+impl RefusalReason {
+    /// A short stable code for the reason: `not-allowed`, `denied`, `non-public-address`,
+    /// `host-mismatch`, `unreachable`, `timed-out`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotAllowed => "not-allowed",
+            Self::Denied(_) => "denied",
+            Self::NonPublicAddress => "non-public-address",
+            Self::HostMismatch => "host-mismatch",
+            Self::Unreachable => "unreachable",
+            Self::TimedOut => "timed-out",
+        }
+    }
+
+    /// Whether the policy refused it, as opposed to the connection failing.
+    pub fn by_policy(&self) -> bool {
+        !matches!(self, Self::Unreachable | Self::TimedOut)
+    }
+}
+
+impl NetworkRefusal {
+    /// The policy-refused hosts among `refusals`, sorted, each once.
+    pub(crate) fn blocked_hosts(refusals: &[NetworkRefusal]) -> Vec<String> {
+        let mut hosts: Vec<String> = refusals
+            .iter()
+            .filter(|r| r.reason.by_policy())
+            .map(|r| r.host.clone())
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
 }
 
 impl ExecutionResult {
@@ -66,6 +136,7 @@ impl ExecutionResult {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         }
@@ -126,6 +197,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -148,6 +220,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -170,6 +243,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -192,6 +266,7 @@ mod tests {
             peak_memory: Some(512 * 1024 * 1024),
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };
@@ -214,6 +289,7 @@ mod tests {
             peak_memory: None,
             cpu_time: None,
             blocked_hosts: Vec::new(),
+            network_refusals: Vec::new(),
             output_truncated: false,
             proc_isolated: true,
         };

@@ -1,8 +1,9 @@
 //! Proxy lifecycle and network configuration.
 
-use super::proxy::{Blocked, Policy};
+use super::proxy::{Policy, Refusals, Rule};
 use crate::error::{Result, SandboxError};
 use crate::network::HttpProxy;
+use crate::result::NetworkRefusal;
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 
@@ -24,30 +25,54 @@ pub struct ProxiedNetwork {
 /// and cuts the run's connections that are still open.
 pub(crate) struct Attachment {
     _stop: tokio::sync::oneshot::Sender<()>,
-    blocked: Arc<Blocked>,
+    refusals: Arc<Refusals>,
 }
 
 impl Attachment {
-    /// Stops serving the run, and returns the hosts the proxy refused it.
-    pub(crate) fn finish(self) -> Vec<String> {
-        self.blocked.hosts()
+    /// Stops serving the run, and returns what the proxy didn't connect it to.
+    pub(crate) fn finish(self) -> Vec<NetworkRefusal> {
+        self.refusals.list()
+    }
+}
+
+/// What `allow_network` and its companions asked for.
+#[derive(Clone, Debug, Default)]
+pub struct ProxyRules {
+    /// `allow_network` entries.
+    pub allowed: Vec<String>,
+    /// `deny_network` entries, each with its reason if one was given.
+    pub denied: Vec<(String, Option<String>)>,
+    pub allow_private_destinations: bool,
+    pub require_host_match: bool,
+}
+
+impl ProxyRules {
+    /// The first entry that can't work, if any: which list, the entry and why.
+    pub(crate) fn invalid_entry(&self) -> Option<(&'static str, &str, &'static str)> {
+        let allowed = self.allowed.iter().map(|e| ("allow_network", e.as_str()));
+        let denied = self
+            .denied
+            .iter()
+            .map(|(e, _)| ("deny_network", e.as_str()));
+        allowed
+            .chain(denied)
+            .find_map(|(list, entry)| Rule::parse(entry).err().map(|why| (list, entry, why)))
     }
 }
 
 impl ProxiedNetwork {
-    /// Start the proxy for `allowed_domains`; `allow_private_destinations` lets them resolve to
-    /// loopback, private, link-local and other non-public addresses.
-    pub fn setup(allowed_domains: Vec<String>, allow_private_destinations: bool) -> Result<Self> {
-        for entry in &allowed_domains {
-            if let Some(why) = super::proxy::invalid_allowlist_entry(entry) {
-                return Err(crate::error::SandboxError::Config {
-                    context: format!("allow_network entry {entry:?}: {why}"),
-                    source: None,
-                });
-            }
+    /// Start the proxy for `rules`.
+    pub fn setup(rules: ProxyRules) -> Result<Self> {
+        if let Some((list, entry, why)) = rules.invalid_entry() {
+            return Err(crate::error::SandboxError::Config {
+                context: format!("{list} entry {entry:?}: {why}"),
+                source: None,
+            });
         }
-        let policy = HttpProxy::new(allowed_domains, 0)
-            .allow_private_destinations(allow_private_destinations)
+        let policy = HttpProxy::new(rules.allowed, 0)
+            .deny(rules.denied)
+            .allow_private_destinations(rules.allow_private_destinations)
+            .require_host_match(rules.require_host_match)
             .policy();
         let (runtime_tx, runtime_rx) = mpsc::channel::<std::io::Result<tokio::runtime::Handle>>();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -109,26 +134,33 @@ impl ProxiedNetwork {
         let stop = async move {
             let _ = stop_rx.await;
         };
-        let blocked = Arc::new(Blocked::default());
+        let refusals = Arc::new(Refusals::default());
         self.runtime.spawn(HttpProxy::serve(
             listener,
             Arc::clone(&self.policy),
-            Arc::clone(&blocked),
+            Arc::clone(&refusals),
             stop,
         ));
         Ok(Attachment {
             _stop: stop_tx,
-            blocked,
+            refusals,
         })
     }
 
-    /// The environment variables pointing a run's programs to its proxy
-    /// listener on `port`.
+    /// The environment variables pointing a run's programs to its proxy listener on `port`:
+    /// HTTP for `HTTP_PROXY`/`HTTPS_PROXY`, SOCKS5 (names resolved by the proxy) for
+    /// `ALL_PROXY`, which libcurl, Go's `x/net/proxy` and others use for everything else.
     pub fn env_vars(port: u16) -> Vec<(String, String)> {
-        let url = format!("http://127.0.0.1:{port}");
+        let http = format!("http://127.0.0.1:{port}");
+        let socks = format!("socks5h://127.0.0.1:{port}");
         ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]
             .into_iter()
-            .map(|key| (key.to_string(), url.clone()))
+            .map(|key| (key.to_string(), http.clone()))
+            .chain(
+                ["ALL_PROXY", "all_proxy"]
+                    .into_iter()
+                    .map(|key| (key.to_string(), socks.clone())),
+            )
             .collect()
     }
 
@@ -172,11 +204,17 @@ mod tests {
     #[test]
     fn test_env_vars() {
         let vars = ProxiedNetwork::env_vars(3128);
-        assert_eq!(vars.len(), 4);
+        assert_eq!(vars.len(), 6);
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
             assert!(
                 vars.iter()
                     .any(|(k, v)| k == key && v == "http://127.0.0.1:3128")
+            );
+        }
+        for key in ["ALL_PROXY", "all_proxy"] {
+            assert!(
+                vars.iter()
+                    .any(|(k, v)| k == key && v == "socks5h://127.0.0.1:3128")
             );
         }
     }
@@ -184,7 +222,7 @@ mod tests {
     #[test]
     fn test_loopback_bypasses_the_proxy_unless_private_destinations_are_allowed() {
         let vars = ProxiedNetwork::env_vars_for(3128, false);
-        assert_eq!(vars.len(), 6);
+        assert_eq!(vars.len(), 8);
         for key in ["NO_PROXY", "no_proxy"] {
             let (_, v) = vars.iter().find(|(k, _)| k == key).unwrap();
             for host in ["localhost", "127.0.0.1", "::1"] {
@@ -194,7 +232,7 @@ mod tests {
 
         // // Allowed on purpose: loopback reaches the host's services via the proxy.
         let vars = ProxiedNetwork::env_vars_for(3128, true);
-        assert_eq!(vars.len(), 4);
+        assert_eq!(vars.len(), 6);
         assert!(!vars.iter().any(|(k, _)| k.eq_ignore_ascii_case("no_proxy")));
     }
 
@@ -203,7 +241,11 @@ mod tests {
     #[test]
     fn test_attach_serves_one_run() {
         use std::io::{Read, Write};
-        let network = ProxiedNetwork::setup(vec!["example.com".into()], false).unwrap();
+        let network = ProxiedNetwork::setup(ProxyRules {
+            allowed: vec!["example.com".into()],
+            ..Default::default()
+        })
+        .unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let attachment = network.attach(listener).unwrap();
@@ -216,7 +258,16 @@ mod tests {
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 403"), "{response}");
 
-        assert_eq!(attachment.finish(), vec!["evil.example"]);
+        let refusals = attachment.finish();
+        assert_eq!(refusals.len(), 1);
+        assert_eq!(
+            (
+                refusals[0].host.as_str(),
+                refusals[0].port,
+                refusals[0].reason.code()
+            ),
+            ("evil.example", 443, "not-allowed")
+        );
         std::thread::sleep(std::time::Duration::from_millis(100));
         assert!(std::net::TcpStream::connect(addr).is_err());
     }

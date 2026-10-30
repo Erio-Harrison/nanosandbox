@@ -24,7 +24,7 @@ pub(crate) struct Outcome {
     pub(crate) peak_memory: Option<u64>,
     pub(crate) cpu_time: Option<Duration>,
     pub(crate) proc_isolated: bool,
-    pub(crate) blocked_hosts: Vec<String>,
+    pub(crate) network_refusals: Vec<crate::result::NetworkRefusal>,
 }
 
 /// The caller's ends of a started command.
@@ -216,7 +216,8 @@ pub(crate) fn finish(
         signal: outcome.signal,
         peak_memory: outcome.peak_memory,
         cpu_time: outcome.cpu_time,
-        blocked_hosts: outcome.blocked_hosts,
+        blocked_hosts: crate::result::NetworkRefusal::blocked_hosts(&outcome.network_refusals),
+        network_refusals: outcome.network_refusals,
         proc_isolated: outcome.proc_isolated,
     }
 }

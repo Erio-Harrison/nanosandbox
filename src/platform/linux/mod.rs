@@ -441,7 +441,7 @@ fn launch_in_thread(
                 }),
         )?;
         slave_until_exit.take();
-        let blocked_hosts = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
+        let network_refusals = proxy_attachment.map(|a| a.finish()).unwrap_or_default();
         drop(private_tmp);
 
         // Without a cgroup, wait4's rusage is the fallback: CPU time sums waited descendants, maxrss
@@ -476,7 +476,7 @@ fn launch_in_thread(
             peak_memory,
             cpu_time,
             proc_isolated: !userns_restricted && !proc_mount_failed,
-            blocked_hosts,
+            network_refusals,
         })
     };
     Ok((handles, supervise))

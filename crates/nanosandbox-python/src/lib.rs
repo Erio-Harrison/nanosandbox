@@ -5,6 +5,7 @@
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::time::Duration;
 
 fn to_py_err(e: nanosandbox::SandboxError) -> PyErr {
@@ -162,6 +163,25 @@ impl SandboxBuilder {
 
     fn allow_private_destinations(&mut self) -> PyResult<Self> {
         Ok(Self::wrap(self.take()?.allow_private_destinations()))
+    }
+
+    fn deny_network(&mut self, entries: Vec<String>) -> PyResult<Self> {
+        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+        Ok(Self::wrap(self.take()?.deny_network(&refs)))
+    }
+
+    fn deny_network_with_reason(&mut self, entry: String, reason: String) -> PyResult<Self> {
+        Ok(Self::wrap(
+            self.take()?.deny_network_with_reason(&entry, &reason),
+        ))
+    }
+
+    fn require_host_match(&mut self) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.require_host_match()))
+    }
+
+    fn allow_trustd(&mut self) -> PyResult<Self> {
+        Ok(Self::wrap(self.take()?.allow_trustd()))
     }
 
     #[cfg(target_os = "linux")]
@@ -353,6 +373,31 @@ impl ExecutionResult {
     #[getter]
     fn blocked_hosts(&self) -> Vec<String> {
         self.inner.blocked_hosts.clone()
+    }
+
+    /// Each refusal as a dict: `host`, `port`, `reason` (its code), `detail` (a deny entry's
+    /// reason, else None) and `attempts`.
+    #[getter]
+    fn network_refusals<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .network_refusals
+            .iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                d.set_item("host", &r.host)?;
+                d.set_item("port", r.port)?;
+                d.set_item("reason", r.reason.code())?;
+                d.set_item(
+                    "detail",
+                    match &r.reason {
+                        nanosandbox::RefusalReason::Denied(why) => why.clone(),
+                        _ => None,
+                    },
+                )?;
+                d.set_item("attempts", r.attempts)?;
+                Ok(d)
+            })
+            .collect()
     }
 
     fn success(&self) -> bool {

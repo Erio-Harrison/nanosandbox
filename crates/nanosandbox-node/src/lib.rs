@@ -170,6 +170,33 @@ impl SandboxBuilder {
     }
 
     #[napi]
+    pub fn deny_network(&mut self, entries: Vec<String>) -> napi::Result<SandboxBuilder> {
+        let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+        Ok(Self::wrap(self.take()?.deny_network(&refs)))
+    }
+
+    #[napi]
+    pub fn deny_network_with_reason(
+        &mut self,
+        entry: String,
+        reason: String,
+    ) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(
+            self.take()?.deny_network_with_reason(&entry, &reason),
+        ))
+    }
+
+    #[napi]
+    pub fn require_host_match(&mut self) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.require_host_match()))
+    }
+
+    #[napi]
+    pub fn allow_trustd(&mut self) -> napi::Result<SandboxBuilder> {
+        Ok(Self::wrap(self.take()?.allow_trustd()))
+    }
+
+    #[napi]
     pub fn env(&mut self, key: String, value: String) -> napi::Result<SandboxBuilder> {
         Ok(Self::wrap(self.take()?.env(key, value)))
     }
@@ -369,6 +396,17 @@ impl Sandbox {
     }
 }
 
+/// One `ExecutionResult.networkRefusals` entry: `reason` is the code the program saw in
+/// `X-Proxy-Error`; `detail` is a deny entry's reason.
+#[napi(object)]
+pub struct NetworkRefusal {
+    pub host: String,
+    pub port: u16,
+    pub reason: String,
+    pub detail: Option<String>,
+    pub attempts: u32,
+}
+
 /// See `nanosandbox::ExecutionResult`; `success`/`failureReason` call the core methods.
 #[napi]
 pub struct ExecutionResult {
@@ -445,6 +483,24 @@ impl ExecutionResult {
     #[napi(getter)]
     pub fn blocked_hosts(&self) -> Vec<String> {
         self.inner.blocked_hosts.clone()
+    }
+
+    #[napi(getter)]
+    pub fn network_refusals(&self) -> Vec<NetworkRefusal> {
+        self.inner
+            .network_refusals
+            .iter()
+            .map(|r| NetworkRefusal {
+                host: r.host.clone(),
+                port: r.port,
+                reason: r.reason.code().to_string(),
+                detail: match &r.reason {
+                    nanosandbox::RefusalReason::Denied(why) => why.clone(),
+                    _ => None,
+                },
+                attempts: r.attempts,
+            })
+            .collect()
     }
 
     #[napi]

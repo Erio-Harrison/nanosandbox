@@ -48,7 +48,8 @@ is refused.
 | `--workspace <DIR>` | Working directory and the only place commands can write. **Required.** | |
 | `--read-only <PATH>`, `--writable <PATH>` | Also allow reading / writing a path (repeatable). A `--read-only` path inside the workspace is read-only again, so a settings file there, or `.git/hooks` and `.git/config` (both: `core.hooksPath` in the config runs code from anywhere), can't be changed by a command (on Linux this needs mounting, refused where AppArmor denies it) | |
 | `--deny-read <PATH>`, `--no-hide-home` | Hide a path; stop hiding the home directory | home hidden |
-| `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` works (not `*.com`, and no ports) | network off |
+| `--allow-network <HOST>` | Allow these hosts, comma-separated or repeated; `*.example.com` and `host:port` work (not `*.com`) | network off |
+| `--deny-network <HOST>` | Refuse these even if allowed, same syntax (`github.com:22`) | none |
 | `--host-network` | Unrestricted network. Use with care. | |
 | `--memory <SIZE>`, `--timeout <SECS>` | Per-command limits | 512M, 30 s |
 | `--cpu <N>`, `--max-pids <N>` | Linux only | pids: 128 on Linux |
@@ -127,8 +128,14 @@ for `nanosandbox-mcp`. Until one of those, the allowlist isn't available there.
 ```json
 { "stdout": "...", "stderr": "...", "exit_code": 0, "duration_ms": 15,
   "timed_out": false, "out_of_memory": false, "cpu_limit_hit": false,
-  "tmp_limit_hit": false, "output_truncated": false, "blocked_hosts": [] }
+  "tmp_limit_hit": false, "output_truncated": false, "blocked_hosts": [],
+  "network_refusals": [] }
 ```
+
+`network_refusals` has one entry per destination the `--allow-network` proxy didn't connect
+to: `{"host", "port", "reason", "attempts"}`, with `"detail"` for a deny entry's reason. The
+`reason` codes are `not-allowed`, `denied`, `non-public-address`, `host-mismatch`,
+`unreachable` and `timed-out`.
 
 A command that runs and fails (non-zero exit, killed by a limit) is a normal result, so the model
 can read the output and react. Only a call that couldn't run at all comes back with `isError`.

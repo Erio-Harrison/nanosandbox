@@ -287,8 +287,10 @@ Dynamic profile based on SandboxConfig:
 
 ;; Network rules
 ;; NetworkMode::None -> no network rules (deny by default)
-;; NetworkMode::Host -> (allow network*)
-;; NetworkMode::Whitelist -> (allow network* (remote ip "127.0.0.1:*"))
+;; NetworkMode::Host -> (allow network-outbound) (allow network-inbound), plus the
+;;                      network policy file (networkd, trustd, DNS configuration...)
+;; NetworkMode::Proxied -> (allow network-outbound (remote ip "localhost:PORT")), plus
+;;                      the network policy file without trustd/ocspd unless allow_trustd()
 ```
 
 ### Resource Limits (setrlimit)

@@ -54,12 +54,21 @@ sandbox-exec -p "(version 1)(deny default)(allow file-read*)" /bin/ls
 ### Network Rules
 
 ```lisp
-; Allow all network
-(allow network*)
+; Deny network (default): simply no network rules
 
-; Deny network (default)
-; Simply don't add network rules
+; allow_network(): only the run's proxy port, and the system services a
+; networked program needs (networkd, DNS configuration); not trustd or ocspd
+; unless allow_trustd(), since they fetch URLs for the program outside the
+; allowlist
+(allow network-outbound (remote ip "localhost:PORT"))
+
+; host_network()
+(allow network-outbound)
+(allow network-inbound)
 ```
+
+Seatbelt can only name `localhost` and a port in a network rule, never a host,
+so the allowlist lives in the proxy (see [API.md](API.md#network)).
 
 ### Mach Service Rules
 

@@ -59,7 +59,10 @@ pub struct AuditPolicy {
     /// `none`, `proxied` or `host`.
     pub network: &'static str,
     pub allowed_domains: Vec<String>,
+    /// `deny_network` entries (without their reasons).
+    pub denied_domains: Vec<String>,
     pub allow_private_destinations: bool,
+    pub require_host_match: bool,
     /// Readable and writable paths; `source:target` for binds.
     pub read_only: Vec<String>,
     pub writable: Vec<String>,
@@ -103,11 +106,40 @@ pub enum AuditOutcome {
         stderr_bytes: u64,
         peak_memory: Option<u64>,
         cpu_time_ms: Option<u64>,
-        /// Hosts the proxy refused.
+        /// Hosts the proxy refused by policy.
         blocked_hosts: Vec<String>,
+        /// Everything the proxy didn't connect to, with why.
+        network_refusals: Vec<AuditRefusal>,
     },
     /// The command didn't run (not found, the sandbox couldn't be set up...).
     Failed { error: String },
+}
+
+/// One `ExecutionResult::network_refusals` entry.
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditRefusal {
+    pub host: String,
+    pub port: u16,
+    /// `RefusalReason::code()`.
+    pub reason: &'static str,
+    /// The deny entry's reason, if that's what refused it.
+    pub detail: Option<String>,
+    pub attempts: u32,
+}
+
+impl From<&crate::result::NetworkRefusal> for AuditRefusal {
+    fn from(r: &crate::result::NetworkRefusal) -> Self {
+        Self {
+            host: r.host.clone(),
+            port: r.port,
+            reason: r.reason.code(),
+            detail: match &r.reason {
+                crate::result::RefusalReason::Denied(why) => why.clone(),
+                _ => None,
+            },
+            attempts: r.attempts,
+        }
+    }
 }
 
 /// Shared handle to a sink, kept in the configuration.
@@ -151,7 +183,13 @@ impl AuditPolicy {
         Self {
             network,
             allowed_domains,
+            denied_domains: config
+                .denied_destinations
+                .iter()
+                .map(|(e, _)| e.clone())
+                .collect(),
             allow_private_destinations: config.allow_private_destinations,
+            require_host_match: config.require_host_match,
             read_only: mounts(Permission::ReadOnly),
             writable: mounts(Permission::ReadWrite),
             deny_read: paths(&config.deny_read),
@@ -235,6 +273,7 @@ pub(crate) fn end(
             peak_memory: r.peak_memory,
             cpu_time_ms: r.cpu_time.map(|d| d.as_millis() as u64),
             blocked_hosts: r.blocked_hosts.clone(),
+            network_refusals: r.network_refusals.iter().map(AuditRefusal::from).collect(),
         },
         Err(e) => AuditOutcome::Failed {
             error: e.to_string(),

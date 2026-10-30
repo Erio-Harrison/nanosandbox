@@ -409,7 +409,7 @@ fn launch_in_thread(
             private_tmp.as_mut(),
             &marker,
         )?;
-        let blocked_hosts = proxy_run.map(|(_, a)| a.finish()).unwrap_or_default();
+        let network_refusals = proxy_run.map(|(_, a)| a.finish()).unwrap_or_default();
         drop(private_tmp);
         drop(marker);
 
@@ -433,7 +433,7 @@ fn launch_in_thread(
             peak_memory: Some(rusage.ru_maxrss as u64),
             cpu_time: Some(user_time + sys_time),
             proc_isolated: true,
-            blocked_hosts,
+            network_refusals,
         })
     };
     Ok((handles, supervise))

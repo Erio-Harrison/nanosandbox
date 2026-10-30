@@ -28,7 +28,8 @@ FILES
 
 NETWORK (off by default)
     --allow-network <HOST>  Allow connecting to HOST, comma-separated or
-                            repeated (wildcards like *.example.com work)
+                            repeated (*.example.com, host:port work)
+    --deny-network <HOST>   Refuse HOST even if allowed, same syntax
     --host-network          Unrestricted network. Use with care.
 
 LIMITS
@@ -102,6 +103,7 @@ pub struct Config {
     pub no_hide_home: bool,
     pub no_cache: bool,
     pub allow_network: Vec<String>,
+    pub deny_network: Vec<String>,
     pub host_network: bool,
     pub memory: u64,
     pub timeout: f64,
@@ -199,6 +201,13 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
                     .filter(|h| !h.is_empty())
                     .map(str::to_owned),
             ),
+            "--deny-network" => cfg.deny_network.extend(
+                value("a host")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|h| !h.is_empty())
+                    .map(str::to_owned),
+            ),
             "--host-network" => cfg.host_network = true,
             "--memory" => cfg.memory = parse_size(&value("a size")?)?,
             "--timeout" => cfg.timeout = parse_num(&value("seconds")?, "--timeout")?,
@@ -240,6 +249,9 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     cfg.workspace = workspace.ok_or("--workspace is required (see --help)")?;
     if cfg.host_network && !cfg.allow_network.is_empty() {
         return Err("--host-network and --allow-network contradict each other".into());
+    }
+    if !cfg.deny_network.is_empty() && cfg.allow_network.is_empty() {
+        return Err("--deny-network goes with --allow-network".into());
     }
     if !(cfg.timeout.is_finite() && cfg.timeout > 0.0) {
         return Err("--timeout must be a positive number of seconds".into());
@@ -377,6 +389,8 @@ impl Config {
         } else if !self.allow_network.is_empty() {
             let hosts: Vec<&str> = self.allow_network.iter().map(String::as_str).collect();
             b = b.allow_network(&hosts);
+            let denied: Vec<&str> = self.deny_network.iter().map(String::as_str).collect();
+            b = b.deny_network(&denied);
         }
         if let Some(n) = self.cpu {
             b = b.cpu_limit(n);
@@ -519,7 +533,11 @@ impl Config {
         } else if self.allow_network.is_empty() {
             "off".to_string()
         } else {
-            format!("only {}", self.allow_network.join(", "))
+            let mut only = format!("only {}", self.allow_network.join(", "));
+            if !self.deny_network.is_empty() {
+                only.push_str(&format!(" (not {})", self.deny_network.join(", ")));
+            }
+            only
         };
         let temp = if self.strict_tmp {
             " /tmp is read-only; use $TMPDIR for scratch files."
@@ -557,6 +575,19 @@ impl Runner for Sandbox {
             tmp_limit_hit: r.killed_by_tmp_limit,
             output_truncated: r.output_truncated,
             blocked_hosts: r.blocked_hosts,
+            network_refusals: r
+                .network_refusals
+                .iter()
+                .map(|n| {
+                    let mut v = serde_json::json!({
+                        "host": n.host, "port": n.port, "reason": n.reason.code(), "attempts": n.attempts,
+                    });
+                    if let nanosandbox::RefusalReason::Denied(Some(why)) = &n.reason {
+                        v["detail"] = serde_json::json!(why);
+                    }
+                    v
+                })
+                .collect(),
             stdout: r.stdout,
             stderr: r.stderr,
         })
@@ -607,6 +638,7 @@ mod tests {
             "--allow-network",
             "a.com, b.com",
             "--allow-network=c.com",
+            "--deny-network=c.com:22",
             "--env",
             "K=V=W",
             "--timeout",
@@ -616,6 +648,7 @@ mod tests {
         assert_eq!(c.workspace, PathBuf::from("/w"));
         assert_eq!(c.writable, [PathBuf::from("/a"), PathBuf::from("/b")]);
         assert_eq!(c.allow_network, ["a.com", "b.com", "c.com"]);
+        assert_eq!(c.deny_network, ["c.com:22"]);
         assert_eq!(c.env, [("K".to_string(), "V=W".to_string())]);
         assert_eq!(c.timeout, 2.5);
         assert_eq!(c.memory, 1 << 30);

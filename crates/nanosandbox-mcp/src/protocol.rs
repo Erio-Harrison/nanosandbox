@@ -36,6 +36,8 @@ pub struct RunOutput {
     pub tmp_limit_hit: bool,
     pub output_truncated: bool,
     pub blocked_hosts: Vec<String>,
+    /// Each as `{host, port, reason, detail?, attempts}`.
+    pub network_refusals: Vec<serde_json::Value>,
     pub failure_reason: Option<String>,
 }
 
@@ -300,6 +302,7 @@ impl<R: Runner> Server<R> {
             "cpu_limit_hit": out.cpu_limit_hit,
             "tmp_limit_hit": out.tmp_limit_hit,
             "blocked_hosts": out.blocked_hosts,
+            "network_refusals": out.network_refusals,
         });
         if self.log_io {
             line["stdin"] = json!(stdin);
@@ -366,6 +369,7 @@ fn run_result(out: &RunOutput) -> Value {
         "tmp_limit_hit": out.tmp_limit_hit,
         "output_truncated": out.output_truncated,
         "blocked_hosts": out.blocked_hosts,
+        "network_refusals": out.network_refusals,
     });
     if let Some(reason) = &out.failure_reason {
         structured["failure_reason"] = json!(reason);

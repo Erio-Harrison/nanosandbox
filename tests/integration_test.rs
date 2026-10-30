@@ -229,10 +229,13 @@ fn test_macos_sandbox_restrictions() {
 
 #[test]
 fn test_proxied_network_setup() {
-    use nanosandbox::network::ProxiedNetwork;
+    use nanosandbox::network::{ProxiedNetwork, ProxyRules};
 
-    let mut proxy = ProxiedNetwork::setup(vec!["example.com".into(), "*.github.com".into()], false)
-        .expect("Failed to setup proxy");
+    let mut proxy = ProxiedNetwork::setup(ProxyRules {
+        allowed: vec!["example.com".into(), "*.github.com:443".into()],
+        ..Default::default()
+    })
+    .expect("Failed to setup proxy");
 
     let env_vars = ProxiedNetwork::env_vars(4321);
     for key in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
@@ -240,6 +243,13 @@ fn test_proxied_network_setup() {
             env_vars
                 .iter()
                 .any(|(k, v)| k == key && v == "http://127.0.0.1:4321")
+        );
+    }
+    for key in ["ALL_PROXY", "all_proxy"] {
+        assert!(
+            env_vars
+                .iter()
+                .any(|(k, v)| k == key && v == "socks5h://127.0.0.1:4321")
         );
     }
 

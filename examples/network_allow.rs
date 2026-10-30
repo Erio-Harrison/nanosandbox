@@ -94,7 +94,7 @@ fn main() {
     );
 
     match result {
-        Ok(r) if r.stdout.contains("403") || r.stdout.contains("not in whitelist") => {
+        Ok(r) if r.stdout.contains("403") || r.stdout.contains("not on the network allowlist") => {
             println!("   [BLOCKED] Domain not in whitelist (expected)");
         }
         Ok(r) if r.exit_code != 0 => {
