@@ -9,9 +9,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, watch};
+use tokio::sync::{Notify, Semaphore, watch};
 
 /// Connection timeout for proxy connections
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -26,9 +28,15 @@ const MAX_HEADER_BYTES: u64 = 64 * 1024;
 /// How long a client gets to send its request headers (or SOCKS5 handshake).
 const HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// With `require_host_match`: how long a tunnel's client gets to start its TLS handshake
-/// before the tunnel is relayed unchecked (a protocol where the server speaks first).
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest chunk-size line of a chunked request body (the size in hex, plus extensions).
+const MAX_CHUNK_LINE: u64 = 1024;
+
+/// Open connections per listener. The proxy runs in the host process: without a cap a sandboxed
+/// program could use up its file descriptors. Past the cap, accepting waits for one to close.
+const MAX_CONNECTIONS: usize = 256;
+
+/// Pause after a failed `accept` (EMFILE and the like), so it doesn't spin.
+const ACCEPT_RETRY: Duration = Duration::from_millis(10);
 
 /// Hop-by-hop request headers and ones the proxy sets itself; also any header `Connection`
 /// names.
@@ -85,7 +93,8 @@ impl Rule {
                     .ok_or("the port must be 1-65535")?,
             ),
         };
-        let host = host.to_ascii_lowercase();
+        let host =
+            normalize_host(host).ok_or("not `host`, `host:port`, `*.host` or an IP address")?;
         if host.parse::<IpAddr>().is_err() {
             match host.strip_prefix("*.") {
                 Some(base) if !is_dns_name(base) => return Err("not a domain name after `*.`"),
@@ -231,15 +240,55 @@ enum Request<'a> {
         authority: &'a str,
         path: String,
         version: &'a str,
+        body: Body,
     },
 }
 
+/// How a request body is delimited (RFC 7230 3.3.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Body {
+    /// Neither header: no body.
+    None,
+    Length(u64),
+    Chunked,
+}
+
+/// How much of what the client sends goes on to the server.
+#[derive(Clone, Copy)]
+enum Forward<'a> {
+    /// A tunnel: everything.
+    All,
+    /// A tunnel under `require_host_match`: everything, once its first bytes are seen to be
+    /// either not TLS or a ClientHello that doesn't name another host.
+    IfHostMatches { host: &'a str, port: u16 },
+    /// One request's body, then the server side is half-closed: a pipelined second request,
+    /// with a `Host` of its own, never reaches the server.
+    Body(Body),
+}
+
+/// Why a relay direction stopped before its stream ended.
+enum Stop {
+    Io(std::io::Error),
+    /// The tunnel's TLS hello named another host (or couldn't be read): the whole connection
+    /// is cut.
+    Cut,
+}
+
+impl From<std::io::Error> for Stop {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
 /// What a tunnel's first bytes say about it.
+#[derive(Debug, PartialEq, Eq)]
 enum Hello {
     NeedMore,
     NotTls,
     /// A TLS ClientHello, with its server name if it has one.
     Tls(Option<String>),
+    /// TLS handshake records that don't hold a readable ClientHello.
+    Malformed,
 }
 
 impl HttpProxy {
@@ -343,9 +392,28 @@ impl HttpProxy {
         refusals: Arc<Refusals>,
         stop: impl std::future::Future<Output = ()>,
     ) {
+        Self::serve_at_most(MAX_CONNECTIONS, listener, policy, refusals, stop).await
+    }
+
+    /// `serve` with at most `limit` connections open at once; the next is accepted when one
+    /// closes.
+    async fn serve_at_most(
+        limit: usize,
+        listener: TcpListener,
+        policy: Arc<Policy>,
+        refusals: Arc<Refusals>,
+        stop: impl std::future::Future<Output = ()>,
+    ) {
         tokio::pin!(stop);
         let mut connections = tokio::task::JoinSet::new();
+        let slots = Arc::new(Semaphore::new(limit));
         loop {
+            // A slot first, then a connection for it: nothing is accepted just to be dropped.
+            let slot = tokio::select! {
+                slot = Arc::clone(&slots).acquire_owned() => slot.expect("the semaphore is never closed"),
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                _ = &mut stop => break,
+            };
             tokio::select! {
                 result = listener.accept() => {
                     match result {
@@ -353,6 +421,7 @@ impl HttpProxy {
                             let policy = Arc::clone(&policy);
                             let refusals = Arc::clone(&refusals);
                             connections.spawn(async move {
+                                let _slot = slot;
                                 if let Err(e) = Self::handle_connection(stream, &policy, &refusals).await {
                                     tracing::debug!("Connection from {} error: {:?}", addr, e);
                                 }
@@ -360,6 +429,7 @@ impl HttpProxy {
                         }
                         Err(e) => {
                             tracing::error!("Accept error: {:?}", e);
+                            tokio::time::sleep(ACCEPT_RETRY).await;
                         }
                     }
                 }
@@ -403,7 +473,7 @@ impl HttpProxy {
         };
         // Bytes the client sent right after its headers (request body or TLS handshake start);
         // forwarded to the destination first.
-        let mut early = reader.buffer().to_vec();
+        let early = reader.buffer().to_vec();
         drop(reader);
 
         let request = match Self::parse_request(&head) {
@@ -435,29 +505,37 @@ impl HttpProxy {
             }
         };
 
-        match &request {
+        let forward = match &request {
             Request::Connect { .. } => {
                 client
                     .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                     .await?;
-                if policy.require_host_match
-                    && !Self::host_matches(&mut client, &mut early, host, port, refusals).await?
-                {
-                    return Ok(());
-                }
+                Self::tunnel_forward(policy, host, port)
             }
             Request::Http {
                 method,
                 authority,
                 path,
                 version,
+                body,
                 ..
             } => {
                 let head = Self::forwarded_head(&head, method, path, version, authority);
                 remote.write_all(head.as_bytes()).await?;
+                Forward::Body(*body)
             }
+        };
+        Self::relay(client, remote, early, forward, policy, refusals).await
+    }
+
+    /// What a tunnel to `host:port` forwards: everything, or under `require_host_match` only
+    /// once its first bytes are checked.
+    fn tunnel_forward<'a>(policy: &Policy, host: &'a str, port: u16) -> Forward<'a> {
+        if policy.require_host_match {
+            Forward::IfHostMatches { host, port }
+        } else {
+            Forward::All
         }
-        Self::relay(client, remote, &early, policy.idle_timeout).await
     }
 
     /// A SOCKS5 client (RFC 1928): no authentication, `CONNECT` only, the destination by name
@@ -501,7 +579,18 @@ impl HttpProxy {
                     client.read_exact(&mut len).await?;
                     let mut name = vec![0u8; len[0] as usize];
                     client.read_exact(&mut name).await?;
-                    String::from_utf8_lossy(&name).to_ascii_lowercase()
+                    // Arbitrary bytes otherwise, and they'd end up in logs and the result.
+                    match std::str::from_utf8(&name).ok().and_then(normalize_host) {
+                        Some(host) if is_dns_name(&host) || host.parse::<IpAddr>().is_ok() => host,
+                        _ => {
+                            tracing::debug!(
+                                "SOCKS5 request with an invalid destination name ({} bytes)",
+                                name.len()
+                            );
+                            Self::socks5_reply(&mut client, 1).await?;
+                            return Ok(None);
+                        }
+                    }
                 }
                 _ => {
                     Self::socks5_reply(&mut client, 8).await?;
@@ -543,13 +632,8 @@ impl HttpProxy {
             }
         };
         Self::socks5_reply(&mut client, 0).await?;
-        let mut early = Vec::new();
-        if policy.require_host_match
-            && !Self::host_matches(&mut client, &mut early, &host, port, refusals).await?
-        {
-            return Ok(());
-        }
-        Self::relay(client, remote, &early, policy.idle_timeout).await
+        let forward = Self::tunnel_forward(policy, &host, port);
+        Self::relay(client, remote, Vec::new(), forward, policy, refusals).await
     }
 
     /// `code` 0 is success; the bound address is reported as unspecified.
@@ -559,37 +643,34 @@ impl HttpProxy {
             .await
     }
 
-    /// Reads the start of a tunnel into `early` until a TLS ClientHello is complete, the
-    /// bytes are plainly not TLS, the client stops, or `HELLO_TIMEOUT` passes. False, with
-    /// the refusal recorded, when the hello names another host than `host`.
-    async fn host_matches(
-        client: &mut TcpStream,
-        early: &mut Vec<u8>,
+    /// Reads the start of a tunnel into `held` until it is plainly not TLS, or holds a whole
+    /// TLS ClientHello. Why the tunnel must be cut, if it must: the hello names another host
+    /// than `host`, or is TLS that can't be read (malformed, over `MAX_HEADER_BYTES`, or cut
+    /// off). Nothing is forwarded meanwhile, so there is no window to slip a hello through
+    /// unchecked; a client that never speaks is the idle timeout's business.
+    async fn hello_mismatch<R: AsyncRead + Unpin>(
+        client: &mut R,
+        held: &mut Vec<u8>,
         host: &str,
-        port: u16,
-        refusals: &Refusals,
-    ) -> std::io::Result<bool> {
-        let deadline = tokio::time::Instant::now() + HELLO_TIMEOUT;
-        let sni = loop {
-            match client_hello_sni(early) {
-                Hello::NeedMore if (early.len() as u64) < MAX_HEADER_BYTES => {}
-                Hello::NeedMore | Hello::NotTls => break None,
-                Hello::Tls(sni) => break sni,
+    ) -> std::io::Result<Option<String>> {
+        loop {
+            match client_hello_sni(held) {
+                Hello::NeedMore if (held.len() as u64) < MAX_HEADER_BYTES => {}
+                Hello::NeedMore => return Ok(Some("TLS hello too long to check".into())),
+                Hello::Malformed => return Ok(Some("TLS hello can't be read".into())),
+                Hello::NotTls => return Ok(None),
+                Hello::Tls(Some(name)) if name != host => {
+                    return Ok(Some(format!("TLS hello names {name}")));
+                }
+                Hello::Tls(_) => return Ok(None),
             }
             let mut buf = [0u8; 4096];
-            match tokio::time::timeout_at(deadline, client.read(&mut buf)).await {
-                Ok(Ok(0)) | Err(_) => break None,
-                Ok(Ok(n)) => early.extend_from_slice(&buf[..n]),
-                Ok(Err(e)) => return Err(e),
+            match client.read(&mut buf).await? {
+                // Half-closed before saying anything: nothing to check. Mid-hello: can't check.
+                0 if held.is_empty() => return Ok(None),
+                0 => return Ok(Some("TLS hello cut off".into())),
+                n => held.extend_from_slice(&buf[..n]),
             }
-        };
-        match sni {
-            Some(name) if name != host => {
-                tracing::info!("Cut tunnel to {host}:{port}: its TLS handshake names {name}");
-                refusals.record(host, port, RefusalReason::HostMismatch);
-                Ok(false)
-            }
-            _ => Ok(true),
         }
     }
 
@@ -661,12 +742,47 @@ impl HttpProxy {
             authority,
             path,
             version,
+            body: Self::request_body(head)?,
         })
     }
 
+    /// How the request's body is delimited, from its headers (RFC 7230 3.3.3). Refused when
+    /// it's ambiguous: both headers, more than one `Content-Length`, or one that isn't a
+    /// decimal, or a `Transfer-Encoding` not ending in `chunked`.
+    fn request_body(head: &str) -> Result<Body, &'static str> {
+        let mut length = None;
+        let mut encoding = None;
+        for line in head.lines().skip(1).take_while(|line| !line.is_empty()) {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                let valid = !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit());
+                let parsed = valid.then(|| value.parse::<u64>().ok()).flatten();
+                if length.is_some() || parsed.is_none() {
+                    return Err("Bad Content-Length");
+                }
+                length = parsed;
+            } else if name.trim().eq_ignore_ascii_case("transfer-encoding") {
+                let last = value.rsplit(',').next().unwrap_or("").trim();
+                if encoding.is_some() || !last.eq_ignore_ascii_case("chunked") {
+                    return Err("Unsupported Transfer-Encoding");
+                }
+                encoding = Some(Body::Chunked);
+            }
+        }
+        match (length, encoding) {
+            (Some(_), Some(_)) => Err("Content-Length with Transfer-Encoding"),
+            (Some(n), None) => Ok(Body::Length(n)),
+            (None, Some(chunked)) => Ok(chunked),
+            (None, None) => Ok(Body::None),
+        }
+    }
+
     /// The request head to send on: path instead of URL, `Host` set to the checked URL's,
-    /// hop-by-hop headers dropped, `Connection: close`. One request per connection, so request
-    /// bodies need no parsing.
+    /// hop-by-hop headers dropped, `Connection: close`. One request per connection: the body
+    /// is forwarded by its framing and anything after it isn't (see `Forward::Body`).
     fn forwarded_head(
         head: &str,
         method: &str,
@@ -708,41 +824,38 @@ impl HttpProxy {
         out
     }
 
-    /// Sends `early` to `remote`, then copies both ways. A finished side is half-closed and the
-    /// other direction carries on. Ends when both are done, either fails, or nothing moves for
-    /// `idle`.
+    /// Copies both ways: `early` and then what the client sends, as far as `forward` says, to
+    /// the server; everything the server sends, from the start, to the client. A finished side
+    /// is half-closed and the other direction carries on. Ends when both are done, either
+    /// fails, the tunnel is cut (recorded as `HostMismatch`), or nothing moves for the policy's
+    /// idle timeout.
     async fn relay(
         client: TcpStream,
         remote: TcpStream,
-        early: &[u8],
-        idle: Duration,
+        early: Vec<u8>,
+        forward: Forward<'_>,
+        policy: &Policy,
+        refusals: &Refusals,
     ) -> std::io::Result<()> {
-        let (client_read, client_write) = client.into_split();
-        let (remote_read, mut remote_write) = remote.into_split();
-        remote_write.write_all(early).await?;
-
+        let idle = policy.idle_timeout;
+        let (client_read, mut client_write) = client.into_split();
+        let (mut remote_read, remote_write) = remote.into_split();
         let activity = Notify::new();
-        let pipe = |mut from: tokio::net::tcp::OwnedReadHalf,
-                    mut to: tokio::net::tcp::OwnedWriteHalf| {
-            let activity = &activity;
-            async move {
-                let mut buf = vec![0u8; 16 * 1024];
-                loop {
-                    let n = from.read(&mut buf).await?;
-                    if n == 0 {
-                        return to.shutdown().await;
-                    }
-                    to.write_all(&buf[..n]).await?;
-                    activity.notify_one();
-                }
-            }
+
+        let upstream = Self::forward_client(
+            client_read,
+            remote_write,
+            early,
+            forward,
+            &activity,
+            refusals,
+        );
+        let downstream = async {
+            Self::pipe(&mut remote_read, &mut client_write, &activity).await?;
+            client_write.shutdown().await?;
+            Ok::<_, Stop>(())
         };
-        let both = async {
-            tokio::try_join!(
-                pipe(client_read, remote_write),
-                pipe(remote_read, client_write)
-            )
-        };
+        let both = async { tokio::try_join!(upstream, downstream) };
         let watchdog = async {
             while tokio::time::timeout(idle, activity.notified())
                 .await
@@ -750,10 +863,115 @@ impl HttpProxy {
             {}
         };
         tokio::select! {
-            result = both => result.map(|_| ()),
+            result = both => match result {
+                Ok(_) | Err(Stop::Cut) => Ok(()),
+                Err(Stop::Io(e)) => Err(e),
+            },
             _ = watchdog => {
                 tracing::debug!("Closing a connection idle for {idle:?}");
                 Ok(())
+            }
+        }
+    }
+
+    /// The client-to-server direction: `held` (what came with the request) and then the
+    /// client's bytes, as far as `forward` says, then a half-close. Under `IfHostMatches`
+    /// nothing goes out until the first bytes are checked.
+    async fn forward_client(
+        mut client: tokio::net::tcp::OwnedReadHalf,
+        mut remote: tokio::net::tcp::OwnedWriteHalf,
+        mut held: Vec<u8>,
+        forward: Forward<'_>,
+        activity: &Notify,
+        refusals: &Refusals,
+    ) -> Result<(), Stop> {
+        if let Forward::IfHostMatches { host, port } = forward
+            && let Some(why) = Self::hello_mismatch(&mut client, &mut held, host).await?
+        {
+            tracing::info!("Cut tunnel to {host}:{port}: its {why}");
+            refusals.record(host, port, RefusalReason::HostMismatch);
+            return Err(Stop::Cut);
+        }
+        let mut source = std::io::Cursor::new(held).chain(client);
+        match forward {
+            Forward::All | Forward::IfHostMatches { .. } => {
+                Self::pipe(&mut source, &mut remote, activity).await?;
+            }
+            Forward::Body(Body::None) => {}
+            Forward::Body(Body::Length(n)) => {
+                Self::pipe(&mut (&mut source).take(n), &mut remote, activity).await?;
+            }
+            Forward::Body(Body::Chunked) => {
+                Self::forward_chunked(&mut BufReader::new(&mut source), &mut remote, activity)
+                    .await?;
+            }
+        }
+        remote.shutdown().await?;
+        Ok(())
+    }
+
+    /// Copies `from` to `to` until `from` ends, noting each move on `activity`.
+    async fn pipe<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+        from: &mut R,
+        to: &mut W,
+        activity: &Notify,
+    ) -> std::io::Result<()> {
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            let n = from.read(&mut buf).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            to.write_all(&buf[..n]).await?;
+            activity.notify_one();
+        }
+    }
+
+    /// Copies one chunked body (RFC 7230 4.1): each chunk by its declared size, through the
+    /// last (empty) chunk and the trailer section's blank line. Framing that doesn't parse is
+    /// an error (the head already went out, so the connection is dropped).
+    async fn forward_chunked<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
+        from: &mut R,
+        to: &mut W,
+        activity: &Notify,
+    ) -> std::io::Result<()> {
+        let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "bad chunked body");
+        loop {
+            let mut line = String::new();
+            (&mut *from)
+                .take(MAX_CHUNK_LINE)
+                .read_line(&mut line)
+                .await?;
+            if !line.ends_with('\n') {
+                return Err(bad());
+            }
+            // `size[;extensions]`
+            let size = line.trim_end().split(';').next().unwrap_or("").trim();
+            let size = u64::from_str_radix(size, 16).map_err(|_| bad())?;
+            to.write_all(line.as_bytes()).await?;
+            activity.notify_one();
+            if size == 0 {
+                break;
+            }
+            Self::pipe(&mut (&mut *from).take(size), to, activity).await?;
+            let mut crlf = [0u8; 2];
+            from.read_exact(&mut crlf).await?;
+            if crlf != *b"\r\n" {
+                return Err(bad());
+            }
+            to.write_all(&crlf).await?;
+        }
+        let mut budget = MAX_HEADER_BYTES;
+        loop {
+            let mut line = String::new();
+            let n = (&mut *from).take(budget).read_line(&mut line).await? as u64;
+            if !line.ends_with('\n') {
+                return Err(bad());
+            }
+            budget -= n;
+            to.write_all(line.as_bytes()).await?;
+            if line == "\r\n" || line == "\n" {
+                return Ok(());
             }
         }
     }
@@ -850,76 +1068,106 @@ fn describe(reason: &RefusalReason, host: &str, port: u16) -> String {
     }
 }
 
-/// The server name in a TLS ClientHello, if `buf` holds a complete one. A hello that spans
-/// several records, or can't be parsed, reads as having no name (it isn't checked).
+/// The server name in the TLS ClientHello that `buf` starts with. The hello may span several
+/// handshake records (type 0x16): their bodies are joined until the handshake message's
+/// declared length is in; `NeedMore` until then. Records that don't add up to a ClientHello
+/// are `Malformed`, so a hello the proxy can't read is never relayed on trust.
 fn client_hello_sni(buf: &[u8]) -> Hello {
     match buf.first() {
         None => return Hello::NeedMore,
         Some(0x16) => {}
         Some(_) => return Hello::NotTls,
     }
-    if buf.len() < 5 {
-        return Hello::NeedMore;
-    }
-    let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
-    if buf.len() < 5 + record_len {
-        return Hello::NeedMore;
-    }
-    Hello::Tls(parse_client_hello(&buf[5..5 + record_len]))
-}
-
-/// The `server_name` extension's host name in a handshake record's body, lowercased.
-fn parse_client_hello(body: &[u8]) -> Option<String> {
+    let mut handshake = Vec::new();
     let mut at = 0usize;
-    let mut take = |n: usize| -> Option<&[u8]> {
-        let slice = body.get(at..at + n)?;
-        at += n;
-        Some(slice)
-    };
-    let u8_at = |b: &[u8]| b[0] as usize;
-    let u16_at = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]) as usize;
-
-    if u8_at(take(1)?) != 1 {
-        return None; // not a ClientHello
-    }
-    take(3)?; // handshake length
-    take(2)?; // legacy version
-    take(32)?; // random
-    let n = u8_at(take(1)?);
-    take(n)?; // session id
-    let n = u16_at(take(2)?);
-    take(n)?; // cipher suites
-    let n = u8_at(take(1)?);
-    take(n)?; // compression methods
-    let extensions_len = u16_at(take(2)?);
-    let extensions = take(extensions_len)?;
-
-    let mut at = 0usize;
-    while at + 4 <= extensions.len() {
-        let kind = u16_at(&extensions[at..]);
-        let len = u16_at(&extensions[at + 2..]);
-        let data = extensions.get(at + 4..at + 4 + len)?;
-        at += 4 + len;
-        if kind != 0 {
-            continue;
-        }
-        // ServerNameList: length, then entries of type (0 = host_name), length, name.
-        let mut p = 2usize;
-        while p + 3 <= data.len() {
-            let name_type = data[p];
-            let name_len = u16_at(&data[p + 1..]);
-            let name = data.get(p + 3..p + 3 + name_len)?;
-            if name_type == 0 {
-                return Some(String::from_utf8_lossy(name).to_ascii_lowercase());
+    loop {
+        // Enough of the handshake header to know its length, and then the whole message.
+        if handshake.len() >= 4 {
+            let declared = u32::from_be_bytes([0, handshake[1], handshake[2], handshake[3]]);
+            if handshake.len() >= 4 + declared as usize {
+                return parse_client_hello(&handshake[..4 + declared as usize]);
             }
-            p += 3 + name_len;
         }
-        return None;
+        let Some(header) = buf.get(at..at + 5) else {
+            return Hello::NeedMore;
+        };
+        let record_len = u16::from_be_bytes([header[3], header[4]]) as usize;
+        // Every record a handshake fragment (RFC 8446 5.1 also forbids empty ones).
+        if header[0] != 0x16 || record_len == 0 {
+            return Hello::Malformed;
+        }
+        let Some(body) = buf.get(at + 5..at + 5 + record_len) else {
+            return Hello::NeedMore;
+        };
+        handshake.extend_from_slice(body);
+        at += 5 + record_len;
     }
-    None
 }
 
-/// `host`, `host:port`, `[v6]` or `[v6]:port` as lowercased host and port (`default` if none).
+/// The `server_name` extension's host name in a complete handshake message, normalized, if
+/// the message is a ClientHello that parses.
+fn parse_client_hello(message: &[u8]) -> Hello {
+    fn parse(message: &[u8]) -> Option<Option<String>> {
+        let at = std::cell::Cell::new(0usize);
+        let take = |n: usize| -> Option<&[u8]> {
+            let slice = message.get(at.get()..at.get() + n)?;
+            at.set(at.get() + n);
+            Some(slice)
+        };
+        let u8_at = |b: &[u8]| b[0] as usize;
+        let u16_at = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]) as usize;
+
+        if u8_at(take(1)?) != 1 {
+            return None; // not a ClientHello
+        }
+        take(3)?; // handshake length
+        take(2)?; // legacy version
+        take(32)?; // random
+        let n = u8_at(take(1)?);
+        take(n)?; // session id
+        let n = u16_at(take(2)?);
+        take(n)?; // cipher suites
+        let n = u8_at(take(1)?);
+        take(n)?; // compression methods
+        if at.get() == message.len() {
+            return Some(None); // no extensions at all
+        }
+        let extensions_len = u16_at(take(2)?);
+        let extensions = take(extensions_len)?;
+
+        let mut at = 0usize;
+        while at + 4 <= extensions.len() {
+            let kind = u16_at(&extensions[at..]);
+            let len = u16_at(&extensions[at + 2..]);
+            let data = extensions.get(at + 4..at + 4 + len)?;
+            at += 4 + len;
+            if kind != 0 {
+                continue;
+            }
+            // ServerNameList: length, then entries of type (0 = host_name), length, name.
+            let list_len = u16_at(data.get(..2)?);
+            let list = data.get(2..2 + list_len)?;
+            let mut p = 0usize;
+            while p + 3 <= list.len() {
+                let name_type = list[p];
+                let name_len = u16_at(&list[p + 1..]);
+                let name = list.get(p + 3..p + 3 + name_len)?;
+                if name_type == 0 {
+                    return Some(normalize_host(std::str::from_utf8(name).ok()?));
+                }
+                p += 3 + name_len;
+            }
+            return Some(None);
+        }
+        Some(None)
+    }
+    match parse(message) {
+        Some(sni) => Hello::Tls(sni),
+        None => Hello::Malformed,
+    }
+}
+
+/// `host`, `host:port`, `[v6]` or `[v6]:port` as normalized host and port (`default` if none).
 /// `None` for anything else, including `user@host` (userinfo can disguise the destination).
 fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
     if authority.contains('@') {
@@ -934,7 +1182,14 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
         None => default,
         Some(p) => p.parse().ok().filter(|&p| p != 0)?,
     };
-    Some((host.to_ascii_lowercase(), port))
+    Some((normalize_host(host)?, port))
+}
+
+/// `host` as rules, refusals and matching see it: lowercased, one trailing dot (a fully
+/// qualified `example.com.`) dropped. `None` if nothing is left.
+fn normalize_host(host: &str) -> Option<String> {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 /// Letters, digits, `-` and `_` in dot-separated labels, none empty.
@@ -1299,25 +1554,108 @@ mod tests {
         record
     }
 
+    /// `hello`, one record, re-framed as handshake records of at most `piece` bytes each.
+    fn split_records(hello: &[u8], piece: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in hello[5..].chunks(piece) {
+            out.extend_from_slice(&[0x16, 3, 1]);
+            out.extend_from_slice(&(chunk.len() as u16).to_be_bytes());
+            out.extend_from_slice(chunk);
+        }
+        out
+    }
+
     #[test]
     fn test_client_hello_sni() {
-        let hello = client_hello(Some("Example.COM"));
-        assert!(matches!(client_hello_sni(&hello), Hello::Tls(Some(n)) if n == "example.com"));
-        assert!(matches!(
-            client_hello_sni(&hello[..hello.len() - 1]),
-            Hello::NeedMore
-        ));
-        assert!(matches!(client_hello_sni(&hello[..3]), Hello::NeedMore));
-        assert!(matches!(client_hello_sni(&[]), Hello::NeedMore));
-        assert!(matches!(client_hello_sni(b"SSH-2.0-x"), Hello::NotTls));
-        assert!(matches!(
-            client_hello_sni(&client_hello(None)),
-            Hello::Tls(None)
-        ));
-        // Garbage inside a well-framed record isn't a name.
+        let hello = client_hello(Some("Example.COM."));
+        let named = Hello::Tls(Some("example.com".into()));
+        assert_eq!(client_hello_sni(&hello), named);
+        assert_eq!(client_hello_sni(&hello[..hello.len() - 1]), Hello::NeedMore);
+        assert_eq!(client_hello_sni(&hello[..3]), Hello::NeedMore);
+        assert_eq!(client_hello_sni(&[]), Hello::NeedMore);
+        assert_eq!(client_hello_sni(b"SSH-2.0-x"), Hello::NotTls);
+        assert_eq!(client_hello_sni(&client_hello(None)), Hello::Tls(None));
+
+        // Split over several records: the same hello, once all of it is in.
+        for piece in [1, 7, 40, 1000] {
+            let split = split_records(&hello, piece);
+            assert_eq!(client_hello_sni(&split), named, "piece {piece}");
+            assert_eq!(
+                client_hello_sni(&split[..split.len() - 1]),
+                Hello::NeedMore,
+                "piece {piece}"
+            );
+        }
+        // A continuation that isn't a handshake record, or is empty.
+        let mut split = split_records(&hello, 7);
+        split[5 + 7] = 0x17;
+        assert_eq!(client_hello_sni(&split), Hello::Malformed);
+        assert_eq!(
+            client_hello_sni(&[0x16, 3, 1, 0, 0, 0x16, 3, 1, 0, 1, 1]),
+            Hello::Malformed
+        );
+        // Garbage inside a well-framed record: unreadable, not "no name".
         let mut junk = vec![0x16, 3, 1, 0, 4];
         junk.extend_from_slice(&[1, 0, 0, 0]);
-        assert!(matches!(client_hello_sni(&junk), Hello::Tls(None)));
+        assert_eq!(client_hello_sni(&junk), Hello::Malformed);
+        let mut not_hello = hello.clone();
+        not_hello[5] = 2; // ServerHello
+        assert_eq!(client_hello_sni(&not_hello), Hello::Malformed);
+    }
+
+    #[test]
+    fn test_request_body_framing() {
+        let body = |headers: &str| {
+            HttpProxy::request_body(&format!("GET http://a/ HTTP/1.1\r\n{headers}\r\n"))
+        };
+        assert_eq!(body(""), Ok(Body::None));
+        assert_eq!(body("content-length: 12\r\n"), Ok(Body::Length(12)));
+        assert_eq!(body("Transfer-Encoding: chunked\r\n"), Ok(Body::Chunked));
+        assert_eq!(
+            body("Transfer-Encoding: gzip, Chunked\r\n"),
+            Ok(Body::Chunked)
+        );
+        for bad in [
+            "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+            "Content-Length: 5\r\nContent-Length: 5\r\n",
+            "Content-Length: 5, 5\r\n",
+            "Content-Length: -1\r\n",
+            "Content-Length: 0x10\r\n",
+            "Content-Length:\r\n",
+            "Content-Length: 99999999999999999999999\r\n",
+            "Transfer-Encoding: gzip\r\n",
+            "Transfer-Encoding: chunked, gzip\r\n",
+        ] {
+            assert!(body(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_trailing_dot_is_dropped() {
+        assert_eq!(
+            Rule::parse("Example.com."),
+            Ok(Rule {
+                pattern: "example.com".into(),
+                port: None,
+                reason: None,
+            })
+        );
+        assert_eq!(
+            Rule::parse("*.example.com.:443").map(|r| (r.pattern, r.port)),
+            Ok(("*.example.com".into(), Some(443)))
+        );
+        assert!(Rule::parse(".").is_err());
+        assert!(Rule::parse("example..").is_err());
+        let policy = make_policy(&["example.com", "*.wild.org"], &[]);
+        assert_eq!(
+            parse_authority("Example.COM.", 80).unwrap().0,
+            "example.com"
+        );
+        assert_eq!(parse_authority(".", 80), None);
+        for authority in ["example.com.", "example.com.:443", "a.wild.org."] {
+            let (host, port) = parse_authority(authority, 443).unwrap();
+            assert_eq!(policy.check(&host, port), Ok(()), "{authority}");
+        }
     }
 
     /// A proxy for `domains`, private destinations allowed (the test servers
@@ -1334,6 +1672,13 @@ mod tests {
     }
 
     async fn proxy_with(policy: Policy) -> (SocketAddr, Arc<Refusals>, oneshot::Sender<()>) {
+        proxy_limited(policy, MAX_CONNECTIONS).await
+    }
+
+    async fn proxy_limited(
+        policy: Policy,
+        limit: usize,
+    ) -> (SocketAddr, Arc<Refusals>, oneshot::Sender<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let refusals = Arc::new(Refusals::default());
@@ -1341,13 +1686,33 @@ mod tests {
         let stop = async move {
             let _ = stop_rx.await;
         };
-        tokio::spawn(HttpProxy::serve(
+        tokio::spawn(HttpProxy::serve_at_most(
+            limit,
             listener,
             Arc::new(policy),
             Arc::clone(&refusals),
             stop,
         ));
         (addr, refusals, stop_tx)
+    }
+
+    /// A policy allowing localhost on loopback, with `require_host_match` if asked.
+    fn localhost_policy(require_host_match: bool) -> Policy {
+        let mut p = make_policy(&["localhost"], &[]);
+        p.allow_private = true;
+        p.require_host_match = require_host_match;
+        p
+    }
+
+    /// A tunnel through `proxy` to `localhost:port`, past the `200`.
+    async fn connect_tunnel(proxy: SocketAddr, port: u16) -> TcpStream {
+        let mut client = TcpStream::connect(proxy).await.unwrap();
+        client
+            .write_all(format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
+        client
     }
 
     /// A server on loopback that hands each connection to `handle`.
@@ -1581,6 +1946,238 @@ mod tests {
         assert_eq!(
             (listed[0].reason.clone(), listed[0].attempts),
             (RefusalReason::HostMismatch, 2)
+        );
+    }
+
+    /// A ClientHello spread over several TLS records is still read, so splitting it isn't a way
+    /// past the check; one that can't be read is cut, not trusted.
+    #[tokio::test]
+    async fn test_host_match_reads_a_hello_split_over_records() {
+        let port = echo_upstream().await;
+        let (proxy, refusals, _stop) = proxy_with(localhost_policy(true)).await;
+
+        let tunnel = |bytes: Vec<u8>| async move {
+            let mut client = connect_tunnel(proxy, port).await;
+            client.write_all(&bytes).await.unwrap();
+            client.shutdown().await.unwrap();
+            read_all(&mut client).await
+        };
+        let ok = split_records(&client_hello(Some("localhost")), 11);
+        assert_eq!(tunnel(ok.clone()).await.len(), "got:".len() + ok.len());
+        assert!(refusals.list().is_empty());
+
+        assert_eq!(
+            tunnel(split_records(&client_hello(Some("other.example")), 11)).await,
+            ""
+        );
+        // A handshake record whose contents aren't a ClientHello.
+        assert_eq!(tunnel(vec![0x16, 3, 1, 0, 4, 1, 0, 0, 0]).await, "");
+        // A hello that stops short.
+        let short = client_hello(Some("localhost"));
+        assert_eq!(tunnel(short[..short.len() / 2].to_vec()).await, "");
+        let listed = refusals.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (listed[0].reason.clone(), listed[0].attempts),
+            (RefusalReason::HostMismatch, 3)
+        );
+    }
+
+    /// Nothing the client sends is forwarded until it's checked, however long it waits.
+    #[tokio::test]
+    async fn test_host_match_waits_for_the_hello() {
+        let port = echo_upstream().await;
+        let (proxy, refusals, _stop) = proxy_with(localhost_policy(true)).await;
+
+        let mut client = connect_tunnel(proxy, port).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        client
+            .write_all(&client_hello(Some("other.example")))
+            .await
+            .unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(read_all(&mut client).await, "");
+        assert_eq!(refusals.list().len(), 1);
+    }
+
+    /// The server's bytes flow from the start, so a protocol where it speaks first works, and
+    /// the client's plainly-not-TLS bytes follow unchecked.
+    #[tokio::test]
+    async fn test_host_match_lets_the_server_speak_first() {
+        let banner_first = upstream(|mut s| async move {
+            s.write_all(b"220 hello\r\n").await.unwrap();
+            let got = read_all(&mut s).await;
+            let _ = s.write_all(format!("got:{got}").as_bytes()).await;
+        })
+        .await;
+        let (proxy, refusals, _stop) = proxy_with(localhost_policy(true)).await;
+
+        let mut client = connect_tunnel(proxy, banner_first).await;
+        let mut banner = [0u8; 11];
+        tokio::time::timeout(Duration::from_secs(5), client.read_exact(&mut banner))
+            .await
+            .expect("banner before the client speaks")
+            .unwrap();
+        assert_eq!(&banner, b"220 hello\r\n");
+        client.write_all(b"EHLO me\r\n").await.unwrap();
+        client.shutdown().await.unwrap();
+        assert_eq!(read_all(&mut client).await, "got:EHLO me\r\n");
+        assert!(refusals.list().is_empty());
+    }
+
+    /// Only the first request on a connection reaches the server: the second has a `Host` of
+    /// its own that was never checked.
+    #[tokio::test]
+    async fn test_pipelined_request_does_not_reach_the_server() {
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let port = upstream(move |mut s| {
+            let seen_tx = seen_tx.clone();
+            async move {
+                let request = read_all(&mut s).await;
+                let _ = seen_tx.send(request);
+                let _ = s
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        })
+        .await;
+        let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
+
+        for (first, second) in [
+            ("", ""),
+            ("Content-Length: 5\r\n\r\nHELLO", ""),
+            (
+                "Transfer-Encoding: chunked\r\n\r\n5\r\nHELLO\r\n0\r\nX-T: 1\r\n\r\n",
+                "",
+            ),
+            // The second's body isn't mistaken for the first's trailer or next chunk.
+            (
+                "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+                "Content-Length: 3\r\n\r\nabc",
+            ),
+        ] {
+            let mut client = TcpStream::connect(proxy).await.unwrap();
+            let first = match first {
+                "" => "\r\n".to_string(),
+                f => f.to_string(),
+            };
+            let second = match second {
+                "" => "\r\n".to_string(),
+                s => s.to_string(),
+            };
+            let pipelined = format!(
+                "POST http://localhost:{port}/first HTTP/1.1\r\n{first}\
+                 POST http://localhost:{port}/second HTTP/1.1\r\nHost: other.example\r\n{second}"
+            );
+            client.write_all(pipelined.as_bytes()).await.unwrap();
+            // Not half-closed: the server must still get the whole first request.
+            let seen = tokio::time::timeout(Duration::from_secs(5), seen_rx.recv())
+                .await
+                .expect("the server got the first request")
+                .unwrap();
+            assert!(seen.starts_with("POST /first HTTP/1.1\r\n"), "{seen}");
+            assert!(
+                !seen.contains("second") && !seen.contains("other.example"),
+                "{seen}"
+            );
+            let (seen_head, seen_body) = seen.split_once("\r\n\r\n").unwrap();
+            let expected_body = first.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+            assert_eq!(seen_body, expected_body, "{seen_head}");
+            assert!(read_all(&mut client).await.ends_with("\r\n\r\nok"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ambiguous_body_framing_is_refused() {
+        let (proxy, _, _stop) = proxy(&["localhost"], true, IDLE_TIMEOUT).await;
+        for headers in [
+            "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n",
+            "Content-Length: 5\r\nContent-Length: 6\r\n",
+            "Content-Length: five\r\n",
+        ] {
+            let mut client = TcpStream::connect(proxy).await.unwrap();
+            client
+                .write_all(format!("POST http://localhost:1/ HTTP/1.1\r\n{headers}\r\n").as_bytes())
+                .await
+                .unwrap();
+            let response = read_all(&mut client).await;
+            assert!(
+                response.starts_with("HTTP/1.1 400"),
+                "{headers}: {response}"
+            );
+        }
+    }
+
+    /// Past the cap the next connection waits for a slot; it isn't dropped.
+    #[tokio::test]
+    async fn test_connections_past_the_cap_wait() {
+        let port = echo_upstream().await;
+        let (proxy, _, _stop) = proxy_limited(localhost_policy(false), 1).await;
+
+        let first = connect_tunnel(proxy, port).await;
+        let mut second = TcpStream::connect(proxy).await.unwrap();
+        second
+            .write_all(format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut byte = [0u8];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), second.read(&mut byte))
+                .await
+                .is_err(),
+            "accepted past the cap"
+        );
+        drop(first);
+        assert!(read_head(&mut second).await.starts_with("HTTP/1.1 200"));
+    }
+
+    /// A destination name that isn't one is refused outright, and not recorded: there is
+    /// nothing trustworthy to record.
+    #[tokio::test]
+    async fn test_socks5_rejects_an_invalid_name_without_recording_it() {
+        let (proxy, refusals, _stop) = proxy_with(localhost_policy(false)).await;
+        for name in ["local\nhost", "a b", "", ".", "ex!ample", "lo\u{e9}calhost"] {
+            let (status, _) = socks5_connect(proxy, name, 80).await;
+            assert_eq!(status, 1, "{name:?}");
+        }
+        assert!(refusals.list().is_empty());
+        // Valid names and IP literals still work (and are refused by policy, not form).
+        for name in ["other.example.", "1.2.3.4", "::1"] {
+            let (status, _) = socks5_connect(proxy, name, 80).await;
+            assert_eq!(status, 2, "{name:?}");
+        }
+        let hosts: Vec<String> = refusals.list().into_iter().map(|r| r.host).collect();
+        assert_eq!(hosts, ["1.2.3.4", "::1", "other.example"]);
+    }
+
+    /// A fully qualified name (`host.`) is the host, allowed and recorded as such.
+    #[tokio::test]
+    async fn test_fqdn_matches_and_is_recorded_without_the_dot() {
+        let port = echo_upstream().await;
+        let (proxy, refusals, _stop) = proxy_with(localhost_policy(false)).await;
+
+        let mut client = TcpStream::connect(proxy).await.unwrap();
+        client
+            .write_all(format!("CONNECT localhost.:{port} HTTP/1.1\r\n\r\nhi").as_bytes())
+            .await
+            .unwrap();
+        assert!(read_head(&mut client).await.starts_with("HTTP/1.1 200"));
+        client.shutdown().await.unwrap();
+        assert_eq!(read_all(&mut client).await, "got:hi");
+
+        let mut client = TcpStream::connect(proxy).await.unwrap();
+        client
+            .write_all(b"CONNECT Other.Example.:443 HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        let response = read_all(&mut client).await;
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+        assert!(response.contains("other.example:443 is not"), "{response}");
+        let listed = refusals.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (listed[0].host.as_str(), listed[0].port),
+            ("other.example", 443)
         );
     }
 

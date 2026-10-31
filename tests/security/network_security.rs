@@ -600,6 +600,40 @@ fn test_socks5_on_the_proxy_port() {
     );
 }
 
+/// A fully qualified name (`localhost.`) is the allowed host, and a refused one is recorded
+/// without its trailing dot.
+#[test]
+#[cfg(unix)]
+fn test_trailing_dot_names_are_normalized() {
+    use std::sync::atomic::Ordering;
+
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let (port, hits) = loopback_server();
+    let sandbox = Sandbox::builder()
+        .allow_network(&["localhost"])
+        .allow_private_destinations()
+        .wall_time_limit(Duration::from_secs(15))
+        .build()
+        .unwrap();
+    let script = format!(
+        "command -v curl >/dev/null || {{ echo NO_CURL; exit 0; }}
+         echo fqdn=$(curl -s -o /dev/null -w '%{{http_code}}' -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 http://localhost.:{port}/)
+         echo other=$(curl -s -o /dev/null -w '%{{http_code}}' -x \"$HTTP_PROXY\" --noproxy '' --connect-timeout 3 http://other.example.:80/)"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    let out = result.stdout.as_str();
+    if out.trim() == "NO_CURL" {
+        eprintln!("skipping: no curl in the sandbox");
+        return;
+    }
+    assert!(out.contains("fqdn=200"), "{out}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert!(out.contains("other=403"), "{out}");
+    assert_eq!(result.blocked_hosts, vec!["other.example"]);
+}
+
 /// Entries and companions that can't work are refused at build.
 #[test]
 fn test_network_settings_are_checked_at_build() {
