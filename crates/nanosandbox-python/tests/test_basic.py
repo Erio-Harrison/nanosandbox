@@ -26,6 +26,32 @@ def test_presets_build():
     assert Sandbox.code_judge("/tmp").cpu_time_limit(2).build() is not None
 
 
+def test_bad_time_limits_raise_value_error_not_panic():
+    import math
+
+    import pytest
+
+    # Duration::from_secs_f64 would panic; a panic is a PanicException, which `except Exception`
+    # doesn't catch. Each must be a plain ValueError.
+    for bad in (-1.0, 0.0, math.nan, math.inf, -math.inf, 1e300):
+        with pytest.raises(ValueError, match="wall_time_limit"):
+            Sandbox.builder().wall_time_limit(bad)
+        with pytest.raises(ValueError, match="cpu_time_limit"):
+            Sandbox.builder().cpu_time_limit(bad)
+    assert Sandbox.builder().wall_time_limit(0.5).cpu_time_limit(1).build() is not None
+
+
+def test_negative_integer_limits_are_rejected():
+    import pytest
+
+    for setter in ("memory_limit", "max_output", "max_file_size", "private_tmp"):
+        with pytest.raises((OverflowError, ValueError)):
+            getattr(Sandbox.builder(), setter)(-1)
+    for setter in ("max_pids", "max_open_files"):
+        with pytest.raises((OverflowError, ValueError)):
+            getattr(Sandbox.builder(), setter)(-1)
+
+
 def test_platform_helpers():
     assert isinstance(is_platform_supported_or_true(), bool)
     assert isinstance(Sandbox.builder().build().platform(), str)

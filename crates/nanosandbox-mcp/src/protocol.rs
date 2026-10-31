@@ -5,7 +5,7 @@
 //! (2026-07-28+); anything else, `initialize` included, gets the older handshake.
 
 use serde_json::{Map, Value, json};
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::{Condvar, Mutex};
 
 pub const MODERN_VERSIONS: &[&str] = &["2026-07-28"];
@@ -78,7 +78,10 @@ pub struct Server<R: Runner> {
     /// Appended to the tool description: what the operator allowed.
     summary: String,
     gate: Gate,
-    cancelled: Mutex<HashSet<String>>,
+    /// `tools/call`s handed out but not yet answered, by id; `true` once cancelled. A
+    /// cancellation for any other id is ignored, so one can't outlive the request it names
+    /// and swallow the next request that reuses the id.
+    in_flight: Mutex<HashMap<String, bool>>,
     log_io: bool,
 }
 
@@ -88,7 +91,7 @@ impl<R: Runner> Server<R> {
             runner,
             summary,
             gate: Gate::new(max_concurrent.max(1)),
-            cancelled: Mutex::new(HashSet::new()),
+            in_flight: Mutex::new(HashMap::new()),
             log_io,
         }
     }
@@ -155,7 +158,10 @@ impl<R: Runner> Server<R> {
                 Action::Respond(ok(id, self.discover(), era))
             }
             "tools/list" => Action::Respond(ok(id, json!({ "tools": [self.tool()] }), era)),
-            "tools/call" => Action::Call(Call { id, era, params }),
+            "tools/call" => {
+                self.in_flight.lock().unwrap().insert(id.to_string(), false);
+                Action::Call(Call { id, era, params })
+            }
             _ => Action::Respond(error(
                 id,
                 METHOD_NOT_FOUND,
@@ -167,11 +173,13 @@ impl<R: Runner> Server<R> {
     fn notification(&self, method: &str, params: &Value) {
         if method == "notifications/cancelled"
             && let Some(request_id) = params.get("requestId")
-        {
-            self.cancelled
+            && let Some(cancelled) = self
+                .in_flight
                 .lock()
                 .unwrap()
-                .insert(request_id.to_string());
+                .get_mut(&request_id.to_string())
+        {
+            *cancelled = true;
         }
     }
 
@@ -241,18 +249,23 @@ impl<R: Runner> Server<R> {
     pub fn execute_call(&self, call: Call) -> Option<Value> {
         let key = call.id.to_string();
         let _permit = self.gate.acquire();
-        if self.take_cancelled(&key) {
+        if self.is_cancelled(&key) {
+            self.finish(&key);
             return None;
         }
         let response = self.call_tool(&call);
-        if self.take_cancelled(&key) {
-            return None;
-        }
-        Some(response)
+        // Either way the id leaves the in-flight set: a later cancel for it is stale.
+        let cancelled = self.finish(&key);
+        (!cancelled).then_some(response)
     }
 
-    fn take_cancelled(&self, key: &str) -> bool {
-        self.cancelled.lock().unwrap().remove(key)
+    fn is_cancelled(&self, key: &str) -> bool {
+        self.in_flight.lock().unwrap().get(key) == Some(&true)
+    }
+
+    /// Forgets the call; returns whether it had been cancelled.
+    fn finish(&self, key: &str) -> bool {
+        self.in_flight.lock().unwrap().remove(key) == Some(true)
     }
 
     fn call_tool(&self, call: &Call) -> Value {
@@ -771,6 +784,26 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"x"}}}"#,
         );
         assert_eq!(r["result"]["isError"], false);
+        assert!(s.in_flight.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_or_unknown_cancellation_does_not_eat_the_next_request() {
+        let s = server();
+        let tools_call = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_command","arguments":{"command":"x"}}}"#;
+        let cancel =
+            r#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
+        // Never seen that id.
+        assert!(matches!(s.handle_line(cancel), Action::Nothing));
+        assert_eq!(call(&s, tools_call)["result"]["isError"], false);
+        // Cancel arrives after the response went out.
+        s.handle_line(cancel);
+        assert_eq!(call(&s, tools_call)["result"]["isError"], false);
+        // The id names a request that isn't a tools/call.
+        respond(&s, r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        s.handle_line(cancel);
+        assert_eq!(call(&s, tools_call)["result"]["isError"], false);
+        assert!(s.in_flight.lock().unwrap().is_empty());
     }
 
     #[test]

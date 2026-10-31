@@ -20,6 +20,47 @@ fn builder_consumed() -> Error {
     )
 }
 
+fn invalid_arg(message: String) -> Error {
+    Error::new(napi::Status::InvalidArg, message)
+}
+
+/// Longest accepted time limit: a year. Keeps `Instant + Duration` far from overflow.
+const MAX_LIMIT_SECS: f64 = 365.0 * 86_400.0;
+
+/// JS gives every number as f64; `Duration::from_secs_f64` panics (and aborts Node) on
+/// negative, NaN, infinite or huge input.
+fn time_limit(name: &str, value: f64) -> napi::Result<Duration> {
+    if !(value.is_finite() && value > 0.0) {
+        return Err(invalid_arg(format!(
+            "{name} must be a positive number of seconds, got {value}"
+        )));
+    }
+    if value > MAX_LIMIT_SECS {
+        return Err(invalid_arg(format!(
+            "{name} must be at most {MAX_LIMIT_SECS} seconds (a year), got {value}"
+        )));
+    }
+    Duration::try_from_secs_f64(value).map_err(|e| invalid_arg(format!("{name}: {e}")))
+}
+
+/// `f64 as u64` saturates: -1 or NaN would silently become 0. Reject anything that is
+/// not a non-negative integer JS can represent exactly.
+fn whole(name: &str, value: f64) -> napi::Result<u64> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0; // 2^53 - 1
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > MAX_SAFE_INTEGER {
+        return Err(invalid_arg(format!(
+            "{name} must be a non-negative integer up to 2^53 - 1, got {value}"
+        )));
+    }
+    Ok(value as u64)
+}
+
+fn whole_u32(name: &str, value: f64) -> napi::Result<u32> {
+    // napi's own u32 conversion wraps: -1 would read as 4294967295.
+    u32::try_from(whole(name, value)?)
+        .map_err(|_| invalid_arg(format!("{name} must be at most {}, got {value}", u32::MAX)))
+}
+
 /// Read-only or read-write, for [`SandboxBuilder.bind`]. Linux only.
 #[cfg(target_os = "linux")]
 #[napi(string_enum)]
@@ -79,7 +120,8 @@ impl SandboxBuilder {
 
     #[napi]
     pub fn private_tmp(&mut self, size_bytes: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.private_tmp(size_bytes as u64)))
+        let size_bytes = whole("privateTmp size", size_bytes)?;
+        Ok(Self::wrap(self.take()?.private_tmp(size_bytes)))
     }
 
     #[napi]
@@ -104,7 +146,8 @@ impl SandboxBuilder {
 
     #[napi]
     pub fn memory_limit(&mut self, bytes: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.memory_limit(bytes as u64)))
+        let bytes = whole("memoryLimit", bytes)?;
+        Ok(Self::wrap(self.take()?.memory_limit(bytes)))
     }
 
     #[napi]
@@ -114,38 +157,38 @@ impl SandboxBuilder {
 
     #[napi]
     pub fn wall_time_limit(&mut self, seconds: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(
-            self.take()?
-                .wall_time_limit(Duration::from_secs_f64(seconds)),
-        ))
+        let limit = time_limit("wallTimeLimit", seconds)?;
+        Ok(Self::wrap(self.take()?.wall_time_limit(limit)))
     }
 
     #[napi]
     pub fn cpu_time_limit(&mut self, seconds: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(
-            self.take()?
-                .cpu_time_limit(Duration::from_secs_f64(seconds)),
-        ))
+        let limit = time_limit("cpuTimeLimit", seconds)?;
+        Ok(Self::wrap(self.take()?.cpu_time_limit(limit)))
     }
 
     #[napi]
-    pub fn max_pids(&mut self, n: u32) -> napi::Result<SandboxBuilder> {
+    pub fn max_pids(&mut self, n: f64) -> napi::Result<SandboxBuilder> {
+        let n = whole_u32("maxPids", n)?;
         Ok(Self::wrap(self.take()?.max_pids(n)))
     }
 
     #[napi]
     pub fn max_file_size(&mut self, bytes: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.max_file_size(bytes as u64)))
+        let bytes = whole("maxFileSize", bytes)?;
+        Ok(Self::wrap(self.take()?.max_file_size(bytes)))
     }
 
     #[napi]
-    pub fn max_open_files(&mut self, n: u32) -> napi::Result<SandboxBuilder> {
+    pub fn max_open_files(&mut self, n: f64) -> napi::Result<SandboxBuilder> {
+        let n = whole_u32("maxOpenFiles", n)?;
         Ok(Self::wrap(self.take()?.max_open_files(n)))
     }
 
     #[napi]
     pub fn max_output(&mut self, bytes: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.max_output(bytes as u64)))
+        let bytes = whole("maxOutput", bytes)?;
+        Ok(Self::wrap(self.take()?.max_output(bytes)))
     }
 
     #[napi]
@@ -240,7 +283,8 @@ impl SandboxBuilder {
 
     #[napi]
     pub fn tmpfs(&mut self, path: String, size_bytes: f64) -> napi::Result<SandboxBuilder> {
-        Ok(Self::wrap(self.take()?.tmpfs(path, size_bytes as u64)))
+        let size_bytes = whole("tmpfs size", size_bytes)?;
+        Ok(Self::wrap(self.take()?.tmpfs(path, size_bytes)))
     }
 
     #[napi]
@@ -254,22 +298,26 @@ impl SandboxBuilder {
     }
 
     #[napi]
-    pub fn uid(&mut self, uid: u32) -> napi::Result<SandboxBuilder> {
+    pub fn uid(&mut self, uid: f64) -> napi::Result<SandboxBuilder> {
+        let uid = whole_u32("uid", uid)?;
         Ok(Self::wrap(self.take()?.uid(uid)))
     }
 
     #[napi]
-    pub fn gid(&mut self, gid: u32) -> napi::Result<SandboxBuilder> {
+    pub fn gid(&mut self, gid: f64) -> napi::Result<SandboxBuilder> {
+        let gid = whole_u32("gid", gid)?;
         Ok(Self::wrap(self.take()?.gid(gid)))
     }
 
     #[napi]
-    pub fn host_uid(&mut self, uid: u32) -> napi::Result<SandboxBuilder> {
+    pub fn host_uid(&mut self, uid: f64) -> napi::Result<SandboxBuilder> {
+        let uid = whole_u32("hostUid", uid)?;
         Ok(Self::wrap(self.take()?.host_uid(uid)))
     }
 
     #[napi]
-    pub fn host_gid(&mut self, gid: u32) -> napi::Result<SandboxBuilder> {
+    pub fn host_gid(&mut self, gid: f64) -> napi::Result<SandboxBuilder> {
+        let gid = whole_u32("hostGid", gid)?;
         Ok(Self::wrap(self.take()?.host_gid(gid)))
     }
 

@@ -257,13 +257,27 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Parsed, Stri
     if !cfg.deny_network.is_empty() && cfg.allow_network.is_empty() {
         return Err("--deny-network goes with --allow-network".into());
     }
-    if !(cfg.timeout.is_finite() && cfg.timeout > 0.0) {
-        return Err("--timeout must be a positive number of seconds".into());
-    }
+    timeout_duration(cfg.timeout)?;
     if cfg.max_concurrent == 0 {
         return Err("--max-concurrent must be at least 1".into());
     }
     Ok(Parsed::Run(Box::new(cfg)))
+}
+
+/// Longest accepted `--timeout`: a year. Keeps `Instant + Duration` far from overflow.
+const MAX_TIMEOUT_SECS: f64 = 365.0 * 86_400.0;
+
+/// `Duration::from_secs_f64` panics on negative, NaN, infinite or huge input (`--timeout 1e300`).
+fn timeout_duration(secs: f64) -> Result<Duration, String> {
+    if !(secs.is_finite() && secs > 0.0) {
+        return Err("--timeout must be a positive number of seconds".into());
+    }
+    if secs > MAX_TIMEOUT_SECS {
+        return Err(format!(
+            "--timeout must be at most {MAX_TIMEOUT_SECS} seconds (a year)"
+        ));
+    }
+    Duration::try_from_secs_f64(secs).map_err(|e| format!("--timeout: {e}"))
 }
 
 fn parse_num<T: std::str::FromStr>(s: &str, flag: &str) -> Result<T, String> {
@@ -382,7 +396,7 @@ impl Config {
         };
         b = b
             .memory_limit(self.memory)
-            .wall_time_limit(Duration::from_secs_f64(self.timeout));
+            .wall_time_limit(timeout_duration(self.timeout)?);
         if self.report_denials {
             b = b.report_denials();
         }
@@ -737,11 +751,30 @@ mod tests {
     }
 
     #[test]
+    fn timeout_out_of_duration_range_is_refused_not_panicked() {
+        // Duration::from_secs_f64 would panic on these; parsing must refuse them first.
+        let err = parse(&["--workspace", "/w", "--timeout", "1e300"]).unwrap_err();
+        assert!(
+            err.contains("--timeout") && err.contains("at most"),
+            "{err}"
+        );
+        let err = parse(&["--workspace", "/w", "--timeout", "-1"]).unwrap_err();
+        assert!(err.contains("positive number of seconds"), "{err}");
+        assert_eq!(cfg(&["--workspace", "/w", "--timeout", "0.5"]).timeout, 0.5);
+        assert!(timeout_duration(MAX_TIMEOUT_SECS).is_ok());
+        assert!(timeout_duration(MAX_TIMEOUT_SECS + 1.0).is_err());
+    }
+
+    #[test]
     fn rejects_bad_input() {
         for args in [
             &["--workspace", "/w", "--bogus"][..],
             &["--workspace", "/w", "--timeout", "0"],
             &["--workspace", "/w", "--timeout", "abc"],
+            &["--workspace", "/w", "--timeout", "-1"],
+            &["--workspace", "/w", "--timeout", "1e300"],
+            &["--workspace", "/w", "--timeout", "inf"],
+            &["--workspace", "/w", "--timeout", "NaN"],
             &["--workspace", "/w", "--env", "NOEQUALS"],
             &["--workspace", "/w", "--max-concurrent", "0"],
             &[

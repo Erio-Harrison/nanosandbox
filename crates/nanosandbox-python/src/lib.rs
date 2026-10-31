@@ -18,6 +18,25 @@ fn builder_consumed() -> PyErr {
     )
 }
 
+/// Longest accepted time limit: a year. Keeps `Instant + Duration` far from overflow.
+const MAX_LIMIT_SECS: f64 = 365.0 * 86_400.0;
+
+/// `Duration::from_secs_f64` panics on negative, NaN, infinite or huge input, and a panic
+/// surfaces as PanicException, which `except Exception` doesn't catch. Make it a ValueError.
+fn time_limit(name: &str, value: f64) -> PyResult<Duration> {
+    if !(value.is_finite() && value > 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be a positive number of seconds, got {value}"
+        )));
+    }
+    if value > MAX_LIMIT_SECS {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be at most {MAX_LIMIT_SECS} seconds (a year), got {value}"
+        )));
+    }
+    Duration::try_from_secs_f64(value).map_err(|e| PyValueError::new_err(format!("{name}: {e}")))
+}
+
 /// Read-only or read-write, for [`SandboxBuilder.bind`]. Linux only.
 #[cfg(target_os = "linux")]
 #[pyclass(eq, eq_int, name = "Permission")]
@@ -119,17 +138,13 @@ impl SandboxBuilder {
     }
 
     fn wall_time_limit(&mut self, seconds: f64) -> PyResult<Self> {
-        Ok(Self::wrap(
-            self.take()?
-                .wall_time_limit(Duration::from_secs_f64(seconds)),
-        ))
+        let limit = time_limit("wall_time_limit", seconds)?;
+        Ok(Self::wrap(self.take()?.wall_time_limit(limit)))
     }
 
     fn cpu_time_limit(&mut self, seconds: f64) -> PyResult<Self> {
-        Ok(Self::wrap(
-            self.take()?
-                .cpu_time_limit(Duration::from_secs_f64(seconds)),
-        ))
+        let limit = time_limit("cpu_time_limit", seconds)?;
+        Ok(Self::wrap(self.take()?.cpu_time_limit(limit)))
     }
 
     fn max_pids(&mut self, n: u32) -> PyResult<Self> {
