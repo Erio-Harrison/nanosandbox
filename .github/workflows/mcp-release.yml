@@ -34,7 +34,7 @@ jobs:
             zig: aarch64-unknown-linux-gnu.2.17
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -60,7 +60,7 @@ jobs:
           (printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'; sleep 2) \
             | "$bin" --workspace "$PWD" 2>/dev/null | head -1 | grep -q run_command
       - run: cp target/${{ matrix.target }}/release/nanosandbox-mcp nanosandbox-mcp-${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
           path: crates/nanosandbox-mcp/nanosandbox-mcp-${{ matrix.target }}
@@ -69,11 +69,11 @@ jobs:
     needs: binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: binary-*
           path: crates/nanosandbox-mcp/binaries
@@ -84,7 +84,7 @@ jobs:
           mkdir -p tarballs
           for dir in npm-out/*/; do (cd "$dir" && npm pack --pack-destination ../../tarballs); done
           ls -l tarballs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: npm-packages
           path: crates/nanosandbox-mcp/npm-out
@@ -106,14 +106,14 @@ jobs:
             target: aarch64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: PyO3/maturin-action@v1
         with:
           working-directory: crates/nanosandbox-mcp
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: ${{ matrix.manylinux }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
           path: crates/nanosandbox-mcp/dist
@@ -123,11 +123,11 @@ jobs:
     needs: npm-packages
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: npm-packages
           path: npm-out
@@ -154,7 +154,7 @@ jobs:
     needs: wheels
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist

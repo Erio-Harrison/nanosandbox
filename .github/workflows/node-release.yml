@@ -28,8 +28,8 @@ jobs:
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
       - uses: dtolnay/rust-toolchain@stable
@@ -43,7 +43,7 @@ jobs:
           version: "0.13.0"
       - run: npm ci
       - run: npm run build -- --target ${{ matrix.target }} ${{ matrix.cross && '--cross-compile' || '' }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: crates/nanosandbox-node/*.node
@@ -55,7 +55,7 @@ jobs:
       # published with no loader at all (confirmed: that's exactly what
       # went out in the first 0.2.1 publish).
       - if: matrix.target == 'x86_64-unknown-linux-gnu'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: node-loader
           path: |
@@ -72,14 +72,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           registry-url: "https://registry.npmjs.org"
       - run: npm ci
       - run: npx napi create-npm-dirs
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: bindings-*
           # `uses:` steps don't inherit this job's working-directory default
@@ -87,7 +87,7 @@ jobs:
           # the repo root to land where the `run:` steps below expect it.
           path: crates/nanosandbox-node/artifacts
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: node-loader
           path: crates/nanosandbox-node
