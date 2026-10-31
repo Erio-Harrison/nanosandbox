@@ -151,7 +151,10 @@ removed afterwards, and limited to `size`. The size is measured every 250ms
 while the program runs, and the program is killed if it's over
 (`ExecutionResult::killed_by_tmp_limit`), since nothing can make a write
 fail with `ENOSPC` here. A short burst can go over before the next check,
-but not fill the disk.
+but not fill the disk. A subdirectory the program makes unlistable (`chmod
+300`) can't hide what's in it: a directory the measure can't list counts as
+over the limit, and the removal afterwards reopens the run's own directories
+before deleting them.
 
 If the host process is killed, its directory is left behind. Each directory
 holds an exclusive `flock` for the run, which the kernel drops when the

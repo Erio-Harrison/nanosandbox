@@ -70,6 +70,10 @@ let result = sandbox.run_with_input("cat", &[], Some(b"hello world"))?;
 assert_eq!(result.stdout, "hello world");
 ```
 
+Input is fed as the program reads it. A program that exits before reading it
+all gets what it read; the rest is dropped, and the host is never sent
+`SIGPIPE` for it, whatever disposition the host runtime left the signal at.
+
 #### `spawn` / `spawn_pty` (Linux, macOS)
 
 Start a command and work with it while it runs. `run` is `spawn` plus
@@ -275,13 +279,20 @@ REPL histories, keyrings and browser profiles. Everything else in the home
 directory stays readable: toolchains and caches, but also other projects and
 their `.env` files, and whatever credential store isn't on the list.
 
-`deny_read(path)` adds a file or directory to that. `hide_home()` hides the
-whole home directory instead, except what `read_only`, `writable` or
-`working_dir` name (the agent presets keep toolchains readable on top of this,
-see [Presets](#presets)). A hidden path reads as "permission denied", not
-as missing; a program that insists on reading one (git with a `HOME` pointing
-at the real, hidden home) fails rather than carries on. On Linux file names
-stay visible, only contents aren't.
+`deny_read(path)` adds a file or directory to that; the path must exist, or
+`build()` fails with `PathNotFound` (a typo would otherwise protect nothing).
+`hide_home()` hides the whole home directory instead, except what `read_only`,
+`writable` or `working_dir` name (the agent presets keep toolchains readable
+on top of this, see [Presets](#presets)); naming home itself asks for all of
+it, the credentials above excepted. A hidden path reads as "permission
+denied", not as missing; a program that insists on reading one (git with a
+`HOME` pointing at the real, hidden home) fails rather than carries on. On
+Linux file names stay visible, only contents aren't. On macOS preferences are
+served by `cfprefsd` from `~/Library/Preferences`, not read as files, so
+`hide_home` also limits what that service answers to the global domain
+(language, region, keyboard): `defaults read` of an application's domain
+fails, and a program reading its own preferences through CoreFoundation gets
+the defaults.
 
 `report_denials()` puts the file accesses the sandbox refused into
 `ExecutionResult::denied_paths`: each path with the operation refused
@@ -415,7 +426,9 @@ pub fn allow_trustd(self) -> Self                   // macOS, with allow_network
 listed destinations through. An entry is a host (`example.com`),
 `*.example.com` (it and its subdomains), or an IP address (an IPv6 one in
 brackets if it has a port), with an optional `:port`: `api.example.com:443`
-allows that port only, `api.example.com` any port. `build()` refuses an
+allows that port only, `api.example.com` any port. Names are compared
+case-insensitively and without a trailing dot (`example.com.` is
+`example.com`, in entries, requests and the result). `build()` refuses an
 entry that could never match or would allow too much: a path or scheme, a
 port of 0, `*` anywhere but a leading `*.`, or `*.` with a single label
 (`*.com`). The sandbox has no other way out: on Linux it gets its own
@@ -467,14 +480,23 @@ How requests are relayed:
 - A connection is cut after 300 s with nothing sent either way. A transfer
   that keeps going has no time limit (the run's `wall_time_limit` still
   applies).
+- At most 256 connections are open per run at once; the next one waits for
+  a slot rather than being dropped.
 - Plain HTTP is one request per connection: the proxy sends
-  `Connection: close`, and sets `Host` to the URL's host, whatever the
-  client sent. HTTPS isn't decrypted. By default what a client says inside
-  TLS (its SNI) isn't checked against the host the tunnel was opened to;
+  `Connection: close`, sets `Host` to the URL's host, whatever the client
+  sent, and forwards the body as its `Content-Length` or chunked framing
+  says and nothing after it, so a pipelined second request (with a `Host`
+  of its own) never reaches the server. A request whose body length is
+  ambiguous (both headers, or a `Content-Length` that isn't one decimal) is
+  refused with a `400`.
+- HTTPS isn't decrypted. By default what a client says inside TLS (its
+  SNI) isn't checked against the host the tunnel was opened to;
   `require_host_match()` cuts a tunnel whose handshake names another host
-  (domain fronting through a CDN both share), at the cost of waiting up to
-  5 s for the handshake on a tunnel to a protocol where the server speaks
-  first.
+  (domain fronting through a CDN both share). Nothing the client sends is
+  forwarded until its first bytes are either a complete ClientHello (even
+  one spread over several TLS records) or plainly not TLS; a hello that
+  can't be read is cut too. The server's bytes flow from the start, so a
+  protocol where the server speaks first still works.
 - Each run has a proxy listener of its own, closed with the run along with
   its open connections.
 
@@ -537,7 +559,9 @@ pub fn clear_env(self, clear: bool) -> Self
 
 By default the program starts with only what `env` sets (plus a default
 `PATH`, the proxy variables, and `TMPDIR` and `HOME` when `private_tmp` is on).
-`clear_env(false)` starts from this process's environment instead.
+`clear_env(false)` starts from this process's environment instead (an entry
+that isn't UTF-8 is left out). A key must be non-empty and contain no `=` or
+NUL, a value no NUL; `build()` refuses otherwise.
 
 `HOME` is the run's private temp directory, so programs that keep caches and
 config under it (npm, pip, git, ...) have somewhere to write that disappears
@@ -744,8 +768,17 @@ Returns: `"linux"`, `"macos"`, or `"windows"`
 
 ## Python Bindings
 
+Every builder method consumes the builder and returns a new one, so chain
+the calls (or keep each return value). `Permission` is only exported on Linux,
+where `bind()` exists; import it under a platform check.
+
 ```python
-from nanosandbox import Sandbox, SandboxBuilder, Permission, MB, GB
+import sys
+
+from nanosandbox import Sandbox, SandboxBuilder, MB, GB
+
+if sys.platform.startswith("linux"):
+    from nanosandbox import Permission  # for SandboxBuilder.bind()
 
 # Create sandbox
 sandbox = (Sandbox.builder()
@@ -759,7 +792,7 @@ result = sandbox.run("python3", ["-c", "print('hello')"])
 print(result.stdout)
 print(result.success())
 
-# Presets
+# Presets (the directories must exist)
 sandbox = Sandbox.code_judge("/code").build()
 sandbox = Sandbox.agent_executor("/workspace").build()
 ```
@@ -768,31 +801,44 @@ sandbox = Sandbox.agent_executor("/workspace").build()
 
 ## Node.js Bindings
 
+Each setter consumes the builder it is called on and returns a new one:
+chain the calls, or keep every return value (`b = b.memoryLimit(...)`).
+Calling a second method on a builder that was already passed on throws
+"this builder was already consumed". `Permission` is only exported on Linux,
+where `bind()` exists.
+
 ```javascript
-const { SandboxBuilder, Sandbox, Permission, MB, GB } = require('nanosandbox');
+const { SandboxBuilder, Sandbox, MB, GB } = require('nanosandbox');
 
 // Create sandbox
-const builder = new SandboxBuilder();
-builder.workingDir('/tmp');
-builder.memoryLimit(512 * MB);
-builder.wallTimeLimit(30.0);
-const sandbox = builder.build();
+const sandbox = new SandboxBuilder()
+  .workingDir('/tmp')
+  .memoryLimit(512 * MB)
+  .wallTimeLimit(30.0)  // seconds
+  .build();
 
-// Run command
-const result = sandbox.run('node', ['-e', "console.log('hello')"]);
+// Run command. A bare name is looked up on the sandbox's default PATH, which
+// has no Homebrew or nvm directories; this node's own path always works.
+const node = process.execPath;
+const result = sandbox.run(node, ['-e', "console.log('hello')"]);
 console.log(result.stdout);
 console.log(result.exitCode);
 
 // run() blocks the event loop for the whole command; these don't. They run
 // on libuv's thread pool (UV_THREADPOOL_SIZE, 4 by default) and return a
 // Promise<ExecutionResult>.
-const later = await sandbox.runAsync('node', ['-e', "console.log('hello')"]);
+const later = await sandbox.runAsync(node, ['-e', "console.log('hello')"]);
 const piped = await sandbox.runWithInputAsync('cat', [], Buffer.from('hi'));
 
-// Presets
-const judge = SandboxBuilder.codeJudge('/code').build();
-const agent = SandboxBuilder.agentExecutor('/workspace').build();
+// Presets live on Sandbox, not SandboxBuilder. The directories must exist.
+const judge = Sandbox.codeJudge('/code').build();
+const agent = Sandbox.agentExecutor('/workspace').build();
 ```
+
+Limits take plain numbers and throw an `InvalidArg` error on anything that
+isn't a positive finite number of seconds (`wallTimeLimit`, `cpuTimeLimit`) or a
+whole non-negative byte or process count (`memoryLimit`, `maxOutput`, ...), so
+`maxOutput(-1)` is refused rather than silently dropping all output.
 
 ---
 
