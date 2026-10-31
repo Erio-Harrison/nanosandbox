@@ -412,62 +412,61 @@ CreateProcessAsUserW(restricted_token, ...);
 
 ## Network Proxy
 
-Domain-based network filtering via HTTP proxy:
+`allow_network` gives the sandbox exactly one way out: a proxy in the host
+process, listening for that run only. It speaks HTTP (plain requests and
+`CONNECT` tunnels) and SOCKS5 on the same port, telling them apart by the
+first byte of a connection (a SOCKS5 client opens with its version byte
+`0x05`; an HTTP request line opens with a method). The environment points
+programs at it: `HTTP_PROXY`/`HTTPS_PROXY` for the first, `ALL_PROXY`
+(`socks5h://`, so names resolve at the proxy) for the second, with `NO_PROXY`
+for loopback unless `allow_private_destinations` is on.
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Sandbox Process                       │
-│                                                         │
-│  HTTP_PROXY=http://127.0.0.1:PORT                      │
-│  HTTPS_PROXY=http://127.0.0.1:PORT                     │
-│                                                         │
-│  curl https://api.example.com  ─────┐                  │
-│                                      │                  │
-└──────────────────────────────────────┼──────────────────┘
-                                       │
-                                       ▼
-┌──────────────────────────────────────────────────────────┐
-│                   Proxy Server                           │
-│              (runs in parent process)                    │
-│                                                         │
-│  1. Parse Host header / CONNECT target                  │
-│  2. Check domain against whitelist                      │
-│     - Exact match: api.example.com                      │
-│     - Wildcard: *.example.com                           │
-│  3. If allowed: forward request                         │
-│     If blocked: return 403 Forbidden                    │
-│                                                         │
-└──────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────┐
+│  Sandbox process                          │
+│  HTTP_PROXY / HTTPS_PROXY / ALL_PROXY     │
+│  curl https://api.example.com  ───────┐   │
+│  (no other route out, no DNS inside)  │   │
+└───────────────────────────────────────┼───┘
+                                        ▼
+┌───────────────────────────────────────────┐
+│  Proxy (host process, one per run)        │
+│  1. HTTP or SOCKS5? (first byte)          │
+│  2. target host:port from CONNECT, the    │
+│     request URL/Host, or the SOCKS5       │
+│     request                               │
+│  3. deny rules, then allow rules          │
+│  4. resolve once; refuse non-public       │
+│     addresses; connect to what was        │
+│     checked                               │
+│  5. relay; with require_host_match,       │
+│     cut a tunnel whose TLS SNI names      │
+│     another host                          │
+│  refused → HTTP 403 + X-Proxy-Error, or   │
+│     SOCKS5 reply 2; recorded in           │
+│     ExecutionResult.network_refusals      │
+└───────────────────────────────────────────┘
 ```
 
-### Whitelist Matching
+Rules (`src/network/proxy.rs`, `Rule`) are the same for allow and deny
+entries: a host, `*.host` (it and its subdomains), or an IP address, each
+with an optional `:port` (any port without one). Deny is checked first, so a
+deny can carve a port or a subdomain out of an allow, and carries the reason
+the program is told. Matching is on the destination the program named,
+lowercased; what it then says inside TLS is only checked with
+`require_host_match`. `build()` refuses entries that can't work (a scheme or
+path, port 0, `*` other than a leading `*.`, `*.` with one label).
 
-```rust
-fn is_domain_allowed(host: &str, whitelist: &[String]) -> bool {
-    let host_lower = host.to_lowercase();
-
-    for pattern in whitelist {
-        if pattern.starts_with("*.") {
-            // Wildcard: *.example.com matches sub.example.com
-            let suffix = &pattern[1..];  // .example.com
-            if host_lower.ends_with(suffix) {
-                return true;
-            }
-        } else {
-            // Exact match
-            if host_lower == pattern.to_lowercase() {
-                return true;
-            }
-        }
-    }
-    false
-}
-```
+Every connection the proxy doesn't make is counted by (host, port, reason)
+and returned as `ExecutionResult::network_refusals` when the run ends; the
+reason's code is what the program saw in `X-Proxy-Error`. The API doc's
+"Network" section has the user-facing details (entry syntax, what a refused
+program sees, relay rules, the macOS `trustd` exception).
 
 ### Enforcement: no way around the proxy
 
 The proxy only checks traffic that goes through it. What stops a program
-from ignoring `HTTP_PROXY` and connecting directly differs per platform:
+from ignoring the proxy variables and connecting directly differs per platform:
 
 - **macOS**: each run gets a proxy listener on a fresh loopback port, and
   the SBPL profile allows outbound network only to `localhost:<that port>`.
@@ -487,8 +486,8 @@ from ignoring `HTTP_PROXY` and connecting directly differs per platform:
 Since the proxy connects from the host's network, an allowed name that
 resolves to a loopback, private, link-local (cloud metadata) or other
 non-public address would reach what the sandbox's own network can't: the
-host's services and internal network. The proxy refuses those with 403
-unless `allow_private_destinations()` is set. It resolves each name once and
+host's services and internal network. The proxy refuses those
+(`non-public-address`) unless `allow_private_destinations()` is set. It resolves each name once and
 connects to the very address it checked, so a name that resolves to a
 public address first and to `127.0.0.1` next (DNS rebinding) gets nowhere.
 
