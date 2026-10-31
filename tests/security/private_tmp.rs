@@ -171,3 +171,30 @@ fn test_a_run_cannot_reach_another_runs_private_tmp() {
         "a file was planted in the victim's dir: {a_out:?}"
     );
 }
+
+/// Where the private tmp is a directory (macOS; Linux under the AppArmor restriction), a
+/// subdirectory the command makes unlistable can't hide its contents from the size check, and
+/// the directory is still removed afterwards.
+#[test]
+#[cfg(unix)]
+fn test_private_tmp_limit_holds_against_an_unlistable_subdirectory() {
+    if cfg!(target_os = "linux") && !crate::common::skip_without_userns_privileges() {
+        return; // a real tmpfs: ENOSPC, nothing to walk
+    }
+    let sandbox = sandbox(MB);
+    let result = sandbox
+        .run(
+            "sh",
+            &[
+                "-c",
+                "echo $TMPDIR; mkdir $TMPDIR/d && chmod 300 $TMPDIR/d && \
+                 dd if=/dev/zero of=$TMPDIR/d/big bs=1048576 count=40 2>/dev/null; sleep 3",
+            ],
+        )
+        .unwrap();
+    assert!(result.killed_by_tmp_limit, "{result:?}");
+    let dir = result.stdout.lines().next().unwrap().trim().to_string();
+    assert!(dir.contains("nanosandbox-tmp"), "{dir}");
+    drop(sandbox);
+    assert!(!std::path::Path::new(&dir).exists(), "{dir} left behind");
+}

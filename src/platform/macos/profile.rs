@@ -59,6 +59,22 @@ fn without_trust_services(policy: &str) -> String {
         .collect()
 }
 
+/// The preferences policy with reads limited to the global domain (language, region, keyboard):
+/// `(allow user-preference-read)` filtered, the cfprefsd lookups kept.
+fn global_preferences_only(policy: &str) -> String {
+    policy
+        .lines()
+        .map(|line| {
+            if line.trim() == "(allow user-preference-read)" {
+                "(allow user-preference-read (preference-domain \"kCFPreferencesAnyApplication\"))\n"
+                    .to_string()
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect()
+}
+
 /// What a directory above a protected path must not have done to it: removed or renamed, and
 /// its mode, owner, flags or ACL changed, which would keep the host (or the rules, which match
 /// paths) from reaching what's inside.
@@ -212,6 +228,22 @@ impl MacOSExecutor {
                 params.push((key, ancestor.to_string_lossy().into_owned()));
                 n += 1;
             }
+            // A writable inside it gets write back (later allow wins): `writable(a)
+            // .read_only(a/b).writable(a/b/c)`, or an output directory under a read_only input.
+            for inner in config
+                .mounts
+                .iter()
+                .filter(|m| m.permission == Permission::ReadWrite)
+                .map(|m| resolve(&m.target))
+                .filter(|w| *w != path && w.starts_with(&path))
+            {
+                let key = format!("READ_ONLY_{n}");
+                narrowed.push_str(&format!(
+                    "(allow file-write* (subpath (param \"{key}\")))\n"
+                ));
+                params.push((key, inner.to_string_lossy().into_owned()));
+                n += 1;
+            }
         }
         if n > 0 {
             sections.push(narrowed);
@@ -331,7 +363,14 @@ impl MacOSExecutor {
             }
         }
 
-        sections.push(PREFERENCES_POLICY.to_string());
+        // Preferences come from cfprefsd, not the plist files, so a hidden home would still be
+        // read through them (Finder's recent items, an app's stored token). Under hide_home
+        // only the global domain (language, region, keyboard) is readable.
+        sections.push(if config.hide_home {
+            global_preferences_only(PREFERENCES_POLICY)
+        } else {
+            PREFERENCES_POLICY.to_string()
+        });
         sections.push("(deny mach-lookup (xpc-service-name-prefix \"\"))".to_string());
         // These fcntls mutate files via read-only fds, bypassing file-write*.
         sections.push("(deny system-fcntl (fcntl-command 80 110))".to_string());
@@ -589,5 +628,62 @@ mod tests {
             None,
         );
         assert!(p.policy.contains("com.apple.trustd.agent"));
+    }
+
+    #[test]
+    fn test_hide_home_limits_preference_reads_to_the_global_domain() {
+        let open = profile(&SandboxConfig::default(), None);
+        assert!(open.policy.contains("(allow user-preference-read)\n"));
+        let hidden = profile(
+            &SandboxConfig {
+                hide_home: true,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!hidden.policy.contains("(allow user-preference-read)\n"));
+        assert!(hidden.policy.contains(
+            "(allow user-preference-read (preference-domain \"kCFPreferencesAnyApplication\"))"
+        ));
+        assert!(hidden.policy.contains("com.apple.cfprefsd.agent"));
+    }
+
+    #[test]
+    fn test_a_writable_inside_a_read_only_inside_a_writable_gets_write_back() {
+        let ws = std::env::temp_dir().join("nanosandbox-nested-test");
+        std::fs::create_dir_all(ws.join("in/out")).unwrap();
+        let mut config = SandboxConfig::default();
+        for (path, permission) in [
+            ("", Permission::ReadWrite),
+            ("in", Permission::ReadOnly),
+            ("in/out", Permission::ReadWrite),
+        ] {
+            config.mounts.push(Mount {
+                source: ws.join(path),
+                target: ws.join(path),
+                permission,
+            });
+        }
+        let p = profile(&config, None);
+        let key_of = |path: &Path| {
+            p.params
+                .iter()
+                .find(|(k, v)| Path::new(v) == path && k.starts_with("READ_ONLY_"))
+                .map(|(k, _)| k.clone())
+                .unwrap()
+        };
+        let deny = format!(
+            "(deny file-write* (subpath (param \"{}\")))",
+            key_of(&canonical_path(&ws.join("in")))
+        );
+        let allow = format!(
+            "(allow file-write* (subpath (param \"{}\")))",
+            key_of(&canonical_path(&ws.join("in/out")))
+        );
+        let (d, a) = (
+            p.policy.find(&deny).unwrap(),
+            p.policy.find(&allow).unwrap(),
+        );
+        assert!(d < a, "the allow must come after the deny to win");
     }
 }

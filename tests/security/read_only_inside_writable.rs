@@ -212,3 +212,86 @@ fn test_a_plain_workspace_can_be_chmodded_from_its_root() {
         .unwrap();
     assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
 }
+
+/// A writable inside a read_only inside a writable is writable: `writable(a).read_only(a/b)
+/// .writable(a/b/c)`, and an output directory under a read_only input in /tmp (a default
+/// writable root), as `data_analysis(in, in/out)` has it.
+#[test]
+#[cfg(unix)]
+fn test_a_writable_inside_a_read_only_inside_a_writable_is_writable() {
+    if crate::common::skip_without_userns_privileges() {
+        return; // needs mounts on Linux
+    }
+    let ws = workspace();
+    let root = ws.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("b/c")).unwrap();
+    crate::common::chmod_open(&root.join("b"));
+    crate::common::chmod_open(&root.join("b/c"));
+    let sandbox = Sandbox::builder()
+        .working_dir(&root)
+        .writable(&root)
+        .read_only(root.join("b"))
+        .writable(root.join("b/c"))
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let out = sh(
+        &sandbox,
+        "touch b/c/x && echo inner-ok; touch b/y 2>/dev/null && echo ro-writable || echo ro-ok",
+    );
+    assert!(out.contains("inner-ok"), "{out}");
+    assert!(out.contains("ro-ok"), "{out}");
+
+    let input = crate::common::sandbox_tempdir_in(std::env::temp_dir());
+    let input = input.path().canonicalize().unwrap();
+    std::fs::create_dir_all(input.join("out")).unwrap();
+    crate::common::chmod_open(&input.join("out"));
+    let sandbox = Sandbox::data_analysis(&input, input.join("out"))
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let out = sh(
+        &sandbox,
+        &format!(
+            "touch {0}/out/result && echo out-ok; touch {0}/x 2>/dev/null && echo in-writable || echo in-ok",
+            input.display()
+        ),
+    );
+    assert!(out.contains("out-ok"), "{out}");
+    assert!(out.contains("in-ok"), "{out}");
+}
+
+/// The writable area named through a symlink and the read_only path by its real path (or the
+/// other way round) are the same place; the protection must not depend on the spelling.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_read_only_inside_writable_holds_across_symlink_spellings() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    let ws = workspace();
+    let real = ws.path().canonicalize().unwrap();
+    let link = ws.path().parent().unwrap().join(format!(
+        "{}-link",
+        ws.path().file_name().unwrap().to_string_lossy()
+    ));
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let sandbox = Sandbox::builder()
+        .working_dir(&link)
+        .writable(&link)
+        .read_only(real.join(".git/hooks"))
+        .wall_time_limit(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let out = sh(
+        &sandbox,
+        "echo evil > .git/hooks/pre-commit 2>/dev/null && echo written || echo refused; \
+         rm .git/hooks/pre-commit 2>/dev/null && echo removed || echo kept",
+    );
+    let _ = std::fs::remove_file(&link);
+    assert!(out.contains("refused") && out.contains("kept"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(real.join(".git/hooks/pre-commit")).unwrap(),
+        "hook"
+    );
+}

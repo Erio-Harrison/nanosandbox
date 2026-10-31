@@ -91,15 +91,42 @@ impl PrivateTmp {
             return false;
         }
         self.last_check = now;
-        self.last_usage = disk_usage(&self.dir);
+        // A directory the command made unlistable (`chmod 300`) hides what's in it from the
+        // measure; what can't be measured counts as over.
+        self.last_usage = disk_usage(&self.dir).unwrap_or(u64::MAX);
         self.last_usage > self.limit
     }
 }
 
 impl Drop for PrivateTmp {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.dir);
+        remove_tree(&self.dir);
     }
+}
+
+/// `remove_dir_all`, reopening directories of ours the command closed (`chmod 000` on a
+/// subdirectory fails the recursion and would leave the tree behind for good).
+fn remove_tree(dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    if std::fs::remove_dir_all(dir).is_ok() {
+        return true;
+    }
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(d) = pending.pop() {
+        let _ = std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700));
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .file_type()
+                .is_ok_and(|t| t.is_dir() && !t.is_symlink())
+            {
+                pending.push(entry.path());
+            }
+        }
+    }
+    std::fs::remove_dir_all(dir).is_ok()
 }
 
 /// Non-blocking exclusive `flock`. `Ok(None)`: fs has no locks; `Err(WouldBlock)`: held.
@@ -273,7 +300,7 @@ fn sweep_stale(parent: &Path, min_age: Duration) -> usize {
         if !matches!(try_flock(&dir), Ok(true)) {
             continue;
         }
-        if std::fs::remove_dir_all(&path).is_ok() {
+        if remove_tree(&path) {
             removed += 1;
         }
     }
@@ -347,14 +374,18 @@ fn sweep_markers(parent: &Path, min_age: Duration) -> usize {
     removed
 }
 
-/// Disk bytes under `dir` as a tmpfs counts them (sparse files by blocks); no symlinks.
-fn disk_usage(dir: &Path) -> u64 {
+/// Disk bytes under `dir` as a tmpfs counts them (sparse files by blocks); no symlinks. `None`
+/// when a directory in it couldn't be listed (other than one gone meanwhile): its contents are
+/// unknown.
+fn disk_usage(dir: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     let mut total = 0;
     let mut pending = vec![dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
         };
         for entry in entries.flatten() {
             let Ok(meta) = entry.metadata() else {
@@ -366,7 +397,7 @@ fn disk_usage(dir: &Path) -> u64 {
             }
         }
     }
-    total
+    Some(total)
 }
 
 #[cfg(test)]
