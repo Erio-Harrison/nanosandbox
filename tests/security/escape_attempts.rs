@@ -434,3 +434,28 @@ fn test_host_ids_need_a_root_caller() {
         "{err:?}"
     );
 }
+
+/// A host fd opened without CLOEXEC (a C library's, one inherited from the host's parent) must
+/// not reach the command: path rules judge opens, not open descriptors.
+#[cfg(unix)]
+#[test]
+fn test_host_descriptors_do_not_reach_the_command() {
+    use std::ffi::CString;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("host_private.txt");
+    std::fs::write(&path, "original\n").unwrap();
+    let c = CString::new(path.to_str().unwrap()).unwrap();
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR) };
+    assert!(fd >= 0);
+
+    let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
+    let script = format!(
+        "test -e /dev/fd/{fd} && echo open || echo closed; \
+         echo PWNED >&{fd} && echo wrote || echo refused"
+    );
+    let result = sandbox.run("sh", &["-c", &script]).unwrap();
+    unsafe { libc::close(fd) };
+
+    assert_eq!(result.stdout, "closed\nrefused\n", "{result:?}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+}

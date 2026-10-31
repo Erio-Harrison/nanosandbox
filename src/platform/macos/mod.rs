@@ -340,7 +340,17 @@ fn launch_in_thread(
                 max_file_size,
                 cpu_time_limit,
                 report_fd,
-            )
+            )?;
+
+            // Only stdio crosses exec. A host fd without CLOEXEC (a C library's, one inherited
+            // from the host's parent) would otherwise reach the command: Seatbelt judges opens,
+            // not open descriptors, so `echo x >&3` writes wherever it points. Marked, not
+            // closed: the pipe std reports an exec failure on is among them.
+            let max = libc::getdtablesize().clamp(3, 1 << 20);
+            for fd in 3..max {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
         });
     }
 

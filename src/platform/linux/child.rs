@@ -332,6 +332,19 @@ impl ChildSetup {
             libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
         }
 
+        // Only stdio crosses exec. A host fd without CLOEXEC (a C library's, one inherited from
+        // the host's parent) would otherwise reach the command: Landlock doesn't judge open
+        // descriptors, so `echo x >&3` writes wherever it points.
+        unsafe {
+            if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0i32) != 0 {
+                // Pre-5.9 kernel: close one by one up to the table size.
+                let max = libc::sysconf(libc::_SC_OPEN_MAX).clamp(3, 1 << 20) as libc::c_int;
+                for fd in 3..max {
+                    libc::close(fd);
+                }
+            }
+        }
+
         // Try each $PATH candidate as execvp does, with raw libc calls on buffers built before clone().
         let mut denied = false;
         for path in &self.exec_paths {
