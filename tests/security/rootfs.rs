@@ -225,3 +225,34 @@ fn test_root_caller_unwritable_bind_source_is_refused_with_a_rootfs() {
         .unwrap();
     assert!(result.success(), "stderr: {}", result.stderr);
 }
+
+/// A FIFO a previous run left at a file bind target (it can rebuild `/etc` in its rootfs) must
+/// not block the next run's setup: the bind is refused, not waited on.
+#[test]
+#[cfg(target_os = "linux")]
+fn test_a_fifo_at_a_bind_target_does_not_hang_the_next_run() {
+    if skip_without_userns_privileges() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("etc")).unwrap();
+    let fifo =
+        std::ffi::CString::new(root.path().join("etc/resolv.conf").to_str().unwrap()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    let host_file = tempfile::NamedTempFile::new().unwrap();
+
+    let sandbox = minimal_rootfs(root.path())
+        .bind(host_file.path(), "/etc/resolv.conf", Permission::ReadOnly)
+        .wall_time_limit(std::time::Duration::from_secs(20))
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let result = sandbox.run("/usr/bin/true", &[]);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        start.elapsed()
+    );
+    let ok = result.as_ref().is_ok_and(|r| r.success());
+    assert!(!ok, "{result:?}");
+}

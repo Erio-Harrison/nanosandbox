@@ -141,6 +141,12 @@ pub(super) fn supervise(
         if exited || signaled {
             let (reported, proc_mount_failed) = read_reports(signal_pipe.as_raw_fd());
             let (code, signal) = if exited {
+                // An exit by its own means the kill a limit sent (if any) came too late to
+                // matter: init dies by SIGKILL when it did. Don't report a kill that didn't
+                // happen alongside a normal exit code.
+                killed_by_timeout = false;
+                killed_by_tmp_limit = false;
+                killed_by_cpu_limit = false;
                 (libc::WEXITSTATUS(status), reported)
             } else {
                 let sig = libc::WTERMSIG(status);

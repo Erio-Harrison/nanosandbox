@@ -369,17 +369,31 @@ fn launch_in_thread(
     // open it would keep that ns alive). No listener: the child failed network setup and said why
     // on stderr.
     let proxy_attachment = match (&proxy_link, &proxy) {
-        (Some(link), Some(proxy)) => match link.receive().map(|l| proxy.attach(l)) {
-            Some(Err(e)) => {
-                let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
-                let _ = nix::sys::wait::waitpid(child_pid, None);
-                return Err(SandboxError::Internal {
-                    context: "serve the proxy inside the sandbox".into(),
-                    source: Box::new(e),
-                });
+        (Some(link), Some(proxy)) => {
+            // Bounded: the child does this before exec, where no limit watches it yet.
+            let received = match link.receive_within(Duration::from_secs(30)) {
+                Ok(received) => received,
+                Err(e) => {
+                    let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
+                    let _ = nix::sys::wait::waitpid(child_pid, None);
+                    return Err(SandboxError::Internal {
+                        context: "wait for the command's network setup".into(),
+                        source: Box::new(e),
+                    });
+                }
+            };
+            match received.map(|l| proxy.attach(l)) {
+                Some(Err(e)) => {
+                    let _ = nix::sys::signal::kill(child_pid, Signal::SIGKILL);
+                    let _ = nix::sys::wait::waitpid(child_pid, None);
+                    return Err(SandboxError::Internal {
+                        context: "serve the proxy inside the sandbox".into(),
+                        source: Box::new(e),
+                    });
+                }
+                attached => attached.transpose().ok().flatten(),
             }
-            attached => attached.transpose().ok().flatten(),
-        },
+        }
         _ => None,
     };
 

@@ -164,15 +164,18 @@ impl MountPlan {
         // movable parent directory (the area's own directory included) is mounted onto itself too.
         let mut pins: Vec<Mount> = Vec::new();
         if rootfs.is_none() {
+            // Resolved, like the masks: a symlink spelling on either side mustn't skip a pin.
+            let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             let areas: Vec<PathBuf> = super::landlock::writable_areas(config)
-                .map(Path::to_path_buf)
+                .map(canonical)
                 .collect();
-            let protected = binds
+            let protected: Vec<PathBuf> = binds
                 .iter()
                 .filter(|m| m.permission == Permission::ReadOnly)
-                .map(|m| m.target.as_path())
-                .chain(masks.iter().map(|(p, _)| p.as_path()));
-            for target in protected {
+                .map(|m| canonical(&m.target))
+                .chain(masks.iter().map(|(p, _)| p.clone()))
+                .collect();
+            for target in protected.iter().map(PathBuf::as_path) {
                 if !areas
                     .iter()
                     .any(|a| a.as_path() != target && target.starts_with(a))
@@ -351,9 +354,21 @@ impl MountPlan {
         if tmpfs.iter().any(|(t, _)| m.target.starts_with(t)) {
             return true;
         }
-        m.permission == Permission::ReadOnly
-            && super::landlock::writable_areas(config)
-                .any(|area| area != m.target.as_path() && m.target.starts_with(area))
+        // Resolved on both sides: a writable area named through a symlink still contains
+        // the read_only path named by its real path.
+        let target = canonical(&m.target);
+        let inside = |p: &Path| p != target && target.starts_with(p);
+        match m.permission {
+            Permission::ReadOnly => super::landlock::writable_areas(config)
+                .map(canonical)
+                .any(|area| inside(&area)),
+            // A writable under a read-only mount is read-only with it unless remounted on top.
+            Permission::ReadWrite => config
+                .mounts
+                .iter()
+                .filter(|o| o.permission == Permission::ReadOnly)
+                .any(|o| inside(&canonical(&o.target))),
+        }
     }
 
     /// The path to mount at. Under a rootfs also queues a mkdir per component; without one the
@@ -445,9 +460,10 @@ impl MountPlan {
         }
     }
 
-    /// Creates an empty file if absent.
+    /// Creates an empty file if absent. Only a regular file will do: a FIFO a previous run left
+    /// at the target would block the open (O_NONBLOCK: ENXIO instead), a device would be bound over.
     unsafe fn touch(&self, at: &Target) -> bool {
-        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC;
+        let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_CLOEXEC | libc::O_NONBLOCK;
         unsafe {
             let fd = match at {
                 Target::Host(path) => libc::open(path.as_ptr(), flags, 0o644),
@@ -456,8 +472,11 @@ impl MountPlan {
             if fd < 0 {
                 return false;
             }
+            let mut st: libc::stat = std::mem::zeroed();
+            let regular =
+                libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFREG;
             libc::close(fd);
-            true
+            regular
         }
     }
 

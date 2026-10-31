@@ -122,7 +122,10 @@ pub(super) fn prepare_env(
     let mut env: HashMap<String, String> = if config.clear_env {
         HashMap::new()
     } else {
-        std::env::vars().collect()
+        // vars() panics on a non-UTF-8 entry; such an entry is skipped instead.
+        std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect()
     };
     env.extend(config.env.clone());
 

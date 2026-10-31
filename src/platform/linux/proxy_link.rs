@@ -75,8 +75,39 @@ impl ProxyLink {
         self.child = None;
     }
 
-    /// The child's listener, or None if it never sent one (see its stderr).
-    pub(super) fn receive(&self) -> Option<std::net::TcpListener> {
+    /// The child's listener, or None if it never sent one (see its stderr). `Err` when nothing
+    /// arrived within `timeout`: the child is stuck in its setup, before any limit watches it.
+    pub(super) fn receive_within(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::io::Result<Option<std::net::TcpListener>> {
+        let mut pfd = libc::pollfd {
+            fd: self.parent.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let n =
+                unsafe { libc::poll(&mut pfd, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+            if n > 0 {
+                return Ok(self.receive());
+            }
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("no listener within {timeout:?}"),
+                ));
+            }
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::EINTR) {
+                return Err(err);
+            }
+        }
+    }
+
+    fn receive(&self) -> Option<std::net::TcpListener> {
         let mut byte = 0u8;
         let mut iov = libc::iovec {
             iov_base: &mut byte as *mut u8 as *mut libc::c_void,
