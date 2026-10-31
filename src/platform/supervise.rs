@@ -9,7 +9,8 @@ use crate::error::{Result, SandboxError};
 use crate::platform::output::Captured;
 use crate::result::ExecutionResult;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,9 @@ pub(crate) struct Launched {
 /// The thread watching a run. Dropping it kills the run and waits for the cleanup.
 pub(crate) struct Supervisor {
     pid: u32,
+    /// Set by the thread once the run's first process is reaped: `pid` may be someone else's
+    /// from then on, so no signal goes to it.
+    reaped: Arc<AtomicBool>,
     /// Read end of a pipe the thread holds: EOF once the outcome is in, so it can be polled.
     done: OwnedFd,
     /// `None` inside: the launch failed (its error went to the caller).
@@ -79,6 +83,8 @@ impl Supervisor {
         let start = Instant::now();
         let (done_read, done_write) = crate::platform::cloexec_pipe("run done")?;
         let (tx, rx) = mpsc::sync_channel::<Result<Handles>>(1);
+        let reaped = Arc::new(AtomicBool::new(false));
+        let reaped_by_thread = reaped.clone();
         let thread = std::thread::Builder::new()
             .name("nanosandbox-run".into())
             .spawn(move || {
@@ -86,7 +92,9 @@ impl Supervisor {
                 match launch() {
                     Ok((handles, supervise)) => {
                         let _ = tx.send(Ok(handles));
-                        Some(supervise())
+                        let outcome = supervise();
+                        reaped_by_thread.store(true, Ordering::SeqCst);
+                        Some(outcome)
                     }
                     Err(e) => {
                         let _ = tx.send(Err(e));
@@ -120,6 +128,7 @@ impl Supervisor {
             pty: handles.pty,
             supervisor: Supervisor {
                 pid: handles.pid,
+                reaped,
                 done: done_read,
                 thread: Some(thread),
             },
@@ -135,6 +144,10 @@ impl Supervisor {
     /// SIGKILL to the run's first process and its group; the supervisor sees the exit and does
     /// the rest (on Linux the first process is PID-ns init, so its death takes everything).
     pub(crate) fn kill(&self) {
+        // Reaped: the pid may already be another process's (and group leader's).
+        if self.reaped.load(Ordering::SeqCst) {
+            return;
+        }
         let pid = self.pid as libc::pid_t;
         unsafe {
             libc::kill(pid, libc::SIGKILL);
@@ -254,6 +267,62 @@ pub(crate) fn drain(fd: RawFd, out: &mut Captured) -> bool {
 /// `run()`'s consumer: feeds `stdin`, captures both streams up to `max_output` each, and
 /// returns once the supervisor is done. Nothing here wakes on a timer: the supervisor's `done`
 /// pipe ends the loop.
+/// Keeps a write to a stdin pipe whose reader exited from killing the host with SIGPIPE: the
+/// host runtime may have left it at its default (a Python CLI that reset it, a C host). macOS
+/// has a per-descriptor switch; on Linux the signal is thread-directed, so blocked on this
+/// thread it leaves `write()` returning EPIPE, and one left pending is consumed before the
+/// mask is restored, or unblocking would deliver it.
+struct NoSigpipe {
+    #[cfg(target_os = "linux")]
+    restore: Option<libc::sigset_t>,
+}
+
+impl NoSigpipe {
+    #[allow(unused_variables)]
+    fn for_fd(fd: RawFd) -> Self {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            const F_SETNOSIGPIPE: libc::c_int = 73; // sys/fcntl.h; not in the libc crate
+            libc::fcntl(fd, F_SETNOSIGPIPE, 1);
+        }
+        #[cfg(target_os = "linux")]
+        let restore = unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGPIPE);
+            let mut old: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, &mut old);
+            (libc::sigismember(&old, libc::SIGPIPE) != 1).then_some(old)
+        };
+        Self {
+            #[cfg(target_os = "linux")]
+            restore,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for NoSigpipe {
+    fn drop(&mut self) {
+        let Some(old) = self.restore else {
+            return;
+        };
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGPIPE);
+            let now = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            while libc::sigtimedwait(&set, std::ptr::null_mut(), &now) < 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+            {}
+            libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+        }
+    }
+}
+
 pub(crate) fn collect(
     launched: Launched,
     stdin: Option<&[u8]>,
@@ -277,6 +346,9 @@ pub(crate) fn collect(
         set_nonblocking(fd.as_raw_fd());
         poller.watch_read(fd.as_raw_fd())?;
     }
+    let _no_sigpipe = stdin
+        .as_ref()
+        .map(|(fd, _)| NoSigpipe::for_fd(fd.as_raw_fd()));
     if let Some((fd, _)) = &stdin {
         set_nonblocking(fd.as_raw_fd());
         poller.watch_write(fd.as_raw_fd())?;

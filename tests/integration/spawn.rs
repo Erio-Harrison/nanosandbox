@@ -226,3 +226,37 @@ fn test_a_pty_command_has_its_own_terminal_not_the_hosts() {
     let result = child.wait_with_output().unwrap();
     assert!(result.stdout.contains("done"), "{result:?}");
 }
+
+/// A host that left SIGPIPE at its default (a Python CLI that reset it, a C host) must survive
+/// feeding stdin to a command that exits early. Checked in a child process of this test binary,
+/// since the disposition is process-wide.
+#[test]
+fn test_stdin_to_an_exited_command_does_not_kill_a_sigpipe_default_host() {
+    if std::env::var_os("NANOSANDBOX_SIGPIPE_HELPER").is_some() {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let sandbox = sandbox();
+        let input = vec![b'x'; 4 << 20];
+        for _ in 0..3 {
+            let result = sandbox.run_with_input("true", &[], Some(&input)).unwrap();
+            assert_eq!(result.exit_code, 0, "{result:?}");
+        }
+        println!("survived");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "spawn::test_stdin_to_an_exited_command_does_not_kill_a_sigpipe_default_host",
+            "--nocapture",
+        ])
+        .env("NANOSANDBOX_SIGPIPE_HELPER", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("survived"),
+        "status {:?}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
