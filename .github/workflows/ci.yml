@@ -56,7 +56,7 @@ jobs:
         with:
           node-version: 20
       - working-directory: crates/nanosandbox-node
-        run: npm install
+        run: npm ci
       - working-directory: crates/nanosandbox-node
         run: npm run build
       - working-directory: crates/nanosandbox-node
