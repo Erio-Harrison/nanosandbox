@@ -587,6 +587,10 @@ impl HttpProxy {
                                 "SOCKS5 request with an invalid destination name ({} bytes)",
                                 name.len()
                             );
+                            // The port too, so the request is read whole: closing with it
+                            // unread resets the connection (Windows) before the reply is seen.
+                            let mut port = [0u8; 2];
+                            client.read_exact(&mut port).await?;
                             Self::socks5_reply(&mut client, 1).await?;
                             return Ok(None);
                         }
