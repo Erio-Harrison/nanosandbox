@@ -155,8 +155,8 @@ but not fill the disk.
 
 If the host process is killed, its directory is left behind. Each directory
 holds an exclusive `flock` for the run, which the kernel drops when the
-process dies however it dies. Whichever process next creates a directory
-(at most every 5 minutes) removes the ones in `$TMPDIR` that are named
+process dies however it dies. Whichever process next starts a run or creates
+a directory (at most every 5 minutes) removes the ones in `$TMPDIR` that are named
 `nanosandbox-tmp-*`, are real directories of its own uid, are over 2 minutes
 old, and whose lock it can take. A directory a live agent holds is never
 touched, so several agents on one machine don't affect each other. The two marker files each run keeps
@@ -290,10 +290,12 @@ limit, a fork bomb forks faster than a loop of "find, kill, wait" can run,
 and a plain loop left 90 of its processes alive after one run. So each round
 first sends `SIGSTOP` to every process found, repeating until no new one turns
 up (a stopped process can't fork), then `SIGKILL`s them all and waits for
-their exit, and goes round again if any remain. The whole kill has a 250 ms
-budget; a process it couldn't kill by then (a fork bomb at the user's process
-limit, or one stuck in an uninterruptible exit, as a binary terminated by a
-launch constraint can be) is counted, logged, and the run's marker pair is
+their exit, and goes round again if any remain. The stop phase runs until it
+converges, however long that takes (a deadline there is what let the bomb
+outlive the run); only the wait for exits is bounded, to 250 ms in all. A
+process not gone by then (a fork bomb at the user's process limit, or one
+stuck in an uninterruptible exit, as a binary terminated by a launch
+constraint can be) is counted, logged, and the run's marker pair is
 left in place instead of removed, so the sweep that handles dead hosts'
 leftovers (`kill_orphans`) kills what still carries it. The fork-bomb case is
 tested with a bomb bounded by `ulimit -u` inside the sandbox.

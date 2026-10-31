@@ -83,6 +83,9 @@ impl RunMarker {
                             return Err(e);
                         }
                     };
+                    // Dead runs' markers (and the processes carrying them) are swept from here,
+                    // not only from private_tmp: a run without one must sweep too.
+                    crate::platform::private_tmp::sweep_if_due();
                     return Ok(Self {
                         denied,
                         denied_c,

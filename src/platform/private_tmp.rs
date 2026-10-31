@@ -126,8 +126,10 @@ pub(crate) fn try_flock(file: &File) -> std::io::Result<bool> {
     }
 }
 
-/// Starts a background sweep unless this process swept lately.
-fn sweep_if_due() {
+/// Starts a background sweep unless this process swept lately. Called from every private
+/// temp dir and (macOS) every run marker created, so a host that never uses `private_tmp` still
+/// sweeps dead runs' leftovers and their processes.
+pub(crate) fn sweep_if_due() {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     {
         let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
