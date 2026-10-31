@@ -102,7 +102,18 @@ fn secrets_in(home: &Path) -> Vec<PathBuf> {
 pub(crate) fn denied(config: &SandboxConfig) -> Vec<PathBuf> {
     let mut denied = Vec::new();
     if let Some(home) = home_dir() {
-        if config.hide_home {
+        // A config naming home itself has asked for all of it (the credentials stay denied);
+        // a denied path equal to a granted one would drop the grant instead.
+        let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+        let names_home = canonical(&home).is_some_and(|h| {
+            config
+                .mounts
+                .iter()
+                .map(|m| m.source.as_path())
+                .chain(std::iter::once(config.working_dir.as_path()))
+                .any(|p| canonical(p) == Some(h.clone()))
+        });
+        if config.hide_home && !names_home {
             denied.push(home.clone());
         }
         denied.extend(secrets_in(&home));

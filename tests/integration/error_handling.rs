@@ -264,3 +264,37 @@ fn test_missing_working_dir_refused() {
         .build();
     assert!(matches!(result, Err(SandboxError::PathNotFound(_))));
 }
+
+/// A deny that names nothing protects nothing: a path that doesn't exist (a typo, a literal `~`)
+/// must not build.
+#[test]
+#[cfg(unix)]
+fn test_deny_read_of_a_missing_path_is_refused() {
+    let err = Sandbox::builder()
+        .working_dir("/tmp")
+        .deny_read("~/secret-that-does-not-exist")
+        .build()
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, nanosandbox::SandboxError::PathNotFound(_)),
+        "{err:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_env_keys_with_equals_or_empty_are_refused() {
+    for key in ["A=B", ""] {
+        let err = Sandbox::builder()
+            .working_dir("/tmp")
+            .env(key, "v")
+            .build()
+            .err()
+            .unwrap();
+        assert!(
+            matches!(err, nanosandbox::SandboxError::Config { .. }),
+            "{key:?}: {err:?}"
+        );
+    }
+}

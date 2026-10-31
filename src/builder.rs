@@ -638,6 +638,26 @@ impl SandboxBuilder {
                 return Err(SandboxError::PathNotFound(mount.source.clone()));
             }
         }
+        // A deny that names nothing protects nothing: a typo (or a literal `~`) must not build.
+        for path in &self.config.deny_read {
+            if std::fs::symlink_metadata(path).is_err() {
+                return Err(SandboxError::PathNotFound(path.clone()));
+            }
+        }
+        for key in self.config.env.keys() {
+            if key.is_empty() || key.contains(['=', '\0']) {
+                return Err(SandboxError::Config {
+                    context: format!("env key {key:?}: must be non-empty, without `=` or NUL"),
+                    source: None,
+                });
+            }
+        }
+        if self.config.env.values().any(|v| v.contains('\0')) {
+            return Err(SandboxError::Config {
+                context: "env value contains NUL".into(),
+                source: None,
+            });
+        }
 
         if let Some((path, _)) = self
             .config

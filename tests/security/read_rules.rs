@@ -331,3 +331,27 @@ fn test_denied_paths_are_reported_when_asked() {
     assert_eq!(r.stdout.trim(), "done");
     assert!(r.denied_paths.is_empty());
 }
+
+/// Naming home itself with hide_home asks for all of it: the grant wins over the hiding (the
+/// credentials inside stay denied).
+#[test]
+#[cfg(unix)]
+fn test_hide_home_with_home_itself_granted_keeps_home_readable() {
+    let home = home();
+    if crate::common::skip_if_unreachable_by_nobody(&home) {
+        return;
+    }
+    let sandbox = Sandbox::builder()
+        .hide_home()
+        .read_only(&home)
+        .build()
+        .unwrap();
+    let result = sandbox
+        .run("sh", &["-c", &format!("ls {} > /dev/null", home.display())])
+        .unwrap();
+    assert_eq!(result.exit_code, 0, "{result:?}");
+    let ssh = home.join(".ssh");
+    if ssh.is_dir() {
+        assert!(!can_read(&sandbox, &ssh));
+    }
+}
