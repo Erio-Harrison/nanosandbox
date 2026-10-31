@@ -41,21 +41,23 @@ fn read_until<R: Read + AsRawFd>(r: &mut R, needle: &str, timeout: Duration) -> 
 #[test]
 fn test_output_streams_before_the_command_ends() {
     let sandbox = sandbox();
-    let start = Instant::now();
     let mut child = sandbox
         .spawn("sh", &["-c", "echo first; sleep 1; echo second"])
         .unwrap();
     let mut stdout = child.stdout.take().unwrap();
     let first = read_until(&mut stdout, "first", Duration::from_secs(5));
     assert_eq!(first, "first\n");
-    assert!(
-        start.elapsed() < Duration::from_millis(900),
-        "{:?}",
-        start.elapsed()
-    );
-
+    // Streaming shows as the gap between the two lines: output held until the command ends
+    // would deliver them together. A bound on when "first" arrives would depend on the
+    // host's load instead; a loaded host only widens this gap.
+    let first_at = Instant::now();
     let second = read_until(&mut stdout, "second", Duration::from_secs(5));
     assert_eq!(second, "second\n");
+    assert!(
+        first_at.elapsed() >= Duration::from_millis(500),
+        "{:?}",
+        first_at.elapsed()
+    );
     let result = child.wait().unwrap();
     assert_eq!(result.exit_code, 0);
 }
