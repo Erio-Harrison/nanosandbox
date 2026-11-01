@@ -488,14 +488,22 @@ How requests are relayed:
   says and nothing after it, so a pipelined second request (with a `Host`
   of its own) never reaches the server. A request whose body length is
   ambiguous (both headers, or a `Content-Length` that isn't one decimal) is
-  refused with a `400`.
+  refused with a `400`. So is one with a control character or a lone CR in
+  its head (a lenient server would take the CR for a line end and read the
+  rest as a header of its own), a method that isn't a token, a version that
+  isn't `HTTP/x.y`, or a destination that is neither a DNS name nor an IP
+  address (the same rule as a SOCKS5 name: what the program invents doesn't
+  reach the logs or `network_refusals`). `Connection` naming
+  `Content-Length` or `Transfer-Encoding` doesn't strip them: the body is
+  forwarded by them.
 - HTTPS isn't decrypted. By default what a client says inside TLS (its
   SNI) isn't checked against the host the tunnel was opened to;
   `require_host_match()` cuts a tunnel whose handshake names another host
   (domain fronting through a CDN both share). Nothing the client sends is
   forwarded until its first bytes are either a complete ClientHello (even
   one spread over several TLS records) or plainly not TLS; a hello that
-  can't be read is cut too. The server's bytes flow from the start, so a
+  can't be read is cut too, as is one with two `server_name` extensions or
+  two host names in one (servers differ on which they take). The server's bytes flow from the start, so a
   protocol where the server speaks first still works.
 - Each run has a proxy listener of its own, closed with the run along with
   its open connections.

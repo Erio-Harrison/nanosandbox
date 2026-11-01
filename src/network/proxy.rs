@@ -125,7 +125,8 @@ impl Rule {
             return false;
         }
         if self.pattern == host {
-            return true;
+            // Not a request that spells the wildcard out (`*.example.com` as a host name).
+            return !host.contains('*');
         }
         // An IP literal, or anything else that isn't a DNS name (`::ffff:1.2.3.4%x.example.com`),
         // matches only exactly. "*.example.com" matches example.com and anything ending in
@@ -581,7 +582,7 @@ impl HttpProxy {
                     client.read_exact(&mut name).await?;
                     // Arbitrary bytes otherwise, and they'd end up in logs and the result.
                     match std::str::from_utf8(&name).ok().and_then(normalize_host) {
-                        Some(host) if is_dns_name(&host) || host.parse::<IpAddr>().is_ok() => host,
+                        Some(host) if is_destination(&host) => host,
                         _ => {
                             tracing::debug!(
                                 "SOCKS5 request with an invalid destination name ({} bytes)",
@@ -706,6 +707,18 @@ impl HttpProxy {
 
     /// The request line's target, or why it can't be served.
     fn parse_request(head: &str) -> Result<Request<'_>, &'static str> {
+        // Control characters, and a CR that isn't half of a CRLF, are refused: forwarded as they
+        // are, a lenient server would take that CR for a line end and read the rest as a header
+        // of its own (a second `Host`).
+        let bytes = head.as_bytes();
+        if bytes.iter().enumerate().any(|(i, &b)| match b {
+            b'\r' => bytes.get(i + 1) != Some(&b'\n'),
+            b'\n' | b'\t' => false,
+            0..=0x1f | 0x7f => true,
+            _ => false,
+        }) {
+            return Err("Bad Request");
+        }
         // Obsolete line folding (RFC 7230 3.2.4) is refused: `forwarded_head` strips hop-by-hop
         // headers line by line, so a folded line could smuggle Host or Proxy-Authorization past it.
         if head
@@ -720,9 +733,23 @@ impl HttpProxy {
             return Err("Bad Request");
         };
         let version = parts.next().unwrap_or("HTTP/1.1");
+        let is_token = |s: &str| {
+            s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        };
+        let is_version = version.len() == 8
+            && version.starts_with("HTTP/")
+            && version.as_bytes()[5].is_ascii_digit()
+            && version.as_bytes()[6] == b'.'
+            && version.as_bytes()[7].is_ascii_digit();
+        if !is_token(method) || !is_version || parts.next().is_some() {
+            return Err("Bad Request");
+        }
 
         if method.eq_ignore_ascii_case("CONNECT") {
-            let (host, port) = parse_authority(target, 443).ok_or("Bad Request")?;
+            let (host, port) = parse_authority(target, 443)
+                .filter(|(host, _)| is_destination(host))
+                .ok_or("Bad Request")?;
             return Ok(Request::Connect { host, port });
         }
         // Absolute form only: routing by Host would trust a client-controlled header.
@@ -733,7 +760,9 @@ impl HttpProxy {
             .ok_or("Absolute URL required")?;
         let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
         let authority = &rest[..end];
-        let (host, port) = parse_authority(authority, 80).ok_or("Bad Request")?;
+        let (host, port) = parse_authority(authority, 80)
+            .filter(|(host, _)| is_destination(host))
+            .ok_or("Bad Request")?;
         let path = match &rest[end..] {
             "" => "/".to_string(),
             p if p.starts_with('/') => p.to_string(),
@@ -817,7 +846,12 @@ impl HttpProxy {
         for line in headers {
             if !line.starts_with([' ', '\t']) {
                 let name = name(line);
-                keep = !HOP_BY_HOP.contains(&name.as_str()) && !named_by_connection.contains(&name);
+                // The framing headers stay whatever `Connection` says: the body is forwarded
+                // by them, and a server not told its length would read the body as a request.
+                let framing = name == "content-length" || name == "transfer-encoding";
+                keep = framing
+                    || (!HOP_BY_HOP.contains(&name.as_str())
+                        && !named_by_connection.contains(&name));
             }
             if keep {
                 out.push_str(line);
@@ -1140,6 +1174,7 @@ fn parse_client_hello(message: &[u8]) -> Hello {
         let extensions = take(extensions_len)?;
 
         let mut at = 0usize;
+        let mut sni = None;
         while at + 4 <= extensions.len() {
             let kind = u16_at(&extensions[at..]);
             let len = u16_at(&extensions[at + 2..]);
@@ -1148,22 +1183,30 @@ fn parse_client_hello(message: &[u8]) -> Hello {
             if kind != 0 {
                 continue;
             }
+            // Two of them, or two names in one: servers differ on which they take.
+            if sni.is_some() {
+                return None;
+            }
             // ServerNameList: length, then entries of type (0 = host_name), length, name.
             let list_len = u16_at(data.get(..2)?);
             let list = data.get(2..2 + list_len)?;
+            let mut host_name = None;
             let mut p = 0usize;
             while p + 3 <= list.len() {
                 let name_type = list[p];
                 let name_len = u16_at(&list[p + 1..]);
                 let name = list.get(p + 3..p + 3 + name_len)?;
                 if name_type == 0 {
-                    return Some(normalize_host(std::str::from_utf8(name).ok()?));
+                    if host_name.is_some() {
+                        return None;
+                    }
+                    host_name = Some(normalize_host(std::str::from_utf8(name).ok()?));
                 }
                 p += 3 + name_len;
             }
-            return Some(None);
+            sni = Some(host_name.flatten());
         }
-        Some(None)
+        Some(sni.flatten())
     }
     match parse(message) {
         Some(sni) => Hello::Tls(sni),
@@ -1194,6 +1237,12 @@ fn parse_authority(authority: &str, default: u16) -> Option<(String, u16)> {
 fn normalize_host(host: &str) -> Option<String> {
     let host = host.strip_suffix('.').unwrap_or(host);
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// A destination the proxy will take a request for: a DNS name or an IP address. Anything
+/// else is the program's own invention and would end up in logs and the run's result.
+fn is_destination(host: &str) -> bool {
+    host.len() <= 253 && (is_dns_name(host) || host.parse::<IpAddr>().is_ok())
 }
 
 /// Letters, digits, `-` and `_` in dot-separated labels, none empty.
@@ -1267,6 +1316,10 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
 }
 
 #[cfg(test)]
+#[path = "proxy_fuzz.rs"]
+mod fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
@@ -1294,6 +1347,19 @@ mod tests {
             policy.check("other.com", 443),
             Err(RefusalReason::NotAllowed)
         );
+    }
+
+    #[test]
+    fn test_a_wildcard_pattern_is_not_a_host_name() {
+        let policy = make_policy(&["*.example.com"], &[]);
+        assert!(policy.check("*.example.com", 443).is_err());
+        assert!(policy.check("a.example.com", 443).is_ok());
+        let denied = make_policy(
+            &["example.com", "*.example.com"],
+            &[("*.example.com", None)],
+        );
+        assert!(denied.check("*.example.com", 443).is_err());
+        assert!(denied.check("a.example.com", 443).is_err());
     }
 
     #[test]
@@ -1679,7 +1745,7 @@ mod tests {
         proxy_limited(policy, MAX_CONNECTIONS).await
     }
 
-    async fn proxy_limited(
+    pub(super) async fn proxy_limited(
         policy: Policy,
         limit: usize,
     ) -> (SocketAddr, Arc<Refusals>, oneshot::Sender<()>) {
@@ -1701,7 +1767,7 @@ mod tests {
     }
 
     /// A policy allowing localhost on loopback, with `require_host_match` if asked.
-    fn localhost_policy(require_host_match: bool) -> Policy {
+    pub(super) fn localhost_policy(require_host_match: bool) -> Policy {
         let mut p = make_policy(&["localhost"], &[]);
         p.allow_private = true;
         p.require_host_match = require_host_match;
@@ -1736,7 +1802,7 @@ mod tests {
     }
 
     /// An echo server that reports what it got.
-    async fn echo_upstream() -> u16 {
+    pub(super) async fn echo_upstream() -> u16 {
         upstream(|mut s| async move {
             let got = read_all(&mut s).await;
             let _ = s.write_all(format!("got:{got}").as_bytes()).await;
