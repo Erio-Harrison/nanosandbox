@@ -19,6 +19,10 @@ mod private_tmp;
 #[path = "security/read_rules.rs"]
 mod read_rules;
 
+#[path = "security/path_spellings.rs"]
+#[cfg(unix)]
+mod path_spellings;
+
 #[path = "security/read_only_inside_writable.rs"]
 #[cfg(unix)]
 mod read_only_inside_writable;

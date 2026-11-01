@@ -157,7 +157,7 @@ impl MountPlan {
             .filter(|m| Self::needs_bind(config, &tmpfs, m))
             .collect();
 
-        let masks = Self::masks(config, &tmpfs)?;
+        let masks = Self::masks(config, &tmpfs, &binds)?;
 
         // A read-only mount (or a mask) in a writable area protects the path but not its parents:
         // `mv dir dir.bak` then a new `dir` is writable. Mount points can't be renamed, so each
@@ -284,8 +284,13 @@ impl MountPlan {
 
     /// Denied paths (`read_rules::denied`) inside a writable area, and whether each is a directory.
     /// Landlock only adds access, so the area's rule would make them readable; they're mounted
-    /// over instead. Ones under a tmpfs are hidden by it already.
-    fn masks(config: &SandboxConfig, tmpfs: &[(PathBuf, u64)]) -> Result<Vec<(PathBuf, bool)>> {
+    /// over instead. Ones under a tmpfs are hidden by it already, unless a bind mount brings
+    /// them back (a workspace under `/tmp` is bound into the tmpfs over it).
+    fn masks(
+        config: &SandboxConfig,
+        tmpfs: &[(PathBuf, u64)],
+        binds: &[&Mount],
+    ) -> Result<Vec<(PathBuf, bool)>> {
         if config.rootfs.is_some() {
             return Ok(Vec::new());
         }
@@ -295,7 +300,13 @@ impl MountPlan {
         let mut masks = Vec::new();
         for denied in crate::platform::read_rules::denied(config) {
             let inside = areas.iter().any(|a| *a != denied && denied.starts_with(a));
-            if !inside || tmpfs.iter().any(|(t, _)| denied.starts_with(t)) {
+            let hidden = tmpfs.iter().any(|(t, _)| denied.starts_with(t))
+                && !binds.iter().any(|b| {
+                    let target =
+                        std::fs::canonicalize(&b.target).unwrap_or_else(|_| b.target.clone());
+                    denied.starts_with(target)
+                });
+            if !inside || hidden {
                 continue;
             }
             if let Some(granted) =

@@ -116,6 +116,47 @@ fn test_deny_read_inside_a_writable_dir() {
     assert_eq!(r.stdout.trim(), "ok", "{}", r.stderr);
 }
 
+/// A workspace under `/tmp`, `/var/tmp` or `/dev/shm` (a job's scratch directory) is bound into
+/// the tmpfs over it on Linux; the denied paths inside it are still denied.
+#[test]
+#[cfg(unix)]
+fn test_deny_read_holds_in_a_workspace_under_a_temp_directory() {
+    if crate::common::skip_without_userns_privileges() {
+        return;
+    }
+    for base in ["/tmp", "/var/tmp", "/dev/shm"] {
+        if !std::path::Path::new(base).is_dir() {
+            continue;
+        }
+        let dir = crate::common::sandbox_tempdir_in(base);
+        let ws = dir.path().canonicalize().unwrap();
+        if crate::common::skip_if_unreachable_by_nobody(&ws) {
+            return;
+        }
+        std::fs::create_dir_all(ws.join("secrets")).unwrap();
+        std::fs::write(ws.join("secrets/key"), "SECRET").unwrap();
+        std::fs::write(ws.join(".env"), "SECRET").unwrap();
+        std::fs::write(ws.join("open.txt"), "fine").unwrap();
+        let sandbox = Sandbox::builder()
+            .working_dir(&ws)
+            .writable(&ws)
+            .deny_read(ws.join("secrets"))
+            .deny_read(ws.join(".env"))
+            .build()
+            .unwrap();
+        let r = sandbox
+            .run("sh", &["-c", "cat secrets/key .env; cat open.txt"])
+            .unwrap();
+        assert!(!r.stdout.contains("SECRET"), "{base}: {}", r.stdout);
+        assert!(
+            r.stdout.contains("fine"),
+            "{base}: {}{}",
+            r.stdout,
+            r.stderr
+        );
+    }
+}
+
 /// SSH keys can't be read by default; checked only where ~/.ssh has a file.
 #[test]
 #[cfg(unix)]
