@@ -586,6 +586,14 @@ fn test_authority_and_rules_only_let_names_and_addresses_through() {
 
 // ---- live proxy ----
 
+/// Loopback by address: `localhost` resolves to `::1` first, and on Windows a connection to a
+/// port nobody listens on there takes a second or two to fail.
+fn loopback_policy(require_host_match: bool) -> Policy {
+    let mut policy = localhost_policy(require_host_match);
+    policy.allow.push(Rule::parse("127.0.0.1").unwrap());
+    policy
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -692,7 +700,7 @@ fn socks5_bytes(rng: &mut Rng, upstream: u16) -> Vec<u8> {
 fn storm_payload(rng: &mut Rng, upstream: u16) -> Vec<u8> {
     match rng.below(6) {
         0 | 1 => {
-            let mut head = http_head(rng).replace("a.test", &format!("localhost:{upstream}"));
+            let mut head = http_head(rng).replace("a.test", &format!("127.0.0.1:{upstream}"));
             if rng.chance(30) {
                 head.push_str(&String::from_utf8_lossy(&rng.some(60)));
             }
@@ -705,7 +713,7 @@ fn storm_payload(rng: &mut Rng, upstream: u16) -> Vec<u8> {
         2 => rng.some(200),
         3 => socks5_bytes(rng, upstream),
         4 => {
-            let mut bytes = format!("CONNECT localhost:{upstream} HTTP/1.1\r\n\r\n").into_bytes();
+            let mut bytes = format!("CONNECT 127.0.0.1:{upstream} HTTP/1.1\r\n\r\n").into_bytes();
             let (message, _) = random_hello(rng);
             let mut hello = records(&message, 1 + rng.below(60));
             if rng.chance(50) {
@@ -716,7 +724,7 @@ fn storm_payload(rng: &mut Rng, upstream: u16) -> Vec<u8> {
         }
         _ => {
             let mut bytes = format!(
-                "POST http://localhost:{upstream}/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                "POST http://127.0.0.1:{upstream}/ HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"
             )
             .into_bytes();
             for _ in 0..rng.below(4) {
@@ -756,7 +764,7 @@ async fn test_a_storm_of_malformed_clients_leaves_the_proxy_whole() {
     let upstream_port = echo_upstream().await;
     let mut failures = Vec::new();
     for require_host_match in [false, true] {
-        let mut policy = localhost_policy(require_host_match);
+        let mut policy = loopback_policy(require_host_match);
         policy.allow.push(Rule::parse("*.a.test").unwrap());
         policy.idle_timeout = Duration::from_secs(10);
         const SLOTS: usize = 16;
@@ -800,7 +808,7 @@ async fn test_a_storm_of_malformed_clients_leaves_the_proxy_whole() {
                 client.set_nodelay(true).unwrap();
                 client
                     .write_all(
-                        format!("GET http://localhost:{upstream_port}/ HTTP/1.1\r\n\r\n")
+                        format!("GET http://127.0.0.1:{upstream_port}/ HTTP/1.1\r\n\r\n")
                             .as_bytes(),
                     )
                     .await
@@ -898,7 +906,7 @@ fn framed_body(rng: &mut Rng) -> (Vec<u8>, String) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_only_the_framed_body_is_forwarded_and_never_a_pipelined_request() {
     let (port, mut recorded) = recording_upstream().await;
-    let (proxy, _, _stop) = proxy_limited(localhost_policy(false), 8).await;
+    let (proxy, _, _stop) = proxy_limited(loopback_policy(false), 8).await;
     let mut rng = Rng::new(9);
     let started = std::time::Instant::now();
     for i in 0..connections(400) {
@@ -908,9 +916,9 @@ async fn test_only_the_framed_body_is_forwarded_and_never_a_pipelined_request() 
             started.elapsed()
         );
         let (body, framing) = framed_body(&mut rng);
-        let head = format!("POST http://localhost:{port}/p HTTP/1.1\r\nX-N: {i}\r\n{framing}\r\n");
+        let head = format!("POST http://127.0.0.1:{port}/p HTTP/1.1\r\nX-N: {i}\r\n{framing}\r\n");
         let second =
-            format!("GET http://localhost:{port}/SMUGGLED HTTP/1.1\r\nHost: evil.test\r\n\r\n");
+            format!("GET http://127.0.0.1:{port}/SMUGGLED HTTP/1.1\r\nHost: evil.test\r\n\r\n");
         let mut wire = head.clone().into_bytes();
         wire.extend_from_slice(&body);
         wire.extend_from_slice(second.as_bytes());
@@ -940,7 +948,7 @@ async fn test_only_the_framed_body_is_forwarded_and_never_a_pipelined_request() 
             "POST",
             "/p",
             "HTTP/1.1",
-            &format!("localhost:{port}"),
+            &format!("127.0.0.1:{port}"),
         )
         .into_bytes();
         expect.extend_from_slice(&body);
