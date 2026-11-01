@@ -44,6 +44,12 @@ fn read_reports(fd: RawFd) -> (Option<i32>, bool) {
     (signal, bytes.contains(&0))
 }
 
+/// The limit kills to report: none when the command exited by its own means, since a kill sent
+/// just before then came too late to matter.
+fn kills_reported(exited: bool, kills: (bool, bool, bool)) -> (bool, bool, bool) {
+    if exited { (false, false, false) } else { kills }
+}
+
 /// A pidfd (kernel 5.3+), readable once `pid` has exited, so the loop wakes on the exit instead
 /// of at a tick. None on older kernels, where the loop keeps a 10 ms tick for it.
 fn exit_watch(pid: nix::unistd::Pid) -> Option<OwnedFd> {
@@ -144,9 +150,10 @@ pub(super) fn supervise(
                 // An exit by its own means the kill a limit sent (if any) came too late to
                 // matter: init dies by SIGKILL when it did. Don't report a kill that didn't
                 // happen alongside a normal exit code.
-                killed_by_timeout = false;
-                killed_by_tmp_limit = false;
-                killed_by_cpu_limit = false;
+                (killed_by_timeout, killed_by_tmp_limit, killed_by_cpu_limit) = kills_reported(
+                    true,
+                    (killed_by_timeout, killed_by_tmp_limit, killed_by_cpu_limit),
+                );
                 (libc::WEXITSTATUS(status), reported)
             } else {
                 let sig = libc::WTERMSIG(status);
@@ -209,6 +216,22 @@ mod tests {
         nix::unistd::write(&write, bytes).unwrap();
         drop(write);
         read_reports(read.as_raw_fd())
+    }
+
+    #[test]
+    fn test_a_normal_exit_drops_the_limit_kills_that_came_too_late() {
+        assert_eq!(
+            kills_reported(true, (true, true, true)),
+            (false, false, false)
+        );
+        assert_eq!(
+            kills_reported(true, (false, true, false)),
+            (false, false, false)
+        );
+        assert_eq!(
+            kills_reported(false, (true, false, true)),
+            (true, false, true)
+        );
     }
 
     #[test]

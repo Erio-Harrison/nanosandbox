@@ -111,6 +111,14 @@ pub(super) fn prepare_cgroup(config: &SandboxConfig) -> Result<Option<CgroupMana
     Ok(Some(cg))
 }
 
+/// `vars` without the entries that aren't UTF-8 (`std::env::vars` panics on one).
+fn utf8_vars(
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> HashMap<String, String> {
+    vars.filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect()
+}
+
 /// The sandboxed program's environment: this process's env (unless `clear_env(true)`) plus
 /// `config.env`. `TMPDIR`, and `HOME` if unset, point at `private_tmp_path` when on; proxy
 /// vars when `proxy_active`; default `PATH` if unset.
@@ -122,10 +130,7 @@ pub(super) fn prepare_env(
     let mut env: HashMap<String, String> = if config.clear_env {
         HashMap::new()
     } else {
-        // vars() panics on a non-UTF-8 entry; such an entry is skipped instead.
-        std::env::vars_os()
-            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect()
+        utf8_vars(std::env::vars_os())
     };
     env.extend(config.env.clone());
 
@@ -231,5 +236,25 @@ impl ExecBuffers {
             envp_ptrs,
             exec_paths,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    #[test]
+    fn test_non_utf8_env_entries_are_skipped_not_fatal() {
+        let bad = OsString::from_vec(vec![b'x', 0xff, 0xfe]);
+        let vars = vec![
+            (OsString::from("GOOD"), OsString::from("1")),
+            (OsString::from("BAD_VALUE"), bad.clone()),
+            (bad, OsString::from("2")),
+        ];
+        let env = utf8_vars(vars.into_iter());
+        assert_eq!(env.len(), 1);
+        assert_eq!(env["GOOD"], "1");
     }
 }
