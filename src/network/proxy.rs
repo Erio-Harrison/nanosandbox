@@ -446,6 +446,9 @@ impl HttpProxy {
         policy: &Policy,
         refusals: &Refusals,
     ) -> std::io::Result<()> {
+        // Relayed in the pieces they arrive in: Nagle's algorithm would hold a small write for
+        // the peer's delayed ACK (up to 200 ms on Windows) once per piece.
+        let _ = client.set_nodelay(true);
         // A SOCKS5 client starts with its version byte; an HTTP request line starts with a method.
         let mut first = [0u8; 1];
         match tokio::time::timeout(HEADER_TIMEOUT, client.peek(&mut first)).await {
@@ -1032,7 +1035,10 @@ impl HttpProxy {
             let mut last = std::io::Error::new(std::io::ErrorKind::NotFound, "no address");
             for addr in usable {
                 match TcpStream::connect(addr).await {
-                    Ok(stream) => return Ok(stream),
+                    Ok(stream) => {
+                        let _ = stream.set_nodelay(true);
+                        return Ok(stream);
+                    }
                     Err(e) => last = e,
                 }
             }

@@ -445,13 +445,18 @@ fn test_host_descriptors_do_not_reach_the_command() {
     let path = dir.path().join("host_private.txt");
     std::fs::write(&path, "original\n").unwrap();
     let c = CString::new(path.to_str().unwrap()).unwrap();
-    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDWR) };
-    assert!(fd >= 0);
+    let low = unsafe { libc::open(c.as_ptr(), libc::O_RDWR) };
+    assert!(low >= 0);
+    // A fixed high number, whatever else the test binary has open; F_DUPFD leaves CLOEXEC off.
+    let fd = unsafe { libc::fcntl(low, libc::F_DUPFD, 20) };
+    unsafe { libc::close(low) };
+    assert!(fd >= 20);
 
+    // Written through /dev/fd/N: dash's `>&N` only takes a single digit, and this fd isn't.
     let sandbox = Sandbox::builder().working_dir("/tmp").build().unwrap();
     let script = format!(
         "test -e /dev/fd/{fd} && echo open || echo closed; \
-         echo PWNED >&{fd} && echo wrote || echo refused"
+         echo PWNED > /dev/fd/{fd} && echo wrote || echo refused"
     );
     let result = sandbox.run("sh", &["-c", &script]).unwrap();
     unsafe { libc::close(fd) };

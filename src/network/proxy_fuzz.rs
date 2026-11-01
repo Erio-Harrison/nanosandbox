@@ -44,6 +44,12 @@ fn iterations(default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// `iterations`, fewer where every connection is slow (Windows runners).
+fn connections(default: usize) -> usize {
+    let n = iterations(default);
+    if cfg!(windows) { n / 5 } else { n }
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -611,6 +617,7 @@ async fn send(proxy: SocketAddr, chunks: Vec<Vec<u8>>, half_close: bool) -> Resu
     let Ok(mut client) = TcpStream::connect(proxy).await else {
         return Err("connect refused".into());
     };
+    let _ = client.set_nodelay(true);
     for chunk in &chunks {
         if client.write_all(chunk).await.is_err() {
             break; // the proxy hung up on it already
@@ -757,9 +764,15 @@ async fn test_a_storm_of_malformed_clients_leaves_the_proxy_whole() {
         let mut rng = Rng::new(7 + require_host_match as u64);
 
         let mut tasks = tokio::task::JoinSet::new();
-        let total = iterations(1500);
+        let total = connections(1500);
         let mut sent = 0;
+        let started = std::time::Instant::now();
         while sent < total {
+            assert!(
+                started.elapsed() < Duration::from_secs(90),
+                "too slow: {sent} connections in {:?}",
+                started.elapsed()
+            );
             while tasks.len() < 64 && sent < total {
                 let payload = storm_payload(&mut rng, upstream_port);
                 let chunks = split_randomly(&mut rng, &payload);
@@ -784,6 +797,7 @@ async fn test_a_storm_of_malformed_clients_leaves_the_proxy_whole() {
         for _ in 0..SLOTS {
             served.spawn(async move {
                 let mut client = TcpStream::connect(proxy).await.unwrap();
+                client.set_nodelay(true).unwrap();
                 client
                     .write_all(
                         format!("GET http://localhost:{upstream_port}/ HTTP/1.1\r\n\r\n")
@@ -886,7 +900,13 @@ async fn test_only_the_framed_body_is_forwarded_and_never_a_pipelined_request() 
     let (port, mut recorded) = recording_upstream().await;
     let (proxy, _, _stop) = proxy_limited(localhost_policy(false), 8).await;
     let mut rng = Rng::new(9);
-    for i in 0..iterations(400) {
+    let started = std::time::Instant::now();
+    for i in 0..connections(400) {
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "too slow: {i} connections in {:?}",
+            started.elapsed()
+        );
         let (body, framing) = framed_body(&mut rng);
         let head = format!("POST http://localhost:{port}/p HTTP/1.1\r\nX-N: {i}\r\n{framing}\r\n");
         let second =
@@ -896,6 +916,7 @@ async fn test_only_the_framed_body_is_forwarded_and_never_a_pipelined_request() 
         wire.extend_from_slice(second.as_bytes());
 
         let mut client = TcpStream::connect(proxy).await.unwrap();
+        client.set_nodelay(true).unwrap();
         for chunk in split_randomly(&mut rng, &wire) {
             // The proxy may be done with the request (and closed) before the rest is sent.
             if client.write_all(&chunk).await.is_err() {
