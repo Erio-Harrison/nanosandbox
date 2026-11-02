@@ -1,6 +1,6 @@
 {
   "name": "nanosandbox",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Lightweight cross-platform sandbox for secure code execution",
   "main": "index.js",
   "types": "index.d.ts",
@@ -46,12 +46,5 @@
   "files": [
     "index.js",
     "index.d.ts"
-  ],
-  "optionalDependencies": {
-    "nanosandbox-darwin-x64": "0.3.3",
-    "nanosandbox-darwin-arm64": "0.3.3",
-    "nanosandbox-linux-x64-gnu": "0.3.3",
-    "nanosandbox-linux-arm64-gnu": "0.3.3",
-    "nanosandbox-win32-x64-msvc": "0.3.3"
-  }
+  ]
 }

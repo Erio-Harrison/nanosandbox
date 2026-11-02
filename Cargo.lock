@@ -445,7 +445,7 @@ dependencies = [
 
 [[package]]
 name = "nanosandbox"
-version = "0.3.3"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "libc",

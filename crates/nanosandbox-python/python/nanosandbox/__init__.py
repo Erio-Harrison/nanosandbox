@@ -28,7 +28,7 @@ from ._nanosandbox import (
     GB,
 )
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 __all__ = [
     "Sandbox",

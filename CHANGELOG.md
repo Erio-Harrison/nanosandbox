@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.4.0
+
+### Breaking
+
+- `build()` refuses a `deny_read` path that doesn't exist (it would have left whatever is
+  created there later readable), and `env` keys that are empty or contain `=` or NUL.
+- `allow_network`: a wildcard matches DNS names only and needs two labels (`*.com` is refused),
+  entries that can't work are refused at `build()`, and this machine's own interface addresses
+  count as non-public.
+- The `agent_executor` and `data_analysis` presets, and `nanosandbox-mcp`, hide the home
+  directory except toolchains and caches. Logins of AI coding tools and `~/.env` join the
+  default deny list.
+- The proxy relays plain HTTP one request per connection (`Connection: close`, `Host` taken from
+  the URL). A request with a control character or a lone CR in its head, a method that isn't a
+  token, a version that isn't `HTTP/x.y`, or a destination that is neither a DNS name nor an IP
+  address gets a `400`. At most 256 connections are open per run.
+- The command runs in its own session: it can't read from, write to or type into the caller's
+  terminal. Use `spawn_pty()` for a terminal.
+- macOS: with `allow_network`, `trustd` and `ocspd` are left out of the profile, so programs that
+  verify certificates through Security.framework (Go, Swift) fail TLS verification. `allow_trustd()`
+  puts them back. Only the user's own `T/` under `/var/folders` is writable by default.
+- Linux: `socket(AF_VSOCK, ...)` is denied by the syscall filter.
+- Windows: `build()` refuses `cpu_limit` where the host's hypervisor scheduler ignores it.
+
+### Security
+
+- Linux: a `deny_read` path inside a workspace under `/tmp`, `/var/tmp` or `/dev/shm` was
+  readable (also under a read-only grant). The workspace is bound into the tmpfs over those
+  directories and the path was assumed hidden by it.
+- A host descriptor opened without close-on-exec no longer reaches the command, so it can't
+  write wherever the descriptor points. Both platforms.
+- A run can't read, write or remove another run's private temp directory. macOS: the size limit
+  and the removal hold against a subdirectory the command made unlistable.
+- `require_host_match` reads a hello split over several TLS records, relays nothing before the
+  hello is checked, and cuts one that names two hosts. Plain HTTP forwards only one request's
+  body, so a pipelined second request with another `Host` never reaches the server, and
+  `Connection` can't strip `Content-Length`. A lone CR in a header can't smuggle a second `Host`.
+- Linux: with a `rootfs`, mount targets resolve inside it, so a planted symlink can't make the
+  setup touch the host. A `read_only` path inside a writable one is judged by canonical paths, and
+  a hard link to a denied file made on the host is denied too, or the build refused.
+- macOS: `hide_home` limits preference reads to the global domain. A fork bomb is stopped
+  completely when a run is killed, and leftover processes and markers of dead runs are swept
+  by every run, not only by runs with a `private_tmp`.
+
+### Added
+
+- `spawn()` and `spawn_pty()` (Unix): stream a command's input and output while it runs, with no
+  output cap and a terminal of its own. `Child` has `kill()`, `try_wait()`, `wait()` and `resize()`.
+- Network rules: `host:port` entries, `deny_network()` and `deny_network_with_reason()` (deny, then
+  allow), `require_host_match()`, and SOCKS5 on the proxy port. `ExecutionResult.network_refusals`
+  lists every refusal with its port and reason; `RefusalReason` has `code()` and `by_policy()`.
+- macOS: `report_denials()` and `ExecutionResult.denied_paths`; `allow_trustd()`.
+- Windows: each command runs in a Job Object with memory, process-count and CPU-time limits.
+- The Python and Node bindings take the new options, and Python ships type stubs.
+  `nanosandbox-mcp` takes `--deny-network` and `--report-denials`.
+
+### Fixed
+
+- Limits and sizes are validated instead of panicking: Python raises `ValueError`, Node throws
+  `InvalidArg` (it used to abort the process), the MCP server refuses them when parsing.
+- Feeding stdin to a command that has already exited can't kill the host with `SIGPIPE`.
+- Linux: a timeout that races a normal exit no longer reports a kill; a FIFO at a bind target
+  fails instead of blocking the next run; the wait for the network setup is bounded; a
+  non-UTF-8 environment variable is skipped instead of panicking.
+- The proxy no longer stalls on small writes (Nagle with delayed ACK), and reads a SOCKS5
+  request whole before refusing it.
+- `hide_home` with the home directory itself granted keeps home readable.
+
 ## 0.3.0
 
 ### Breaking
