@@ -338,7 +338,13 @@ fn test_many_sandboxes_at_once_do_not_trip_over_each_other() {
                     _ => "echo hi; kill -9 $$",
                 };
                 match sandbox.run("sh", &["-c", script]) {
-                    Ok(r) if (t + i) % 4 != 3 && !r.stdout.contains("hi") => {
+                    // (A directory the command made unlistable can't be measured against the
+                    // private temp limit, so macOS ends the run as over it: not a failure.)
+                    Ok(r)
+                        if (t + i) % 4 != 3
+                            && !r.stdout.contains("hi")
+                            && !((t + i) % 4 == 1 && r.killed_by_tmp_limit) =>
+                    {
                         failures.push(format!("thread {t} run {i}: {r:?}"))
                     }
                     Err(e) => failures.push(format!("thread {t} run {i}: {e}")),
