@@ -509,6 +509,10 @@ impl Drop for Permit<'_> {
 }
 
 #[cfg(test)]
+#[path = "protocol_fuzz.rs"]
+mod fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

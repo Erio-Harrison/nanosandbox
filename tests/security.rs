@@ -23,6 +23,10 @@ mod read_rules;
 #[cfg(unix)]
 mod path_spellings;
 
+#[path = "security/rule_matrix.rs"]
+#[cfg(unix)]
+mod rule_matrix;
+
 #[path = "security/read_only_inside_writable.rs"]
 #[cfg(unix)]
 mod read_only_inside_writable;
