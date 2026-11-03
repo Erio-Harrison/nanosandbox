@@ -327,11 +327,26 @@ renamed to where the deny doesn't reach.
 from `Command::pre_exec` between `fork()` and `exec()`.
 
 `memory_limit` can't go through `setrlimit`: the kernel rejects
-`RLIMIT_AS`. Instead, the wait loop polls physical footprint
-(`proc_pid_rusage`) summed over every process of the run (see Process
-Cleanup, above) every 10 ms, 2 ms once past 60% of the limit, and kills the
-run once it's over. Without a `memory_limit` nothing is polled: the loop
-sleeps until output, the exit, or the wall deadline.
+`RLIMIT_AS`. Instead, the wait loop reads physical footprint
+(`proc_pid_rusage`) summed over every process of the run every 10 ms, 2 ms
+once past 60% of the limit, and kills the run once it's over. Which
+processes those are comes from kqueue events, not from a search: the first
+process is watched for `NOTE_FORK`/`NOTE_EXIT`, a fork lists the new
+children and watches them in turn, an exit drops one (`members.rs`;
+`NOTE_TRACK` is not supported on macOS). A child that forks and exits before
+it can be listed may leave a descendant outside the tree, so such a fork
+asks for one scan by run marker (at most every 100 ms), which takes in what
+was missed. Finding the run's processes by marker lists and checks every
+process of the user, and doing that on each read cost an idle sandbox about
+16% of a core (100 of them filled ten). Without a `memory_limit` nothing is
+read: the loop sleeps until output, the exit, or the wall deadline.
+
+The reads themselves can't be event-driven. The kernel's per-process limit
+(jetsam, `posix_spawnattr_setjetsam_ext`) kills at once without polling, but
+it limits one process, not the run's total, and a process exec'd from the
+limited one doesn't inherit it (a `sh` limited to 50 MB started a `perl`
+that allocated 200 MB). A run that goes through a shell would be left
+unlimited, so it isn't used.
 `RLIMIT_NPROC` for `max_pids` isn't used either, for an unrelated reason:
 it counts every process the user has, not just the sandbox's -- there's no
 macOS equivalent to cgroups' `pids.max`, so `max_pids` is refused instead

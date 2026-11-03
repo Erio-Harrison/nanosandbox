@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use super::MacOSExecutor;
 use super::kqueue::{Event, Kqueue, wait_for_exits};
+use super::members::Members;
 use super::run_marker::RunMarker;
 
 /// How long killing a run's leftovers may take before giving up on them.
@@ -35,7 +36,9 @@ impl MacOSExecutor {
     ///
     /// Sleeps on a kqueue (`NOTE_EXIT`) until the earliest due check (see checks.rs): the wall
     /// deadline once, the next memory read, the next /tmp size walk. Without a memory limit a
-    /// run wakes for the exit and the deadline, and nothing else.
+    /// run wakes for the exit and the deadline, and nothing else. With one, the run's processes
+    /// are followed by fork and exit events (see members.rs), so a memory read touches only
+    /// them.
     pub(super) fn supervise(
         child: &mut std::process::Child,
         timeout: Duration,
@@ -55,13 +58,20 @@ impl MacOSExecutor {
             source: Box::new(e),
         })?;
         // Already gone: don't sleep before the wait4 that reaps it. A failed watch keeps a tick.
-        // With denials to report, the process tree is followed fork by fork, so each denial
-        // can be attributed by pid.
-        let exit_watched = match denials {
-            Some(_) => kq.watch_tree(child_pid),
-            None => kq.watch_exit(child_pid),
+        // With denials to report, or a memory limit to hold, the process tree is followed fork
+        // by fork: so each denial can be attributed by pid, and the footprint read from the
+        // processes there are.
+        let exit_watched = match (denials.is_some(), memory_limit.is_some()) {
+            (false, false) => kq.watch_exit(child_pid),
+            _ => kq.watch_tree(child_pid),
         };
         let mut exited = matches!(exit_watched, Ok(false));
+        let mut members = memory_limit.map(|_| {
+            let mut members = Members::new(child_pid);
+            // What it forked before the watch.
+            members.scan(&kq, marker);
+            members
+        });
         let mut deadline = Some(start + timeout);
         let mut memory_due = memory_limit.map(|_| start);
 
@@ -98,10 +108,16 @@ impl MacOSExecutor {
                     killed_by_timeout = true;
                     deadline = None;
                 }
-                if let (Some(limit), Some(due)) = (memory_limit, memory_due)
+                if let Some(members) = members.as_mut()
+                    && members.rescan_due(now)
+                {
+                    members.scan(&kq, marker);
+                }
+                if let (Some(limit), Some(due), Some(members)) =
+                    (memory_limit, memory_due, members.as_ref())
                     && now >= due
                 {
-                    let used = Self::tree_footprint(marker);
+                    let used = members.footprint();
                     if used > limit {
                         Self::kill_run(child_pid, marker);
                         killed_by_oom = true;
@@ -121,6 +137,7 @@ impl MacOSExecutor {
                 let mut wake = [
                     deadline,
                     memory_due,
+                    members.as_ref().and_then(|m| m.next_rescan(now)),
                     private_tmp
                         .as_ref()
                         .filter(|_| !killed_by_tmp_limit)
@@ -141,6 +158,15 @@ impl MacOSExecutor {
                     .wait(wake.map(|w| w.saturating_duration_since(Instant::now())))
                     .unwrap_or_default();
                 exited = events.contains(&Event::Exited(child_pid));
+                if let Some(members) = members.as_mut() {
+                    for event in &events {
+                        match event {
+                            Event::Forked(parent) => members.forked(&kq, *parent),
+                            Event::Exited(pid) => members.exited(*pid),
+                            _ => {}
+                        }
+                    }
+                }
                 if let Some(run) = denials.as_deref_mut() {
                     // A watched process forked: its children are the run's too, and watched
                     // in turn. One that exits before this runs is missed (best effort).
@@ -289,25 +315,5 @@ impl MacOSExecutor {
         unsafe {
             libc::kill(-root, libc::SIGKILL);
         }
-    }
-
-    /// Physical footprint over the whole run, found by marker so a daemonized process
-    /// that left the tree still counts.
-    fn tree_footprint(marker: &RunMarker) -> u64 {
-        marker
-            .members()
-            .into_iter()
-            .map(|pid| {
-                let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
-                let ret = unsafe {
-                    libc::proc_pid_rusage(
-                        pid,
-                        libc::RUSAGE_INFO_V2,
-                        &mut info as *mut _ as *mut libc::rusage_info_t,
-                    )
-                };
-                if ret == 0 { info.ri_phys_footprint } else { 0 }
-            })
-            .sum()
     }
 }

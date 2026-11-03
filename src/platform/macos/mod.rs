@@ -19,6 +19,7 @@ use std::time::Duration;
 
 pub(crate) mod denials;
 pub(crate) mod kqueue;
+mod members;
 mod profile;
 pub(crate) mod run_marker;
 use run_marker::RunMarker;

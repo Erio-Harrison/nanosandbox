@@ -91,6 +91,48 @@ print('top-level done', flush=True)
     );
 }
 
+/// Many daemonized descendants, each well under the limit and together far over it: every one
+/// is born from a process that exits at once, so none is found by following forks alone.
+#[test]
+#[cfg(target_os = "macos")]
+fn test_macos_memory_limit_counts_many_small_daemonized_descendants() {
+    let sandbox = Sandbox::builder()
+        .working_dir("/tmp")
+        .memory_limit(64 * 1024 * 1024)
+        .wall_time_limit(Duration::from_secs(20))
+        .build()
+        .unwrap();
+
+    let script = "
+        python3 -c \"
+import os, time
+for _ in range(16):
+    if os.fork() == 0:
+        if os.fork() == 0:
+            os.setsid()
+            x = bytearray(12 * 1024 * 1024)
+            for i in range(0, len(x), 4096):
+                x[i] = 1
+            time.sleep(15)
+            os._exit(0)
+        os._exit(0)
+    os.wait()
+time.sleep(15)
+\"
+    ";
+    let result = sandbox.run("sh", &["-c", script]).unwrap();
+    assert!(
+        result.killed_by_oom,
+        "the daemonized descendants' memory should add up: {result:?}"
+    );
+    assert!(!result.killed_by_timeout);
+    assert!(
+        result.duration < Duration::from_secs(12),
+        "{:?}",
+        result.duration
+    );
+}
+
 /// The timeout kill also reaches a child that left the process group.
 #[test]
 #[cfg(target_os = "macos")]

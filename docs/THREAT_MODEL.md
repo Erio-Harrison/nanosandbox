@@ -246,7 +246,7 @@ can't. See [platform-macos.md](platform-macos.md)'s own comparison table.
 | Can't redirect a writable directory by swapping it, or a directory above it, for a symlink | the profile is made from where each path led at build, a run is refused if that changed, and a writable directory and every directory above it can't be removed or renamed (`file-write-unlink` denied) | `tests/security/workspace_swap.rs` |
 | Can't reach the network outside `allow_network` | SBPL denies all network except the loopback proxy port | `tests/security/sbpl_rules.rs: test_no_network_blocks_connections` |
 | Can't make the system fetch a URL for it outside the allowlist | the proxied profile leaves out `trustd` and `ocspd`, which fetch a certificate's OCSP and issuer URLs for whoever asks them to evaluate it, unless `allow_trustd()` | `src/platform/macos/profile.rs: test_proxied_profile_drops_trust_services_unless_allowed` |
-| Eventually killed for exceeding memory | polled `proc_pid_rusage` over the run's process tree, checked every 2-10ms | `tests/security/resource_enforcement.rs: test_macos_memory_limit_enforced` |
+| Eventually killed for exceeding memory | `proc_pid_rusage` read every 2-10ms over the run's processes, which kqueue fork/exit events keep up (a scan by run marker covers any the events missed) | `tests/security/resource_enforcement.rs: test_macos_memory_limit_enforced` |
 | Outlives neither the run's timeout nor the host process | watchdog process holding a pipe the host's death closes | `tests/security/process_management.rs`, `docs/platform-macos.md` Process Lifetime |
 
 **Not provided, structurally (not a todo -- XNU has no namespace or cgroup
