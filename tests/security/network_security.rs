@@ -717,7 +717,7 @@ fn test_https_verifies_without_trustd() {
             ])
             .output()
             .unwrap();
-        let probe = "env | grep -i -E 'ssl|proxy|curl|cert' ; ls -lL /etc/ssl/cert.pem 2>&1 | head -2; curl -v --max-time 10 -o /dev/null https://example.com/ 2>&1 | grep -E 'CAfile|CApath|SSL|certificate|issuer|subject|Connected|CONNECT|TLS' | head -30";
+        let probe = "ls -l /etc/ssl/cert.pem 2>&1; readlink -f /etc/ssl/cert.pem 2>&1; echo \"read: $(wc -c < /etc/ssl/cert.pem 2>&1)\"; head -c 40 /etc/ssl/cert.pem 2>&1; echo; ls -ld /etc/ssl /private/etc/ssl 2>&1";
         let diag = match Sandbox::builder()
             .allow_network(&["example.com"])
             .report_denials()
@@ -733,7 +733,7 @@ fn test_https_verifies_without_trustd() {
             }
             Err(e) => format!("(no denial report: {e})"),
         };
-        let per_ip = "for ip in $(dscacheutil -q host -a name example.com | awk '/^ip(v6)?_address:/{print $2}' | sort -u); do case $ip in *:*) r=\"[$ip]\";; *) r=$ip;; esac; echo \"$ip => $(curl -sS --resolve example.com:443:$r --max-time 10 -o /dev/null -w 'code=%{http_code} verify=%{ssl_verify_result}' https://example.com/ 2>&1 | tr '\\n' ' ')\"; done";
+        let per_ip = probe;
         let outside_v = std::process::Command::new("sh")
             .args(["-c", per_ip])
             .output()
