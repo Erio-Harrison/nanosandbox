@@ -719,8 +719,9 @@ fn test_https_verifies_without_trustd() {
             .unwrap();
         assert!(
             !outside.status.success(),
-            "certificate verification failed in the sandbox but not outside it: {out} {}",
-            result.stderr
+            "certificate verification failed in the sandbox but not outside it: {out} {} denied: {:?}",
+            result.stderr,
+            result.denied_paths
         );
         eprintln!(
             "skipping: the host's curl fails too ({})",
