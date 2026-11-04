@@ -697,7 +697,7 @@ fn test_https_verifies_without_trustd() {
             "sh",
             &[
                 "-c",
-                "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"",
+                "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"",
             ],
         )
         .unwrap();
