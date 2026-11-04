@@ -733,8 +733,9 @@ fn test_https_verifies_without_trustd() {
             }
             Err(e) => format!("(no denial report: {e})"),
         };
+        let per_ip = "for ip in $(dscacheutil -q host -a name example.com | awk '/^ip(v6)?_address:/{print $2}' | sort -u); do echo \"$ip: $(curl -sS --resolve example.com:443:$ip --max-time 10 -o /dev/null -w '%{http_code}' https://example.com/ 2>&1 | tail -1)\"; done";
         let outside_v = std::process::Command::new("sh")
-            .args(["-c", probe])
+            .args(["-c", per_ip])
             .output()
             .unwrap();
         assert!(
