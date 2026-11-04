@@ -717,11 +717,18 @@ fn test_https_verifies_without_trustd() {
             .args(["-c", script])
             .output()
             .unwrap();
+        let denials = std::process::Command::new("sh")
+            .args([
+                "-c",
+                "log show --last 2m --style compact --predicate 'eventMessage CONTAINS \"deny(\"' 2>&1 | grep -i -E 'curl|trust|mach-lookup|ocsp|security' | sed -E 's/^[^ ]+ +[^ ]+ +//' | sort | uniq -c | sort -rn | head -25",
+            ])
+            .output()
+            .unwrap();
         panic!(
-            "DIAG default: {out} | with allow_trustd: {} {} | outside: {}",
+            "DIAG default: {out} | with allow_trustd: {} | outside: {}\nDENIALS:\n{}",
             with_trustd.stdout.trim(),
-            with_trustd.stderr.trim(),
-            String::from_utf8_lossy(&outside.stdout).trim()
+            String::from_utf8_lossy(&outside.stdout).trim(),
+            String::from_utf8_lossy(&denials.stdout)
         );
     }
     if !out.starts_with("200") {
