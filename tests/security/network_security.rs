@@ -717,7 +717,7 @@ fn test_https_verifies_without_trustd() {
             ])
             .output()
             .unwrap();
-        let probe = "ls -l /etc/ssl/cert.pem 2>&1; readlink -f /etc/ssl/cert.pem 2>&1; echo \"read: $(wc -c < /etc/ssl/cert.pem 2>&1)\"; head -c 40 /etc/ssl/cert.pem 2>&1; echo; ls -ld /etc/ssl /private/etc/ssl 2>&1";
+        let probe = "command -v curl; curl -V | head -1; curl -vk --max-time 10 -o /dev/null https://example.com/ 2>&1 | grep -E 'subject:|issuer:|SSL connection|ALPN|expire date|start date|HTTP/'";
         let diag = match Sandbox::builder()
             .allow_network(&["example.com"])
             .report_denials()
