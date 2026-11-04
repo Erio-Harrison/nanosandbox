@@ -720,7 +720,7 @@ fn test_https_verifies_without_trustd() {
         let denials = std::process::Command::new("sh")
             .args([
                 "-c",
-                "log show --last 2m --style compact --predicate 'eventMessage CONTAINS \"deny(\"' 2>&1 | grep -i -E 'curl|trust|mach-lookup|ocsp|security' | sed -E 's/^[^ ]+ +[^ ]+ +//' | sort | uniq -c | sort -rn | head -25",
+                "log show --last 2m --style compact --predicate 'eventMessage CONTAINS \"deny(\"' 2>&1 | grep -E 'Sandbox: (curl|sh)\\(|trustd|ocsp|securityd|SecurityServer|keychain|Keychain|cert' | sed -E 's/^.*Sandbox: //' | sed -E 's/\\([0-9]+\\)//' | sort | uniq -c | sort -rn | head -40",
             ])
             .output()
             .unwrap();
