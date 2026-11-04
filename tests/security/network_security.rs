@@ -717,11 +717,31 @@ fn test_https_verifies_without_trustd() {
             ])
             .output()
             .unwrap();
+        let probe = "env | grep -i -E 'ssl|proxy|curl|cert' ; ls -lL /etc/ssl/cert.pem 2>&1 | head -2; curl -v --max-time 10 -o /dev/null https://example.com/ 2>&1 | grep -E 'CAfile|CApath|SSL|certificate|issuer|subject|Connected|CONNECT|TLS' | head -30";
+        let diag = match Sandbox::builder()
+            .allow_network(&["example.com"])
+            .report_denials()
+            .wall_time_limit(Duration::from_secs(20))
+            .build()
+        {
+            Ok(sb) => {
+                let r = sb.run("sh", &["-c", probe]).unwrap();
+                format!(
+                    "INSIDE: {}\n{}\ndenied: {:?}",
+                    r.stdout, r.stderr, r.denied_paths
+                )
+            }
+            Err(e) => format!("(no denial report: {e})"),
+        };
+        let outside_v = std::process::Command::new("sh")
+            .args(["-c", probe])
+            .output()
+            .unwrap();
         assert!(
             !outside.status.success(),
-            "certificate verification failed in the sandbox but not outside it: {out} {} denied: {:?}",
+            "certificate verification failed in the sandbox but not outside it: {out} {}\n{diag}\nOUTSIDE: {}",
             result.stderr,
-            result.denied_paths
+            String::from_utf8_lossy(&outside_v.stdout)
         );
         eprintln!(
             "skipping: the host's curl fails too ({})",
