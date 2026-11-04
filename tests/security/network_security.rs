@@ -683,7 +683,8 @@ fn test_network_settings_are_checked_at_build() {
 }
 
 /// With trustd left out of the proxied profile, TLS through the proxy still verifies for the
-/// system's curl (it doesn't need trustd for a chain to a public CA).
+/// system's curl (it doesn't need trustd for a chain to a public CA). Skipped where the host's
+/// own curl can't verify example.com either.
 #[test]
 #[cfg(target_os = "macos")]
 fn test_https_verifies_without_trustd() {
@@ -702,11 +703,31 @@ fn test_https_verifies_without_trustd() {
         )
         .unwrap();
     let out = result.stdout.trim();
-    assert!(
-        !out.ends_with("exit=60") && !out.ends_with("exit=35"),
-        "certificate verification failed: {out} {}",
-        result.stderr
-    );
+    if out.ends_with("exit=60") || out.ends_with("exit=35") {
+        // Verification failed in the sandbox. If the host's own curl fails the same way, it is
+        // the host's certificates (or the server's chain), not what the sandbox leaves out.
+        let outside = std::process::Command::new("curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "--max-time",
+                "10",
+                "https://example.com/",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !outside.status.success(),
+            "certificate verification failed in the sandbox but not outside it: {out} {}",
+            result.stderr
+        );
+        eprintln!(
+            "skipping: the host's curl fails too ({})",
+            String::from_utf8_lossy(&outside.stderr).trim()
+        );
+        return;
+    }
     if !out.starts_with("200") {
         eprintln!("skipping: no network ({out})");
     }
