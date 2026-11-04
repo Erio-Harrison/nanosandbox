@@ -51,6 +51,12 @@ const EXTRA_BASE_POLICY: &str = r#"
 /// allowlist; a certificate it evaluates can name any host. Dropped unless `allow_trustd`.
 const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.ocspd"];
 
+/// What the system's curl asks to evaluate a chain its own CA file (`/etc/ssl/cert.pem`, which
+/// macOS keeps years behind) can't verify. It talks to trustd, so it is left out wherever
+/// trustd is.
+const TRUST_EVALUATION: &str =
+    "(allow mach-lookup (global-name \"com.apple.TrustEvaluationAgent\"))";
+
 fn without_trust_services(policy: &str) -> String {
     policy
         .lines()
@@ -345,14 +351,14 @@ impl MacOSExecutor {
             NetworkMode::None => {}
             NetworkMode::Host => {
                 sections.push(format!(
-                    "(allow network-outbound)\n(allow network-inbound)\n{NETWORK_POLICY}"
+                    "(allow network-outbound)\n(allow network-inbound)\n{NETWORK_POLICY}\n{TRUST_EVALUATION}"
                 ));
             }
             // Only the local proxy is reachable, so the allowlist can't be bypassed; no port, nothing open.
             NetworkMode::Proxied { .. } => {
                 if let Some(port) = proxy_port {
                     let network_policy = if config.allow_trustd {
-                        NETWORK_POLICY.to_string()
+                        format!("{NETWORK_POLICY}\n{TRUST_EVALUATION}")
                     } else {
                         without_trust_services(NETWORK_POLICY)
                     };
@@ -609,6 +615,7 @@ mod tests {
         for service in TRUST_SERVICES {
             assert!(!p.policy.contains(service), "{service}");
         }
+        assert!(!p.policy.contains("com.apple.TrustEvaluationAgent"));
         assert!(p.policy.contains("com.apple.SecurityServer"));
         assert!(p.policy.contains("com.apple.networkd"));
 
@@ -620,6 +627,7 @@ mod tests {
             Some(8080),
         );
         assert!(p.policy.contains("com.apple.trustd.agent"));
+        assert!(p.policy.contains("com.apple.TrustEvaluationAgent"));
         let p = profile(
             &SandboxConfig {
                 network_mode: NetworkMode::Host,
@@ -628,6 +636,7 @@ mod tests {
             None,
         );
         assert!(p.policy.contains("com.apple.trustd.agent"));
+        assert!(p.policy.contains("com.apple.TrustEvaluationAgent"));
     }
 
     #[test]

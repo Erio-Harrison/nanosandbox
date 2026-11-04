@@ -682,31 +682,49 @@ fn test_network_settings_are_checked_at_build() {
     );
 }
 
-/// With trustd left out of the proxied profile, TLS through the proxy still verifies for the
-/// system's curl (it doesn't need trustd for a chain to a public CA).
+/// TLS through the proxy verifies for the system's curl. It checks against /etc/ssl/cert.pem,
+/// which macOS keeps years behind, and asks the system's trust evaluation only for a chain that
+/// file can't verify -- which the proxied profile leaves out unless `allow_trustd()`. So the
+/// default profile may fail on a site with a newer CA, but then `allow_trustd()` has to fix it.
+/// Skipped where the host's own curl can't verify the site either.
 #[test]
 #[cfg(target_os = "macos")]
-fn test_https_verifies_without_trustd() {
-    let sandbox = Sandbox::builder()
-        .allow_network(&["example.com"])
-        .wall_time_limit(Duration::from_secs(20))
-        .build()
-        .unwrap();
-    let result = sandbox
-        .run(
-            "sh",
-            &[
-                "-c",
-                "curl -s -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"",
-            ],
-        )
-        .unwrap();
-    let out = result.stdout.trim();
-    assert!(
-        !out.ends_with("exit=60") && !out.ends_with("exit=35"),
-        "certificate verification failed: {out} {}",
-        result.stderr
-    );
+fn test_https_verifies_through_the_proxy() {
+    const SCRIPT: &str = "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"";
+    let run = |trustd: bool| {
+        let mut builder = Sandbox::builder()
+            .allow_network(&["example.com"])
+            .wall_time_limit(Duration::from_secs(20));
+        if trustd {
+            builder = builder.allow_trustd();
+        }
+        builder.build().unwrap().run("sh", &["-c", SCRIPT]).unwrap()
+    };
+    let verify_failed =
+        |out: &str| out.trim().ends_with("exit=60") || out.trim().ends_with("exit=35");
+
+    let result = run(false);
+    let mut out = result.stdout.trim().to_string();
+    if verify_failed(&out) {
+        let with_trustd = run(true);
+        out = with_trustd.stdout.trim().to_string();
+        if verify_failed(&out) {
+            // Not the profile's doing if the host's own curl fails too.
+            let outside = std::process::Command::new("sh")
+                .args(["-c", SCRIPT])
+                .output()
+                .unwrap();
+            let outside = String::from_utf8_lossy(&outside.stdout);
+            assert!(
+                verify_failed(&outside),
+                "verification fails in the sandbox even with allow_trustd(), not outside it: \
+                 {out} {}",
+                with_trustd.stderr
+            );
+            eprintln!("skipping: the host's curl can't verify example.com either");
+            return;
+        }
+    }
     if !out.starts_with("200") {
         eprintln!("skipping: no network ({out})");
     }

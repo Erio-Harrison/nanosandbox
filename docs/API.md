@@ -509,13 +509,17 @@ How requests are relayed:
   its open connections.
 
 macOS: the proxied profile leaves out the system's certificate-verification
-services (`trustd`, `ocspd`). They fetch a certificate's OCSP and issuer
-URLs on the program's behalf, outside the allowlist, so a program could
-carry data out in a certificate it asks the system to evaluate. Programs
-that verify through Security.framework directly (Go, Swift) then fail TLS
-verification under `allow_network`; the system's curl, and clients with
-their own certificate store (Python, Node, Rust, Java), don't. `allow_trustd()`
-puts the services back for the programs that need them, reopening that path.
+services (`trustd`, `ocspd`, `TrustEvaluationAgent`). They fetch a
+certificate's OCSP and issuer URLs on the program's behalf, outside the
+allowlist, so a program could carry data out in a certificate it asks the
+system to evaluate. Programs that verify through Security.framework directly
+(Go, Swift) then fail TLS verification under `allow_network`. The system's
+curl verifies against `/etc/ssl/cert.pem`, which macOS keeps years behind,
+and asks the system only for a chain that file can't verify: a site on a
+newer CA fails with "unable to get local issuer certificate". Clients with
+their own certificate store (Python, Node, Rust, Java) are unaffected.
+`allow_trustd()` puts the services back for the programs that need them,
+reopening that path.
 
 Windows only supports `host_network()`.
 

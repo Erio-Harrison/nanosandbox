@@ -57,9 +57,9 @@ sandbox-exec -p "(version 1)(deny default)(allow file-read*)" /bin/ls
 ; Deny network (default): simply no network rules
 
 ; allow_network(): only the run's proxy port, and the system services a
-; networked program needs (networkd, DNS configuration); not trustd or ocspd
-; unless allow_trustd(), since they fetch URLs for the program outside the
-; allowlist
+; networked program needs (networkd, DNS configuration); not trustd, ocspd or
+; TrustEvaluationAgent unless allow_trustd(), since they fetch URLs for the
+; program outside the allowlist
 (allow network-outbound (remote ip "localhost:PORT"))
 
 ; host_network()

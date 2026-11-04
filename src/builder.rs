@@ -520,11 +520,14 @@ impl SandboxBuilder {
     }
 
     /// macOS, with [`allow_network`](Self::allow_network): let the program use the system's
-    /// certificate-verification service (`trustd`). Off by default: trustd fetches a
-    /// certificate's OCSP and issuer URLs on the program's behalf, outside the allowlist, so a
-    /// certificate the program evaluates can carry data to any host. Without it, Security.framework
-    /// verification fails for programs that use it directly (Go, Swift); the system's curl, and
-    /// clients with their own certificate store (Python, Node, Rust, Java) are unaffected.
+    /// certificate-verification services (`trustd`, `ocspd`, the trust evaluation agent). Off by
+    /// default: trustd fetches a certificate's OCSP and issuer URLs on the program's behalf,
+    /// outside the allowlist, so a certificate the program evaluates can carry data to any host.
+    /// Without it, Security.framework verification fails for programs that use it directly (Go,
+    /// Swift), and the system's curl verifies only chains that end in a root in its CA file
+    /// (`/etc/ssl/cert.pem`, which macOS keeps years behind: a site on a newer CA fails with
+    /// "unable to get local issuer certificate"). Clients with their own certificate store
+    /// (Python, Node, Rust, Java) are unaffected.
     /// No effect on other platforms.
     pub fn allow_trustd(mut self) -> Self {
         self.config.allow_trustd = true;
