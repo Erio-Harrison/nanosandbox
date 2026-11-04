@@ -704,51 +704,25 @@ fn test_https_verifies_without_trustd() {
         .unwrap();
     let out = result.stdout.trim();
     if out.ends_with("exit=60") || out.ends_with("exit=35") {
-        // Verification failed in the sandbox. If the host's own curl fails the same way, it is
-        // the host's certificates (or the server's chain), not what the sandbox leaves out.
-        let outside = std::process::Command::new("curl")
-            .args([
-                "-sS",
-                "-o",
-                "/dev/null",
-                "--max-time",
-                "10",
-                "https://example.com/",
-            ])
-            .output()
-            .unwrap();
-        let probe = "command -v curl; curl -V | head -1; curl -vk --max-time 10 -o /dev/null https://example.com/ 2>&1 | grep -E 'subject:|issuer:|SSL connection|ALPN|expire date|start date|HTTP/'";
-        let diag = match Sandbox::builder()
+        let script = "curl -sS -o /dev/null -w '%{http_code}' --max-time 10 https://example.com/; echo \" exit=$?\"";
+        let with_trustd = Sandbox::builder()
             .allow_network(&["example.com"])
-            .report_denials()
+            .allow_trustd()
             .wall_time_limit(Duration::from_secs(20))
             .build()
-        {
-            Ok(sb) => {
-                let r = sb.run("sh", &["-c", probe]).unwrap();
-                format!(
-                    "INSIDE: {}\n{}\ndenied: {:?}",
-                    r.stdout, r.stderr, r.denied_paths
-                )
-            }
-            Err(e) => format!("(no denial report: {e})"),
-        };
-        let per_ip = probe;
-        let outside_v = std::process::Command::new("sh")
-            .args(["-c", per_ip])
+            .unwrap()
+            .run("sh", &["-c", script])
+            .unwrap();
+        let outside = std::process::Command::new("sh")
+            .args(["-c", script])
             .output()
             .unwrap();
-        assert!(
-            !outside.status.success(),
-            "certificate verification failed in the sandbox but not outside it: {out} {}\n{diag}\nOUTSIDE: {}",
-            result.stderr,
-            String::from_utf8_lossy(&outside_v.stdout)
+        panic!(
+            "DIAG default: {out} | with allow_trustd: {} {} | outside: {}",
+            with_trustd.stdout.trim(),
+            with_trustd.stderr.trim(),
+            String::from_utf8_lossy(&outside.stdout).trim()
         );
-        eprintln!(
-            "skipping: the host's curl fails too ({})",
-            String::from_utf8_lossy(&outside.stderr).trim()
-        );
-        return;
     }
     if !out.starts_with("200") {
         eprintln!("skipping: no network ({out})");
