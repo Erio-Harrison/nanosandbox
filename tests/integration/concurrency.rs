@@ -337,8 +337,13 @@ fn test_no_fds_leak_between_concurrent_runs() {
                         .unwrap();
                     if result.stdout != baseline {
                         leaks.push(format!(
-                            "stdout {:?}, exit {}, signal {:?}, stderr {:?}",
-                            result.stdout, result.exit_code, result.signal, result.stderr
+                            "stdout {:?}, exit {}, signal {:?}, stderr {:?}, timed out {}, took {:?}",
+                            result.stdout,
+                            result.exit_code,
+                            result.signal,
+                            result.stderr,
+                            result.killed_by_timeout,
+                            result.duration
                         ));
                     }
                 }
