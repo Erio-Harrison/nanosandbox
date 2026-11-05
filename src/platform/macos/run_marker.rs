@@ -224,10 +224,26 @@ mod tests {
             })
             .unwrap_or_default();
         let profile = format!("(version 1)(allow default){rules}");
+        // Held for the fork, as in a run (see FORK_LOCK).
+        let _fork = super::super::FORK_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c", script])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap()
+    }
+
+    /// Blocks until the script has printed its first line, "ready": the profile is applied by
+    /// then, and the script is running.
+    fn ready(child: &mut Child) {
+        use std::io::{BufRead, BufReader};
+        let mut line = String::new();
+        BufReader::new(child.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
     }
 
     #[test]
@@ -258,9 +274,10 @@ mod tests {
     #[test]
     fn test_kill_orphans_ends_what_a_dead_runs_markers_still_mark() {
         let marker = RunMarker::create().unwrap();
-        let mut run = sandboxed(Some(&marker), "sleep 300");
-        let mut other = sandboxed(None, "sleep 300");
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut run = sandboxed(Some(&marker), "echo ready; exec sleep 300");
+        let mut other = sandboxed(None, "echo ready; exec sleep 300");
+        ready(&mut run);
+        ready(&mut other);
         assert!(run.try_wait().unwrap().is_none(), "the run died on its own");
 
         let killed = kill_orphans(&marker.denied, &marker.allowed);
@@ -290,11 +307,18 @@ mod tests {
             ),
         );
         // Not the run: another sandbox, and a process with none.
-        let mut other = sandboxed(None, "sleep 5");
-        let mut plain = Command::new("/bin/sleep").arg("5").spawn().unwrap();
+        let mut other = sandboxed(None, "echo ready; exec sleep 5");
+        let mut plain = {
+            let _fork = super::super::FORK_LOCK
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            Command::new("/bin/sleep").arg("5").spawn().unwrap()
+        };
+        ready(&mut other);
 
+        // The pid file is written before the run exits, and the escaped child was forked by
+        // then, with the run's sandbox.
         run.wait().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(300));
         let escaped: libc::pid_t = std::fs::read_to_string(&pid_file)
             .unwrap()
             .trim()
@@ -318,8 +342,8 @@ mod tests {
     #[test]
     fn test_members_includes_the_still_running_root_itself() {
         let marker = RunMarker::create().unwrap();
-        let mut root = sandboxed(Some(&marker), "sleep 5");
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut root = sandboxed(Some(&marker), "echo ready; exec sleep 5");
+        ready(&mut root);
 
         let members = marker.members();
         let root_included = members.contains(&(root.id() as libc::pid_t));

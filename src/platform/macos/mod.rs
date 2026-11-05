@@ -31,6 +31,15 @@ use watchdog::Watchdog;
 /// `pipe()` and `fcntl` leaks the fds. `cloexec_pipe` writes; every fork here reads.
 pub(crate) static FORK_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
+/// A loopback listener on a fresh port. std makes the socket and then sets `FD_CLOEXEC`, so
+/// like `cloexec_pipe` it is made under FORK_LOCK: a fork in between would hand the listener
+/// to another run's command, which could then `accept` on it, and keep its port open after
+/// the run.
+pub(crate) fn cloexec_listener() -> std::io::Result<std::net::TcpListener> {
+    let _fork = FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+}
+
 /// A pipe with `O_CLOEXEC` fds, under FORK_LOCK.
 pub(crate) fn cloexec_pipe(what: &str) -> Result<(OwnedFd, OwnedFd)> {
     let _fork = FORK_LOCK.write().unwrap_or_else(|e| e.into_inner());
@@ -237,7 +246,7 @@ fn launch_in_thread(
     // allow_network: per-run proxy on a fresh loopback port only this run's profile reaches.
     let proxy_run = match &proxy {
         Some(proxy) => {
-            let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+            let listener = cloexec_listener()?;
             let port = listener.local_addr()?.port();
             Some((port, proxy.attach(listener)?))
         }
@@ -513,5 +522,62 @@ mod tests {
     fn test_macos_is_supported() {
         #[cfg(target_os = "macos")]
         assert!(is_supported());
+    }
+
+    /// Socket descriptors (other than 0/1/2) open in a fresh `/bin/sh`.
+    fn open_socket_fds() -> std::collections::HashSet<String> {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(
+            "for f in /dev/fd/*; do \
+               case \"$f\" in */0|*/1|*/2) continue;; esac; \
+               [ -S \"$f\" ] && basename \"$f\"; \
+             done",
+        );
+        // A `pre_exec` keeps spawn() on fork, not a posix_spawn path the race doesn't reach.
+        unsafe {
+            command.pre_exec(|| Ok(()));
+        }
+        // Into a file, not `output()`'s pipes: those have the same gap, and would leak into
+        // the pipe test's forks beside this one.
+        let mut file = tempfile::tempfile().unwrap();
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(file.try_clone().unwrap()))
+            .stderr(std::process::Stdio::null());
+        command.status().unwrap();
+        let mut text = String::new();
+        std::io::Seek::rewind(&mut file).unwrap();
+        std::io::Read::read_to_string(&mut file, &mut text).unwrap();
+        text.lines().map(str::to_string).collect()
+    }
+
+    // Races the listener's socket()+FD_CLOEXEC gap against another thread's fork, which holds
+    // FORK_LOCK's read side as the production spawn sites do. A listener made with a plain
+    // `TcpListener::bind` leaks into the fork now and then.
+    #[test]
+    fn test_fork_lock_closes_the_listener_leak() {
+        let iterations = 300;
+        let baseline = open_socket_fds();
+        let leaks = std::sync::atomic::AtomicUsize::new(0);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    drop(cloexec_listener());
+                }
+            });
+            for _ in 0..iterations {
+                let fds = {
+                    let _fork = FORK_LOCK.read().unwrap_or_else(|e| e.into_inner());
+                    open_socket_fds()
+                };
+                if fds.difference(&baseline).next().is_some() {
+                    leaks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(leaks.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }

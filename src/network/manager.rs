@@ -24,14 +24,34 @@ pub struct ProxiedNetwork {
 /// Serves one run's listener; dropping it (or `finish`) closes the listener
 /// and cuts the run's connections that are still open.
 pub(crate) struct Attachment {
-    _stop: tokio::sync::oneshot::Sender<()>,
+    stop: tokio::sync::oneshot::Sender<()>,
+    /// Hears from the serving task once it has ended, its listener closed.
+    ended: mpsc::Receiver<()>,
     refusals: Arc<Refusals>,
 }
 
+/// Serving ends as soon as it is stopped; this only keeps a stuck runtime from holding up
+/// the end of a run.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Attachment {
-    /// Stops serving the run, and returns what the proxy didn't connect it to.
+    /// Stops serving the run and waits for the listener to be closed, and returns what the
+    /// proxy didn't connect it to.
     pub(crate) fn finish(self) -> Vec<NetworkRefusal> {
-        self.refusals.list()
+        let Self {
+            stop,
+            ended,
+            refusals,
+        } = self;
+        drop(stop);
+        // Disconnected counts as ended: the runtime dropped the task.
+        if matches!(
+            ended.recv_timeout(STOP_WAIT),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            tracing::warn!("a run's proxy listener was still open {STOP_WAIT:?} after its stop");
+        }
+        refusals.list()
     }
 }
 
@@ -135,14 +155,20 @@ impl ProxiedNetwork {
             let _ = stop_rx.await;
         };
         let refusals = Arc::new(Refusals::default());
-        self.runtime.spawn(HttpProxy::serve(
+        let (ended_tx, ended) = mpsc::channel::<()>();
+        let serving = HttpProxy::serve(
             listener,
             Arc::clone(&self.policy),
             Arc::clone(&refusals),
             stop,
-        ));
+        );
+        self.runtime.spawn(async move {
+            serving.await;
+            let _ = ended_tx.send(());
+        });
         Ok(Attachment {
-            _stop: stop_tx,
+            stop: stop_tx,
+            ended,
             refusals,
         })
     }
@@ -246,6 +272,13 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        // A forked child holds a copy of every descriptor until its exec, so the port would
+        // stay open that much longer after the listener closes. No forks meanwhile (macOS;
+        // every spawn takes the read side).
+        #[cfg(target_os = "macos")]
+        let _no_forks = crate::platform::macos::FORK_LOCK
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let attachment = network.attach(listener).unwrap();
@@ -268,7 +301,7 @@ mod tests {
             ),
             ("evil.example", 443, "not-allowed")
         );
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // `finish` returned: serving has ended and the listener is closed.
         assert!(std::net::TcpStream::connect(addr).is_err());
     }
 }

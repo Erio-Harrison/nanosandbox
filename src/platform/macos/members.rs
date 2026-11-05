@@ -146,6 +146,10 @@ mod tests {
             .iter()
             .map(|(rule, path)| rule.replace("(param \"{}\")", &format!("\"{}\"", path.display())))
             .collect();
+        // Held for the fork, as in a run (see FORK_LOCK).
+        let _fork = super::super::FORK_LOCK
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         Command::new("/usr/bin/sandbox-exec")
             .args([
                 "-p",
@@ -154,8 +158,19 @@ mod tests {
                 "-c",
                 script,
             ])
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap()
+    }
+
+    /// Blocks until the script has printed "ready": the profile is applied by then.
+    fn ready(child: &mut Child) {
+        use std::io::{BufRead, BufReader};
+        let mut line = String::new();
+        BufReader::new(child.stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
     }
 
     fn shell(script: &str) -> Child {
@@ -245,9 +260,9 @@ mod tests {
     fn test_a_scan_takes_in_the_marked_processes_that_were_not_followed() {
         let marker = RunMarker::create().unwrap();
         // Born outside what the events showed: marked, but nobody watched its parent.
-        let mut run = marked(&marker, "sleep 5");
+        let mut run = marked(&marker, "echo ready; exec sleep 5");
         let mut root = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-        std::thread::sleep(Duration::from_millis(300));
+        ready(&mut run);
         let (root_pid, run_pid) = (root.id() as libc::pid_t, run.id() as libc::pid_t);
 
         let kq = Kqueue::new().unwrap();
