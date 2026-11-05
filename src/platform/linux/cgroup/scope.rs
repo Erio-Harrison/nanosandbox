@@ -300,19 +300,55 @@ fn try_relocate_into_delegated_scope(
     let properties = properties.as_slice();
     let aux: &[(&str, &[(&str, Value)])] = &[];
 
+    // Subscribed before the call, so the job's end can't be missed (systemd sends job signals
+    // only to clients that subscribed). `StartTransientUnit` returns once the job is queued,
+    // not once this process is in the scope.
+    let _ = proxy.call::<_, _, ()>("Subscribe", &());
+    let jobs = proxy
+        .receive_signal_with_args("JobRemoved", &[(2, scope_name.as_str())])
+        .map_err(|e| format!("cannot listen for systemd's job signals: {e}"))?;
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel::<String>();
+    // A thread, as the signal iterator can't wait with a deadline. It ends with the job's
+    // signal; if none ever comes it stays parked on the bus, once per process.
+    let _ = std::thread::Builder::new()
+        .name("nanosandbox-scope-job".into())
+        .spawn(move || {
+            for message in jobs {
+                if let Ok((_, _, _, result)) = message
+                    .body()
+                    .deserialize::<(u32, OwnedObjectPath, String, String)>()
+                {
+                    let _ = ended_tx.send(result);
+                    return;
+                }
+            }
+        });
+
     let call_result = proxy.call::<_, _, OwnedObjectPath>(
         "StartTransientUnit",
         &(scope_name.as_str(), "fail", properties, aux),
     );
 
-    // Poll regardless: the job may complete after our reply wait timed out.
-    for _ in 0..50 {
-        if let Ok(rel) = own_cgroup_path()
-            && rel.ends_with(&scope_name)
-        {
-            return Ok(());
+    let in_scope = || own_cgroup_path().is_ok_and(|rel| rel.ends_with(&scope_name));
+    // The job may complete after our reply wait timed out, so a failed call is waited on too,
+    // but not for long: there may be no job at all.
+    let wait = if call_result.is_ok() {
+        JOB_WAIT
+    } else {
+        FAILED_CALL_WAIT
+    };
+    if !in_scope() {
+        match ended_rx.recv_timeout(wait) {
+            Ok(result) if result != "done" => {
+                return Err(format!(
+                    "StartTransientUnit for {scope_name}: systemd's job ended '{result}'"
+                ));
+            }
+            _ => {}
         }
-        std::thread::sleep(Duration::from_millis(10));
+    }
+    if in_scope() {
+        return Ok(());
     }
     match call_result {
         Ok(_) => Err(format!(
@@ -321,6 +357,12 @@ fn try_relocate_into_delegated_scope(
         Err(e) => Err(format!("StartTransientUnit failed: {e}")),
     }
 }
+
+/// How long to wait for systemd's signal that the scope's job ended, once the call returned.
+/// It comes within milliseconds; this only bounds a systemd that never sends it.
+const JOB_WAIT: Duration = Duration::from_secs(5);
+/// The same after a call that failed (its job, if any, is one the reply wait timed out on).
+const FAILED_CALL_WAIT: Duration = Duration::from_millis(500);
 
 #[cfg(test)]
 mod tests {
