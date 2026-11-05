@@ -236,6 +236,12 @@ impl CgroupManager {
             return;
         }
 
+        self.kill_all_by_signals();
+    }
+
+    /// For kernels without `cgroup.kill`: freeze (no new forks), signal every process, and wait
+    /// on `cgroup.events` for each round to land.
+    fn kill_all_by_signals(&self) {
         let freeze_path = self.path.join("cgroup.freeze");
         let _ = fs::write(&freeze_path, "1"); // block new forks while killing
         for _ in 0..10 {
@@ -250,7 +256,7 @@ impl CgroupManager {
                 }
                 None => {}
             }
-            std::thread::sleep(Duration::from_millis(10));
+            wait_until_empty(&self.path, SIGNAL_ROUND);
         }
         let _ = fs::write(&freeze_path, "0");
         wait_until_empty(&self.path, KILL_WAIT);
@@ -265,6 +271,8 @@ impl CgroupManager {
 
 /// How long a kill may take to empty a cgroup before it's given up on.
 const KILL_WAIT: Duration = Duration::from_millis(500);
+/// How long one round of signals gets to empty the cgroup before the next round.
+const SIGNAL_ROUND: Duration = Duration::from_millis(10);
 
 /// Waits until `dir`'s `cgroup.events` says `populated 0` (the kernel flags the file for
 /// `poll` on each change), or `timeout`. True once empty; a gone cgroup counts as empty.
@@ -414,8 +422,7 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
     }
 
     // Serialize in-process callers: concurrent read-modify-write of a shared scope's
-    // subtree_control kept losing the race (~half failed at 20-way). The retry below covers
-    // cross-process contention.
+    // subtree_control kept losing the race (~half failed at 20-way).
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     // Poison ignored: the lock guards no data.
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -436,27 +443,22 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // Concurrent subtree_control writes can transiently fail with EBUSY; retry briefly.
-    let mut last_err = None;
-    for attempt in 0..5 {
-        if attempt > 0 {
-            std::thread::sleep(Duration::from_millis(5 * attempt as u64));
-            // Someone else's write may have already covered us.
-            let enabled = read_controller_list(&subtree_path)?;
-            if missing.iter().all(|c| enabled.iter().any(|e| e == c)) {
-                return Ok(());
-            }
+    // The kernel serializes writes to subtree_control: 16 processes writing at once (2400
+    // writes) never failed each other. An EBUSY is the no-internal-process rule, which no
+    // wait clears. Someone else's write may have covered us in the meantime.
+    let last_err = match fs::write(&subtree_path, &value) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => e,
+        Err(e) => {
+            return Err(SandboxError::CgroupCreation {
+                context: format!("cannot enable '{value}' in {}: {e}", subtree_path.display()),
+                source: Some(Box::new(e)),
+            });
         }
-        match fs::write(&subtree_path, &value) {
-            Ok(()) => return Ok(()),
-            Err(e) if e.raw_os_error() == Some(libc::EBUSY) => last_err = Some(e),
-            Err(e) => {
-                return Err(SandboxError::CgroupCreation {
-                    context: format!("cannot enable '{value}' in {}: {e}", subtree_path.display()),
-                    source: Some(Box::new(e)),
-                });
-            }
-        }
+    };
+    let enabled = read_controller_list(&subtree_path)?;
+    if missing.iter().all(|c| enabled.iter().any(|e| e == c)) {
+        return Ok(());
     }
     // EBUSY usually means the no-internal-process rule: name the process in `dir`.
     let procs = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
@@ -475,10 +477,9 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             format!("{pid}({} ppid={})", field("Name:"), field("PPid:"))
         })
         .collect();
-    let last_err = last_err.expect("loop only exits via return or after recording an EBUSY error");
     Err(SandboxError::CgroupCreation {
         context: format!(
-            "cannot enable '{value}' in {} (still busy after retries; processes directly in it: [{}]): {}",
+            "cannot enable '{value}' in {} (busy; processes directly in it: [{}]): {}",
             subtree_path.display(),
             described.join(" "),
             last_err
@@ -497,6 +498,50 @@ mod tests {
             .join(NANOSANDBOX_CGROUP)
             .join("test-sandbox");
         assert!(path.to_string_lossy().contains("nanosandbox"));
+    }
+
+    /// A leaf with `n` sleeping processes in it; None where cgroups aren't usable here.
+    fn leaf_with_sleepers(n: usize) -> Option<(CgroupManager, Vec<std::process::Child>)> {
+        let mgr = CgroupManager::create(&next_leaf_id(), &["memory"]).ok()?;
+        let mut kids = Vec::new();
+        for _ in 0..n {
+            let kid = std::process::Command::new("sleep").arg("30").spawn().ok()?;
+            mgr.add_process(kid.id()).ok()?;
+            kids.push(kid);
+        }
+        Some((mgr, kids))
+    }
+
+    #[test]
+    fn test_killing_by_signals_empties_the_cgroup() {
+        let Some((mgr, mut kids)) = leaf_with_sleepers(5) else {
+            return;
+        };
+        assert_eq!(mgr.get_pids().unwrap().len(), 5);
+        mgr.kill_all_by_signals();
+        assert!(mgr.get_pids().unwrap().is_empty());
+        for kid in &mut kids {
+            kid.wait().unwrap();
+        }
+        mgr.cleanup();
+    }
+
+    /// A domain controller (`memory`; `pids` is threaded and exempt) can't be enabled in a
+    /// cgroup that holds a process.
+    #[test]
+    fn test_a_busy_subtree_control_names_the_process_in_the_cgroup() {
+        let Some((mgr, mut kids)) = leaf_with_sleepers(1) else {
+            return;
+        };
+        let pid = kids[0].id();
+        let err = enable_subtree_control(&mgr.path, &["memory"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("busy; processes directly in it"), "{err}");
+        assert!(err.contains(&pid.to_string()), "{err}");
+        mgr.kill_all();
+        kids[0].wait().unwrap();
+        mgr.cleanup();
     }
 
     #[test]
