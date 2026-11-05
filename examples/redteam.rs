@@ -82,7 +82,11 @@ mod demo {
 
     fn kill_survivors() {
         let _ = Command::new("pkill").args(["-f", "sleep 4242"]).status();
-        std::thread::sleep(Duration::from_millis(200));
+        // They leave the process table a moment later; nothing announces it.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while survivors() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     /// One pass over the attacks, bare or sandboxed; returns the step records
@@ -148,7 +152,8 @@ mod demo {
             }));
         }
 
-        std::thread::sleep(Duration::from_millis(300));
+        // The listener thread adds what it read to `received` before it answers, and every
+        // command that reached it waited for that answer: nothing is still on its way.
         let leaked = String::from_utf8_lossy(&received.lock().unwrap()).into_owned();
         let limits = if sandboxed {
             limits(&layout, &path)

@@ -1,5 +1,25 @@
 //! Helpers shared by the test binaries.
 
+/// Polls `cond` until it holds or `timeout` passes, for state nothing notifies about (a process
+/// leaving the process table, a directory emptying). It returns as soon as `cond` holds; the
+/// timeout only bounds a failure. Not for ordering something a test can wait on directly (a
+/// child's exit, a pipe, an event).
+#[allow(dead_code)]
+pub fn eventually(timeout: std::time::Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut pause = std::time::Duration::from_millis(1);
+    loop {
+        if cond() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(std::time::Duration::from_millis(50));
+    }
+}
+
 /// `Sandbox::builder()` for tests not about the network; on Windows it opts into the host
 /// network, the only one available without the one-time install.
 #[allow(dead_code)]

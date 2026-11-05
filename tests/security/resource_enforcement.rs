@@ -158,12 +158,16 @@ fn test_macos_timeout_kills_escaped_child() {
 
     let pid = std::fs::read_to_string(&pid_file).expect("child should have written its pid");
     let pid = pid.trim();
-    std::thread::sleep(Duration::from_millis(300));
-    let alive = std::process::Command::new("kill")
-        .args(["-0", pid])
-        .status()
-        .unwrap()
-        .success();
+    let alive_now = || {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .unwrap()
+            .success()
+    };
+    // (A killed process shows up until it is reaped, a moment after it dies.)
+    crate::common::eventually(Duration::from_secs(5), || !alive_now());
+    let alive = alive_now();
     if alive {
         let _ = std::process::Command::new("kill")
             .args(["-9", pid])
@@ -257,8 +261,10 @@ fn test_linux_cgroup_cleanup() {
         let _ = sandbox.run("echo", &["hello"]);
     }
 
-    std::thread::sleep(Duration::from_millis(500));
-
+    // Each run's cgroup is removed as its run ends; allow a moment for the last one.
+    crate::common::eventually(Duration::from_secs(5), || {
+        count_nanosandbox_cgroups() <= initial_count
+    });
     let final_count = count_nanosandbox_cgroups();
 
     // Should not accumulate (allow 1 transient)

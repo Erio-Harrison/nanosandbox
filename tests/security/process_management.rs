@@ -66,22 +66,19 @@ fn test_process_group_killing() {
         result.exit_code, result.duration, result.stderr
     );
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    let orphans = Command::new("pgrep").args(["-f", "sleep 7777"]).output();
-
-    if let Ok(output) = orphans {
-        let orphan_pids: Vec<_> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        assert!(
-            orphan_pids.is_empty(),
-            "Orphan child processes found: {:?}",
-            orphan_pids
-        );
-    }
+    // Gone from the process table (a killed process is reaped a moment after it dies).
+    let orphans = || {
+        Command::new("pgrep")
+            .args(["-f", "sleep 7777"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    assert!(
+        crate::common::eventually(Duration::from_secs(5), || orphans().trim().is_empty()),
+        "Orphan child processes found: {:?}",
+        orphans()
+    );
 }
 
 /// External SIGTERM cleans up the sandbox's children.
@@ -141,17 +138,18 @@ fn test_deep_process_tree_killed() {
         result.exit_code, result.duration, result.stderr
     );
 
-    std::thread::sleep(Duration::from_millis(500));
-
-    let orphans = Command::new("pgrep").args(["-f", "sleep 8888"]).output();
-
-    if let Ok(output) = orphans {
-        assert!(
-            output.stdout.is_empty(),
-            "Deep child processes survived: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-    }
+    let survivors = || {
+        Command::new("pgrep")
+            .args(["-f", "sleep 8888"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default()
+    };
+    assert!(
+        crate::common::eventually(Duration::from_secs(5), || survivors().trim().is_empty()),
+        "Deep child processes survived: {}",
+        survivors()
+    );
 }
 
 /// The command runs as PID 2 under a tiny init shim (PID 1) that forwards signals; see `child.rs`.
@@ -437,7 +435,8 @@ fn test_a_fork_bomb_is_killed_to_the_last_process() {
             ],
         )
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
+    // The run's end kills every member; they leave the process table a moment later.
+    crate::common::eventually(Duration::from_secs(5), || count() == 0);
     let left = count();
     if left > 0 {
         let _ = Command::new("pkill").args(["-9", "-f", &tag]).status();

@@ -641,27 +641,35 @@ fn the_first_command_of_a_fresh_server_is_not_killed() {
 fn a_command_cannot_strip_its_markers_to_leave_a_daemon_behind() {
     let ws = workspace();
     let mut c = Client::in_workspace(ws.path(), &[]);
+    // The call may not end before the daemon is running (a call that ended first would pass
+    // without testing anything): it says so through a pipe the call waits on.
     let script = r#"rm -f "$(dirname "$TMPDIR")"/nanosandbox-run-*-out 2>/dev/null
 python3 -c '
-import os, time
+import os, sys
+r, w = os.pipe()
+os.set_inheritable(w, True)
 if os.fork() == 0:
     os.setsid()
     if os.fork() == 0:
-        os.execvp("sleep", ["sleep", "31987"])
+        os.execvp("sh", ["sh", "-c", "echo up >&%d; exec sleep 31987" % w])
     os._exit(0)
-time.sleep(0.5)'"#;
+os.close(w)
+sys.exit(0 if os.read(r, 2) == b"up" else 3)'"#;
     let out = c.run(1, "sh", &["-c", script]);
     assert_eq!(out["exit_code"], 0, "{out}");
-    std::thread::sleep(Duration::from_millis(500));
-    let left = Command::new("pgrep")
-        .args(["-f", "[s]leep 31987"])
-        .output()
-        .unwrap();
+    let left = || {
+        Command::new("pgrep")
+            .args(["-f", "[s]leep 31987"])
+            .output()
+            .unwrap()
+            .stdout
+    };
+    let gone = eventually(Duration::from_secs(10), || left().is_empty());
     let _ = Command::new("pkill").args(["-f", "[s]leep 31987"]).status();
     assert!(
-        left.stdout.is_empty(),
+        gone,
         "a daemon outlived the call: {}",
-        String::from_utf8_lossy(&left.stdout)
+        String::from_utf8_lossy(&left())
     );
 }
 
@@ -706,6 +714,25 @@ fn audit_cmd(args: &[&str]) -> (Option<i32>, String, String) {
 
 fn verify_dir(dir: &std::path::Path) -> (Option<i32>, String, String) {
     audit_cmd(&["--audit-verify", dir.to_str().unwrap()])
+}
+
+/// Polls `cond` until it holds or `timeout` passes, for state nothing notifies about (a process
+/// leaving the process table). It returns as soon as `cond` holds; the timeout only bounds a
+/// failure.
+#[cfg(target_os = "macos")]
+fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut pause = Duration::from_millis(1);
+    loop {
+        if cond() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(50));
+    }
 }
 
 fn session_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -872,12 +899,27 @@ fn two_servers_can_record_into_the_same_directory() {
 fn audit_cleanup_removes_old_sessions_on_request_and_leaves_the_record_sound() {
     let ws = workspace();
     let dir = audit_dir();
-    for _ in 0..3 {
+    // `--keep` goes by modification time: each session's is set outright (oldest first)
+    // instead of left to the clock's granularity.
+    let base = std::time::SystemTime::now() - Duration::from_secs(60);
+    let mut made = Vec::new();
+    for i in 0..3u64 {
         let mut c = Client::in_workspace(ws.path(), &["--audit-dir", dir.path().to_str().unwrap()]);
         c.run(1, "echo", &["x"]);
         drop(c.child.stdin.take());
         c.child.wait().unwrap();
-        std::thread::sleep(Duration::from_millis(5));
+        let new: Vec<_> = session_files(dir.path())
+            .into_iter()
+            .filter(|f| !made.contains(f))
+            .collect();
+        assert_eq!(new.len(), 1, "{new:?}");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&new[0])
+            .unwrap()
+            .set_modified(base + Duration::from_secs(i))
+            .unwrap();
+        made.push(new[0].clone());
     }
     let d = dir.path().to_str().unwrap();
     assert_eq!(
@@ -912,7 +954,6 @@ fn a_new_server_removes_sessions_past_the_retention() {
         c.run(1, "echo", &["x"]);
         drop(c.child.stdin.take());
         c.child.wait().unwrap();
-        std::thread::sleep(Duration::from_millis(5));
     };
     made(ws.path());
     made(ws.path());
@@ -1049,7 +1090,20 @@ fn a_dead_servers_escaped_process_is_killed_by_the_next_servers_sweep() {
     assert!(alive(), "the sleeper never started");
     dead.child.kill().unwrap();
     dead.child.wait().unwrap();
-    std::thread::sleep(Duration::from_millis(500));
+    // The server's watchdog kills the call's process group once it sees the server die: the
+    // python process holding the call open (`time.sleep(60)`) goes with it. Only then is it
+    // known that the watchdog has acted, and the sleeper, which left the group, is still there.
+    let parent_alive = || {
+        Command::new("pgrep")
+            .args(["-f", r"[t]ime\.sleep\(60\)"])
+            .output()
+            .map(|o| !o.stdout.is_empty())
+            .unwrap_or(false)
+    };
+    assert!(
+        eventually(Duration::from_secs(10), || !parent_alive()),
+        "the watchdog never killed the call's process group"
+    );
     assert!(
         alive(),
         "the sleeper died with its server (then there is nothing to sweep)"

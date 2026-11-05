@@ -225,6 +225,25 @@ fn settle() {
     }
 }
 
+/// Until the host's descriptors and threads stop changing: the threads the library keeps (a
+/// runtime's, a sweeper's) have started, and ones winding down have ended. Nothing announces
+/// either, so this watches for 200 ms without a change.
+fn quiet() {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = (open_fds(), threads());
+    let mut steady = 0;
+    while steady < 10 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+        let now = (open_fds(), threads());
+        if now == last {
+            steady += 1;
+        } else {
+            steady = 0;
+            last = now;
+        }
+    }
+}
+
 #[test]
 fn test_many_runs_leave_no_descriptor_thread_process_or_file_behind() {
     // The first rounds start whatever is started once and kept (a runtime, a sweeper).
@@ -233,14 +252,14 @@ fn test_many_runs_leave_no_descriptor_thread_process_or_file_behind() {
         assert_eq!(round(n), [true; 4], "ran, timed out, cpu limit, tmp limit");
     }
     settle();
-    std::thread::sleep(Duration::from_secs(1));
+    quiet();
     let (fds, threads_before, files) = (open_fds(), threads(), library_files());
 
     for n in 0..rounds() {
         round(n);
     }
     settle();
-    std::thread::sleep(Duration::from_secs(1));
+    quiet();
 
     let children = pgrep(&["-P", &std::process::id().to_string()]);
     let sleepers = pgrep(&["-f", &format!("sleep {SLEEP_SECS}")]);
