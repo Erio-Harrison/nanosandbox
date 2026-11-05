@@ -358,3 +358,62 @@ fn test_no_fds_leak_between_concurrent_runs() {
         .collect();
     assert!(leaks.is_empty(), "fds leaked into sandboxes: {leaks:?}");
 }
+
+/// Runs start while other threads of the host call `sigaction`. clone() copies the process
+/// whole, so a lock one of those threads held inside glibc (since 2.43 `sigaction` takes
+/// `__abort_lock`) is copied held, and a child that called `sigaction` itself waited on it for
+/// good: its run hung until the wall limit (seen on Ubuntu 26.04, as "fds leaked").
+#[test]
+#[cfg(target_os = "linux")]
+fn test_runs_start_while_other_threads_call_sigaction() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let hammers: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = Arc::clone(&stop);
+            thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    // SIGABRT is the signal whose handler `abort()` must see consistently.
+                    let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
+                    sa.sa_sigaction = libc::SIG_DFL;
+                    unsafe { libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut()) };
+                }
+            })
+        })
+        .collect();
+
+    let sandbox = Arc::new(
+        Sandbox::builder()
+            .working_dir("/tmp")
+            .wall_time_limit(Duration::from_secs(10))
+            .build()
+            .unwrap(),
+    );
+    let runners: Vec<_> = (0..4)
+        .map(|_| {
+            let sandbox = Arc::clone(&sandbox);
+            thread::spawn(move || {
+                (0..40)
+                    .map(|_| sandbox.run("sh", &["-c", "echo ok"]).unwrap())
+                    .filter(|r| !(r.exit_code == 0 && r.stdout == "ok\n" && !r.killed_by_timeout))
+                    .map(|r| {
+                        format!(
+                            "{:?}",
+                            (r.exit_code, r.stdout, r.killed_by_timeout, r.duration)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let bad: Vec<String> = runners
+        .into_iter()
+        .flat_map(|h| h.join().unwrap())
+        .collect();
+    stop.store(true, Ordering::Relaxed);
+    for h in hammers {
+        h.join().unwrap();
+    }
+    assert!(bad.is_empty(), "runs that hung or failed: {bad:?}");
+}
