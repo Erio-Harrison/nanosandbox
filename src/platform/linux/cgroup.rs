@@ -415,6 +415,15 @@ fn read_controller_list(path: &Path) -> Result<Vec<String>> {
     Ok(content.split_whitespace().map(str::to_string).collect())
 }
 
+/// The pids listed in `dir`'s `cgroup.procs`.
+fn pids_in(dir: &Path) -> Vec<u32> {
+    fs::read_to_string(dir.join("cgroup.procs"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect()
+}
+
 /// Enables `controllers` in `dir`'s `cgroup.subtree_control`, idempotently.
 fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
     if controllers.is_empty() {
@@ -443,9 +452,10 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    // The kernel serializes writes to subtree_control: 16 processes writing at once (2400
-    // writes) never failed each other. An EBUSY is the no-internal-process rule, which no
-    // wait clears. Someone else's write may have covered us in the meantime.
+    // Writes to subtree_control are serialized by the kernel, so concurrent writers never fail
+    // each other; an EBUSY is the no-internal-process rule, a process directly in `dir`. The
+    // scope's root is emptied before its controllers are enabled (`scope::compute_own_scope`)
+    // and the base never holds one, so it is reported, not retried.
     let last_err = match fs::write(&subtree_path, &value) {
         Ok(()) => return Ok(()),
         Err(e) if e.raw_os_error() == Some(libc::EBUSY) => e,
@@ -456,14 +466,14 @@ fn enable_subtree_control(dir: &Path, controllers: &[&str]) -> Result<()> {
             });
         }
     };
+    // Someone else's write may have covered us in the meantime.
     let enabled = read_controller_list(&subtree_path)?;
     if missing.iter().all(|c| enabled.iter().any(|e| e == c)) {
         return Ok(());
     }
     // EBUSY usually means the no-internal-process rule: name the process in `dir`.
-    let procs = fs::read_to_string(dir.join("cgroup.procs")).unwrap_or_default();
-    let described: Vec<String> = procs
-        .split_whitespace()
+    let described: Vec<String> = pids_in(dir)
+        .into_iter()
         .map(|pid| {
             let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
             let field = |k: &str| {
