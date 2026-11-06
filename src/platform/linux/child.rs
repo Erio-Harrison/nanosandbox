@@ -1,10 +1,11 @@
 //! What runs in the child between clone() and exec(): raw syscalls only, no allocation.
 //! clone() is raw, not libc's fork(), so there's no pthread_atfork() malloc-lock protection:
-//! an allocation here can hang on a frozen malloc lock (see `ExecBuffers` in prepare.rs).
+//! an allocation here can hang on a frozen malloc lock (see `ExecBuffers` in prepare.rs). The
+//! same goes for any libc function that takes a lock another host thread may hold at clone
+//! time: `sigaction`/`signal` (glibc 2.43) and `setresuid` are two.
 
 use std::ffi::CString;
 use std::os::unix::io::RawFd;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::landlock::WriteRules;
 use super::mount::MountPlan;
@@ -12,16 +13,54 @@ use super::proxy_link::ProxyLinkChild;
 use super::seccomp::SyscallFilter;
 use super::{close_raw, read_raw, write_raw};
 
-/// The sandboxed command's pid for [`forward_to_child`]; atomic since the signal handler reads it.
-static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+/// Every signal, as the kernel's 64-bit set (`SIGKILL` and `SIGSTOP` can't be blocked, and the
+/// kernel leaves them out).
+const ALL_SIGNALS: u64 = !0;
 
-/// The init shim's signal handler: relays signals to the command. `kill` is async-signal-safe.
-extern "C" fn forward_to_child(sig: libc::c_int) {
-    let pid = CHILD_PID.load(Ordering::Relaxed);
-    if pid > 0 {
-        unsafe {
-            libc::kill(pid, sig);
-        }
+/// `rt_sigprocmask(SIG_SETMASK)` as a raw syscall. In the child, glibc's `sigaction`/`signal`
+/// must not be called at all: since glibc 2.43 `sigaction` takes `__abort_lock`, and a host
+/// thread inside `sigaction` when clone() copied the process leaves that lock held for good in
+/// the child (seen: every child of a busy test process hung in a futex, Ubuntu 26.04). Raw
+/// syscalls take no lock.
+fn set_signal_mask(mask: u64) {
+    unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigprocmask,
+            libc::SIG_SETMASK as libc::c_long,
+            &mask as *const u64,
+            std::ptr::null::<u64>(),
+            8 as libc::c_long,
+        );
+    }
+}
+
+/// `SIGPIPE` back to its default action, by a raw `rt_sigaction`. An all-zero kernel
+/// `sigaction` is `SIG_DFL`, no flags, empty mask, whatever the architecture's field order.
+fn default_sigpipe() {
+    let zero = [0u64; 4];
+    unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigaction,
+            libc::SIGPIPE as libc::c_long,
+            zero.as_ptr(),
+            std::ptr::null::<u64>(),
+            8 as libc::c_long,
+        );
+    }
+}
+
+/// Waits for any signal, which is blocked and so queued, never dropped; its number, or a
+/// negative value when interrupted.
+fn wait_for_signal() -> libc::c_long {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::syscall(
+            libc::SYS_rt_sigtimedwait,
+            &ALL_SIGNALS as *const u64,
+            &mut info as *mut libc::siginfo_t,
+            std::ptr::null::<libc::timespec>(),
+            8 as libc::c_long,
+        )
     }
 }
 
@@ -260,18 +299,11 @@ impl ChildSetup {
         }
 
         // We become init of a fresh PID ns, where pid_namespaces(7) drops default-disposition
-        // signals from other members (even self-SIGKILL) unless caught. So fork: this process stays
-        // init and relays signals to the command (PID 2), as `tini`/`docker run --init` do.
-        for sig in (1..=31).chain(libc::SIGRTMIN()..=libc::SIGRTMAX()) {
-            if sig == libc::SIGKILL || sig == libc::SIGSTOP || sig == libc::SIGCHLD {
-                continue;
-            }
-            let mut sa: libc::sigaction = unsafe { std::mem::zeroed() };
-            sa.sa_sigaction = forward_to_child as *const () as libc::sighandler_t;
-            unsafe {
-                libc::sigaction(sig, &sa, std::ptr::null_mut());
-            }
-        }
+        // signals from other members (even self-SIGKILL) unless caught or blocked. So fork: this
+        // process stays init and relays signals to the command (PID 2), as `tini` does. It blocks
+        // them all and takes them with sigtimedwait (blocked ones queue, the kernel doesn't drop
+        // them), so no handler is installed: that would be a glibc `sigaction`, see above.
+        set_signal_mask(ALL_SIGNALS);
 
         // Raw clone(), not fork(): same no-allocation reasoning as above.
         let forked = unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_long, 0i64) };
@@ -291,33 +323,47 @@ impl ChildSetup {
                 }
                 libc::syscall(libc::SYS_close_range, keep + 1, u32::MAX, 0i32);
             }
-            CHILD_PID.store(forked as i32, Ordering::Relaxed);
             loop {
-                let mut status: libc::c_int = 0;
-                let r = unsafe { libc::waitpid(-1, &mut status, 0) };
-                if r < 0 {
-                    if unsafe { *libc::__errno_location() } == libc::EINTR {
-                        continue;
+                // Reap what is ready: the command, and orphans reparented here.
+                loop {
+                    let mut status: libc::c_int = 0;
+                    let r = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+                    if r == 0 {
+                        break;
                     }
-                    return 1; // ECHILD or similar: nothing left to reap
-                }
-                if r == forked as libc::pid_t {
-                    return if libc::WIFEXITED(status) {
-                        libc::WEXITSTATUS(status) as isize
-                    } else if libc::WIFSIGNALED(status) {
-                        // Can't die by the signal ourselves (the kernel would drop it): exit 128+signal like `tini`,
-                        // and also send the signal over the pipe, since `exit(143)` looks the same.
-                        let sig = libc::WTERMSIG(status);
-                        let byte = sig as u8;
-                        unsafe {
-                            libc::write(self.signal_write, &byte as *const u8 as *const _, 1);
+                    if r < 0 {
+                        if unsafe { *libc::__errno_location() } == libc::EINTR {
+                            continue;
                         }
-                        (128 + sig) as isize
-                    } else {
-                        1
-                    };
+                        return 1; // ECHILD or similar: nothing left to reap
+                    }
+                    if r == forked as libc::pid_t {
+                        return if libc::WIFEXITED(status) {
+                            libc::WEXITSTATUS(status) as isize
+                        } else if libc::WIFSIGNALED(status) {
+                            // Can't die by the signal ourselves (the kernel would drop it): exit 128+signal like `tini`,
+                            // and also send the signal over the pipe, since `exit(143)` looks the same.
+                            let sig = libc::WTERMSIG(status);
+                            let byte = sig as u8;
+                            unsafe {
+                                libc::write(self.signal_write, &byte as *const u8 as *const _, 1);
+                            }
+                            (128 + sig) as isize
+                        } else {
+                            1
+                        };
+                    }
                 }
-                // Orphan reparented here: reaped, keep going.
+                // Then the next signal: SIGCHLD means look again; any other goes to the command.
+                let sig = wait_for_signal();
+                if sig < 0 && unsafe { *libc::__errno_location() } != libc::EINTR {
+                    return 1; // not a signal we can wait for: don't spin
+                }
+                if sig > 0 && sig != libc::SIGCHLD as libc::c_long {
+                    unsafe {
+                        libc::kill(forked as libc::pid_t, sig as libc::c_int);
+                    }
+                }
             }
         }
 
@@ -325,12 +371,8 @@ impl ChildSetup {
 
         // Ignored signals and the mask survive exec. We ignore SIGPIPE (Rust runtime), which made
         // `yes | head -1` fail with "Broken pipe"; restore defaults.
-        unsafe {
-            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-            let mut none: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut none);
-            libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
-        }
+        default_sigpipe();
+        set_signal_mask(0);
 
         // Only stdio crosses exec. A host fd without CLOEXEC (a C library's, one inherited from
         // the host's parent) would otherwise reach the command: Landlock doesn't judge open
