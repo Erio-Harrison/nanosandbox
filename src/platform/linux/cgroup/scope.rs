@@ -29,9 +29,8 @@ pub(super) fn ensure_own_scope() -> Result<PathBuf> {
 /// Every controller nanosandbox might enable for a sandbox run.
 const ALL_CONTROLLERS: &[&str] = &["memory", "cpu", "pids"];
 
-/// `app.slice` isn't delegated, so we need our own `Delegate=true` unit. A scope the caller
-/// put us in is reused (checked over D-Bus) to keep their limits; else relocate into a fresh
-/// one, warning if that leaves a limit behind.
+/// `app.slice` isn't delegated, so we need our own `Delegate=true` unit: always a fresh scope,
+/// in the slice of the unit we're in, with that unit's own limits copied to it.
 fn compute_own_scope() -> std::result::Result<PathBuf, String> {
     let uid = unsafe { libc::getuid() };
     let target = user_app_slice(CGROUP_ROOT, uid);
@@ -45,51 +44,32 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
         ));
     }
 
+    // Never the unit we're in, even when it is delegated: this process sits in its root, and
+    // its controllers can be enabled only once no process is directly in it. A process of ours
+    // forked there just before we left may still be exiting, which a newer kernel (7.0) neither
+    // lists nor tells the end of, yet counts. A fresh scope's root never holds this process, so
+    // the question doesn't arise (see `relocate_into_delegated_scope`).
     let governing = governing_unit();
-
-    let usable = governing.as_ref().is_some_and(|unit| {
-        current_unit_is_exclusively_ours(unit)
-            && current_unit_delegated_controllers(unit).is_some_and(|delegated| {
-                ALL_CONTROLLERS
-                    .iter()
-                    .all(|c| delegated.iter().any(|d| d == c))
-            })
-    });
-
-    // Controllers can be enabled in `own`'s root only once no process is directly in it, and a
-    // process is born where its parent is. A fresh scope never holds this process in its root
-    // (see `relocate_into_delegated_scope`); a reused unit does, so this process moves out and
-    // whatever it forked meanwhile is moved or waited for (`empty_the_root`).
-    let (own, supervisor) = if usable {
-        let own = governing.expect("usable implies governing.is_some()").root;
-        let supervisor = make_supervisor(&own)?;
-        fs::write(
-            supervisor.join("cgroup.procs"),
-            std::process::id().to_string(),
-        )
-        .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
-        (own, supervisor)
-    } else {
-        let mut preferred_slice = None;
-        if let Some(unit) = &governing {
-            warn_if_leaving_resource_limits_behind(unit);
-            preferred_slice = unit_property(unit, "Slice").and_then(|v| String::try_from(v).ok());
-        }
-        relocate_into_delegated_scope(preferred_slice.as_deref())?
+    let (slice, limits) = match &governing {
+        Some(unit) => (
+            unit_property(unit, "Slice").and_then(|v| String::try_from(v).ok()),
+            inherited_limits(unit),
+        ),
+        None => (None, Vec::new()),
     };
-    empty_the_root(&own, &supervisor)?;
+    relocate_into_delegated_scope(slice.as_deref(), &limits)
+}
 
-    // Enable what `own` offers of every controller a run may need, while its root is known to
-    // be empty, rather than when some later run first needs one.
+/// Enables what `own` offers of every controller a run may need, while its root is known to be
+/// empty, rather than when some later run first needs one.
+fn enable_root_controllers(own: &Path) -> std::result::Result<(), String> {
     let offered = fs::read_to_string(own.join("cgroup.controllers")).unwrap_or_default();
     let enable: Vec<&str> = ALL_CONTROLLERS
         .iter()
         .copied()
         .filter(|c| offered.split_whitespace().any(|o| o == *c))
         .collect();
-    super::enable_subtree_control(&own, &enable).map_err(|e| e.to_string())?;
-
-    Ok(own)
+    super::enable_subtree_control(own, &enable).map_err(|e| e.to_string())
 }
 
 /// Pid- and nonce-suffixed leaf of `own` for this process, so `own`'s root can hold none and
@@ -112,53 +92,9 @@ fn make_supervisor(own: &Path) -> std::result::Result<PathBuf, String> {
     Ok(supervisor)
 }
 
-/// The longest a process stuck in its own exit (uninterruptible, a sick filesystem) may hold
-/// up emptying a root: a bound for a broken kernel state, not part of the normal order.
+/// The longest the placeholder's exit may take: a bound for a broken kernel state, not part of
+/// the normal order (it exits as soon as its pipe closes).
 const EXIT_GUARD: Duration = Duration::from_secs(5);
-
-/// Moves every process out of `root` into `into`. The kernel moves a live process at once but
-/// skips one in its exit (it is still counted in `root`); that one is waited for on its pidfd,
-/// which turns readable only once it has left its cgroup.
-fn empty_the_root(root: &Path, into: &Path) -> std::result::Result<(), String> {
-    let deadline = Instant::now() + EXIT_GUARD;
-    loop {
-        let pids = super::pids_in(root);
-        if pids.is_empty() {
-            return Ok(());
-        }
-        for pid in &pids {
-            match fs::write(into.join("cgroup.procs"), pid.to_string()) {
-                Ok(()) => {}
-                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {} // gone
-                Err(e) => {
-                    return Err(format!(
-                        "cannot move process {pid} out of {} into {}: {e}",
-                        root.display(),
-                        into.display()
-                    ));
-                }
-            }
-        }
-        for pid in super::pids_in(root) {
-            if !wait_until_exited(pid, deadline) {
-                return Err(format!(
-                    "process {pid} in {} could not be moved and did not finish exiting",
-                    root.display()
-                ));
-            }
-        }
-    }
-}
-
-/// Whether `pid` has exited by `deadline`, waiting on its pidfd. One already gone counts.
-fn wait_until_exited(pid: u32, deadline: Instant) -> bool {
-    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_long, 0 as libc::c_long) };
-    if fd < 0 {
-        return unsafe { *libc::__errno_location() } == libc::ESRCH;
-    }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
-    readable_by(&fd, deadline)
-}
 
 /// Whether `fd` turns readable by `deadline`.
 fn readable_by(fd: &OwnedFd, deadline: Instant) -> bool {
@@ -240,44 +176,31 @@ fn governing_unit() -> Option<GoverningUnit> {
     })
 }
 
-/// Required before `subtree_control` can be enabled (no-internal-process rule). Empty root is fine.
-fn current_unit_is_exclusively_ours(unit: &GoverningUnit) -> bool {
-    let Ok(procs) = fs::read_to_string(unit.root.join("cgroup.procs")) else {
-        return false;
-    };
-    super::only_us_or_empty(&procs)
-}
-
-/// From `DelegateControllers`: `Delegate` is true for `Delegate=pids`, and
-/// `cgroup.controllers` shows kernel-allowed, not delegated.
-fn current_unit_delegated_controllers(unit: &GoverningUnit) -> Option<Vec<String>> {
-    Vec::<String>::try_from(unit_property(unit, "DelegateControllers")?).ok()
-}
-
-/// Warns about a `MemoryMax`/`CPUQuota` we'd leave behind. `TasksMax` isn't checked: its
-/// unset value is a real number, so it would warn on nearly every unit.
-fn warn_if_leaving_resource_limits_behind(unit: &GoverningUnit) {
+/// The unit's own `MemoryMax`, `CPUQuota` and `TasksMax`, for the fresh scope: the sandboxes
+/// stay under the limits the caller set, though as the scope's own budget, no longer shared
+/// with the unit's other processes. Unset ones (infinity) are left out.
+fn inherited_limits(unit: &GoverningUnit) -> Vec<(&'static str, u64)> {
     const INFINITY: u64 = u64::MAX;
-    for (prop, label) in [
-        ("MemoryMax", "a MemoryMax"),
-        ("CPUQuotaPerSecUSec", "a CPUQuota"),
-    ] {
-        if let Some(value) = unit_property(unit, prop).and_then(|v| u64::try_from(v).ok())
-            && value != INFINITY
-        {
-            tracing::warn!(
-                "this process is inside {} ({label} of its own), but nanosandbox could \
-                     not confirm that unit delegates every cgroup controller it needs (or \
-                     that unit's own root cgroup holds other processes nanosandbox doesn't \
-                     control) — moving into a separate scope of its own, which will no \
-                     longer be subject to {label} set there. Add `Delegate=yes` to that unit \
-                     (and, if it has its own main process, `DelegateSubgroup=` — see \
-                     systemd.resource-control(5)) if you want the sandboxed process to \
-                     remain inside it and count against its limits.",
-                unit.root.display()
-            );
-        }
+    let limits: Vec<(&'static str, u64)> = ["MemoryMax", "CPUQuotaPerSecUSec", "TasksMax"]
+        .into_iter()
+        .filter_map(|prop| {
+            let value = u64::try_from(unit_property(unit, prop)?).ok()?;
+            (value != INFINITY).then_some((prop, value))
+        })
+        .collect();
+    if !limits.is_empty() {
+        tracing::info!(
+            "nanosandbox runs in a scope of its own; the limits of {} ({}) are copied to it, \
+             as its own budget rather than a share of that unit's",
+            unit.root.display(),
+            limits
+                .iter()
+                .map(|(p, v)| format!("{p}={v}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
+    limits
 }
 
 fn unit_property(unit: &GoverningUnit, property: &str) -> Option<zbus::zvariant::OwnedValue> {
@@ -391,11 +314,12 @@ fn cgroup_path_of(pid: &str) -> std::result::Result<PathBuf, String> {
 /// Asks systemd over D-Bus for a fresh `Delegate=true` scope (only the delegater can place the
 /// first process in it) and moves this process into a leaf of it, never into its root: the
 /// scope is made with a placeholder process, and this one is attached straight to the leaf.
-/// Returns the scope's root and the leaf; the root's only process is the placeholder, which
-/// exits when this returns.
+/// The root's controllers are enabled while it is empty. Returns the scope's root; the
+/// placeholder exits, in the leaf, when this returns.
 fn relocate_into_delegated_scope(
     preferred_slice: Option<&str>,
-) -> std::result::Result<(PathBuf, PathBuf), String> {
+    limits: &[(&'static str, u64)],
+) -> std::result::Result<PathBuf, String> {
     use zbus::blocking::Proxy;
     use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::zvariant::{OwnedObjectPath, Value};
@@ -427,6 +351,9 @@ fn relocate_into_delegated_scope(
     ];
     if let Some(slice) = preferred_slice {
         properties.push(("Slice", Value::new(slice)));
+    }
+    for (prop, value) in limits {
+        properties.push((prop, Value::new(*value)));
     }
     let properties = properties.as_slice();
     let aux: &[(&str, &[(&str, Value)])] = &[];
@@ -490,6 +417,22 @@ fn relocate_into_delegated_scope(
 
     let own = cgroup_path_of(&placeholder_pid)?;
     let supervisor = make_supervisor(&own)?;
+    // The root's only process is the placeholder, alive: moved, it is out at once (a moving
+    // task can't be half there, unlike an exiting one, which a newer kernel no longer lists but
+    // still counts). The empty root then takes its controllers, before this process arrives.
+    fs::write(supervisor.join("cgroup.procs"), &placeholder_pid).map_err(|e| {
+        format!(
+            "cannot move the placeholder into {}: {e}",
+            supervisor.display()
+        )
+    })?;
+    if cgroup_path_of(&placeholder_pid)? != supervisor {
+        return Err(format!(
+            "the placeholder did not move into {}",
+            supervisor.display()
+        ));
+    }
+    enable_root_controllers(&own)?;
     let leaf = format!(
         "/{}",
         supervisor
@@ -512,8 +455,7 @@ fn relocate_into_delegated_scope(
             supervisor.display()
         ));
     }
-    drop(placeholder); // exits; `empty_the_root` finds nothing else to wait for
-    Ok((own, supervisor))
+    Ok(own)
 }
 
 /// How long to wait for systemd's signal that the scope's job ended, once the call returned.
@@ -525,54 +467,6 @@ const FAILED_CALL_WAIT: Duration = Duration::from_millis(500);
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Live processes are moved out; one killed just before (a big one, so its exit takes a
-    /// while) can't be, and is waited for until it has left. Then the root takes controllers.
-    #[test]
-    fn test_emptying_a_root_moves_the_live_and_waits_for_the_exiting() {
-        use std::process::Command;
-        let leaf = |name: &str| super::super::CgroupManager::create(name, &["memory"]).ok();
-        let id = super::super::next_leaf_id();
-        let (Some(root), Some(into)) = (leaf(&format!("{id}-root")), leaf(&format!("{id}-into")))
-        else {
-            return;
-        };
-        let mut live: Vec<_> = (0..3)
-            .map(|_| Command::new("sleep").arg("30").spawn().unwrap())
-            .collect();
-        let mut dying = Command::new("python3")
-            .args(["-c", "b = bytearray(1 << 30)\nfor i in range(0, len(b), 4096): b[i] = 1\nprint(flush=True)\nimport time; time.sleep(30)"])
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        for kid in live.iter().chain(std::iter::once(&dying)) {
-            root.add_process(kid.id()).unwrap();
-        }
-        // Wait until it has touched its gigabyte, then kill it: its exit frees that memory.
-        let mut line = String::new();
-        std::io::BufRead::read_line(
-            &mut std::io::BufReader::new(dying.stdout.take().unwrap()),
-            &mut line,
-        )
-        .unwrap();
-        unsafe { libc::kill(dying.id() as libc::pid_t, libc::SIGKILL) };
-
-        let emptied = empty_the_root(&root.path, &into.path);
-        let left = super::super::pids_in(&root.path);
-        let takes = fs::write(root.path.join("cgroup.subtree_control"), "+memory");
-
-        for kid in &mut live {
-            let _ = kid.kill();
-            let _ = kid.wait();
-        }
-        let _ = dying.wait();
-        let _ = fs::write(root.path.join("cgroup.subtree_control"), "-memory");
-        into.cleanup();
-        root.cleanup();
-        assert_eq!(emptied, Ok(()));
-        assert!(left.is_empty(), "{left:?}");
-        assert!(takes.is_ok(), "{takes:?}");
-    }
 
     #[test]
     fn builds_the_conventional_systemd_delegation_path() {

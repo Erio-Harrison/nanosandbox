@@ -1,10 +1,10 @@
-//! The first run with a resource limit puts this process into a delegated cgroup of its own
-//! (`cgroup/scope.rs`) and enables controllers in that cgroup's root, which needs the root to
+//! The first run with a resource limit puts this process into a delegated scope of its own
+//! (`cgroup/scope.rs`) and enables controllers in that scope's root, which needs the root to
 //! hold no process. Processes forked at that moment, by the library or by the host's own code,
 //! used to land in the root and fail it ("cannot enable '+memory' ... busy"). The move happens
-//! once per process, so every round is a fresh process: this binary again, run directly (a
-//! fresh scope is made, while other threads fork) and under `systemd-run --scope -p
-//! Delegate=yes` (that unit is reused).
+//! once per process, so every round is a fresh process: this binary again, run directly and
+//! under `systemd-run --scope -p Delegate=yes -p MemoryMax=300M` (a delegated unit with a limit
+//! of its own, which the fresh scope copies), with other threads forking all the while.
 
 #![cfg(target_os = "linux")]
 
@@ -15,8 +15,6 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 const ROUND: &str = "NANOSANDBOX_SCOPE_RACE_ROUND";
-/// "0": the round forks nothing besides its one limited run.
-const STORM: &str = "NANOSANDBOX_SCOPE_RACE_STORM";
 const ROUNDS: usize = 20;
 const TEST: &str = "test_the_first_limited_run_succeeds_while_other_threads_fork";
 
@@ -24,11 +22,7 @@ const TEST: &str = "test_the_first_limited_run_succeeds_while_other_threads_fork
 /// half spawning plain commands, and once each has forked once, the first run with a limit.
 fn round() {
     let stop = Arc::new(AtomicBool::new(false));
-    let threads = if std::env::var(STORM).as_deref() == Ok("0") {
-        0
-    } else {
-        6
-    };
+    let threads = 6;
     let started = Arc::new(Barrier::new(threads + 1));
     let storm: Vec<_> = (0..threads)
         .map(|i| {
@@ -71,24 +65,34 @@ fn round() {
         t.join().unwrap();
     }
     if outcome == "OK" {
-        // Which path it took: a unit systemd-run made is reused, else a fresh scope is ours.
+        // This process sits in a leaf of its scope; the scope's root holds the limits.
         let cgroup = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        outcome = if cgroup.contains("/run-") {
-            "OK reused".into()
-        } else {
-            "OK fresh".into()
-        };
+        let rel = cgroup.trim().trim_start_matches("0::");
+        let own = std::path::Path::new("/sys/fs/cgroup")
+            .join(rel.trim_start_matches('/'))
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let memory_max = std::fs::read_to_string(own.join("memory.max")).unwrap_or_default();
+        let fresh = own
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().starts_with("nanosandbox-"));
+        outcome = format!(
+            "OK {} memory.max={}",
+            if fresh { "fresh" } else { "elsewhere" },
+            memory_max.trim()
+        );
     }
     // On a line of its own: libtest prints the test's name just before.
     println!("\nROUND-OUTCOME {outcome}");
 }
 
-/// Runs `count` rounds through `launcher` (the binary itself, or systemd-run wrapping it), with
-/// or without the storm. None if limits are unavailable here.
-fn rounds(launcher: &[&str], count: usize, storm: bool) -> Option<Vec<String>> {
+/// Runs `ROUNDS` rounds through `launcher` (the binary itself, or systemd-run wrapping it).
+/// None if limits are unavailable here.
+fn rounds(launcher: &[&str]) -> Option<Vec<String>> {
     let exe = std::env::current_exe().unwrap();
     let mut outcomes = Vec::new();
-    for _ in 0..count {
+    for _ in 0..ROUNDS {
         let mut cmd = Command::new(launcher.first().copied().unwrap_or(exe.to_str().unwrap()));
         if !launcher.is_empty() {
             cmd.args(&launcher[1..]).arg(&exe);
@@ -96,7 +100,6 @@ fn rounds(launcher: &[&str], count: usize, storm: bool) -> Option<Vec<String>> {
         let out = cmd
             .args([TEST, "--exact", "--nocapture", "--test-threads=1"])
             .env(ROUND, "1")
-            .env(STORM, if storm { "1" } else { "0" })
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -120,12 +123,14 @@ fn test_the_first_limited_run_succeeds_while_other_threads_fork() {
         return round();
     }
     let mut bad = Vec::new();
-    if let Some(outcomes) = rounds(&[], ROUNDS, true) {
-        bad.extend(outcomes.into_iter().filter(|o| o != "OK fresh"));
+    if let Some(outcomes) = rounds(&[]) {
+        bad.extend(
+            outcomes
+                .into_iter()
+                .filter(|o| o != "OK fresh memory.max=max"),
+        );
     }
-    // A unit the caller made and delegated is reused, so long as its root holds only this
-    // process when it is checked (with the storm it never does, and a fresh scope is made).
-    // Emptying that root of what forks meanwhile is `scope.rs`'s own test.
+    // Inside a delegated unit with a limit of its own: a fresh scope still, carrying the limit.
     let systemd_run = [
         "systemd-run",
         "--user",
@@ -133,6 +138,8 @@ fn test_the_first_limited_run_succeeds_while_other_threads_fork() {
         "-q",
         "-p",
         "Delegate=yes",
+        "-p",
+        "MemoryMax=300M",
     ];
     let usable = Command::new(systemd_run[0])
         .args(&systemd_run[1..])
@@ -140,9 +147,13 @@ fn test_the_first_limited_run_succeeds_while_other_threads_fork() {
         .status()
         .is_ok_and(|s| s.success());
     if !usable {
-        eprintln!("skipping the reused-unit rounds: systemd-run --user --scope is unavailable");
-    } else if let Some(outcomes) = rounds(&systemd_run, 5, false) {
-        bad.extend(outcomes.into_iter().filter(|o| o != "OK reused"));
+        eprintln!("skipping the delegated-unit rounds: systemd-run --user --scope is unavailable");
+    } else if let Some(outcomes) = rounds(&systemd_run) {
+        bad.extend(
+            outcomes
+                .into_iter()
+                .filter(|o| o != "OK fresh memory.max=314572800"),
+        );
     }
     assert!(bad.is_empty(), "rounds that failed: {bad:?}");
 }
