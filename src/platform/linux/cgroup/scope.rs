@@ -3,8 +3,9 @@
 
 use crate::error::{Result, SandboxError};
 use std::fs;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::CGROUP_ROOT;
 
@@ -55,22 +56,45 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
             })
     });
 
-    let own = if usable {
-        governing.expect("usable implies governing.is_some()").root
+    // Controllers can be enabled in `own`'s root only once no process is directly in it, and a
+    // process is born where its parent is. A fresh scope never holds this process in its root
+    // (see `relocate_into_delegated_scope`); a reused unit does, so this process moves out and
+    // whatever it forked meanwhile is moved or waited for (`empty_the_root`).
+    let (own, supervisor) = if usable {
+        let own = governing.expect("usable implies governing.is_some()").root;
+        let supervisor = make_supervisor(&own)?;
+        fs::write(
+            supervisor.join("cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
+        (own, supervisor)
     } else {
         let mut preferred_slice = None;
         if let Some(unit) = &governing {
             warn_if_leaving_resource_limits_behind(unit);
             preferred_slice = unit_property(unit, "Slice").and_then(|v| String::try_from(v).ok());
         }
-        // Flattened to String: the result is cached in SCOPE and cloned, and SandboxError's
-        // trait-object source can't be Clone. Only the .source() chain is lost.
-        relocate_into_delegated_scope(preferred_slice.as_deref()).map_err(|e| e.to_string())?;
-        own_cgroup_path().map_err(|e| e.to_string())?
+        relocate_into_delegated_scope(preferred_slice.as_deref())?
     };
+    empty_the_root(&own, &supervisor)?;
 
-    // Pid- and nonce-suffixed leaf so `own`'s root holds no process (required for
-    // subtree_control) and reused units/pids don't collide. Swept from ensure_base, not here.
+    // Enable what `own` offers of every controller a run may need, while its root is known to
+    // be empty, rather than when some later run first needs one.
+    let offered = fs::read_to_string(own.join("cgroup.controllers")).unwrap_or_default();
+    let enable: Vec<&str> = ALL_CONTROLLERS
+        .iter()
+        .copied()
+        .filter(|c| offered.split_whitespace().any(|o| o == *c))
+        .collect();
+    super::enable_subtree_control(&own, &enable).map_err(|e| e.to_string())?;
+
+    Ok(own)
+}
+
+/// Pid- and nonce-suffixed leaf of `own` for this process, so `own`'s root can hold none and
+/// reused units/pids don't collide. Swept from ensure_base, not here.
+fn make_supervisor(own: &Path) -> std::result::Result<PathBuf, String> {
     let supervisor = own.join(format!(
         "nanosandbox-supervisor-{}-{:08x}",
         std::process::id(),
@@ -85,21 +109,74 @@ fn compute_own_scope() -> std::result::Result<PathBuf, String> {
             supervisor.display()
         ));
     }
-    fs::write(
-        supervisor.join("cgroup.procs"),
-        std::process::id().to_string(),
-    )
-    .map_err(|e| format!("cannot move into {}: {e}", supervisor.display()))?;
+    Ok(supervisor)
+}
 
-    // Children forked between landing in `own` and the move above stay behind and block
-    // enabling `own`'s controllers (EBUSY). Later children inherit `supervisor`, so one pass suffices.
-    let leftovers = fs::read_to_string(own.join("cgroup.procs")).unwrap_or_default();
-    for pid in leftovers.split_whitespace() {
-        // Already exited between the read and the write is fine.
-        let _ = fs::write(supervisor.join("cgroup.procs"), pid);
+/// The longest a process stuck in its own exit (uninterruptible, a sick filesystem) may hold
+/// up emptying a root: a bound for a broken kernel state, not part of the normal order.
+const EXIT_GUARD: Duration = Duration::from_secs(5);
+
+/// Moves every process out of `root` into `into`. The kernel moves a live process at once but
+/// skips one in its exit (it is still counted in `root`); that one is waited for on its pidfd,
+/// which turns readable only once it has left its cgroup.
+fn empty_the_root(root: &Path, into: &Path) -> std::result::Result<(), String> {
+    let deadline = Instant::now() + EXIT_GUARD;
+    loop {
+        let pids = super::pids_in(root);
+        if pids.is_empty() {
+            return Ok(());
+        }
+        for pid in &pids {
+            match fs::write(into.join("cgroup.procs"), pid.to_string()) {
+                Ok(()) => {}
+                Err(e) if e.raw_os_error() == Some(libc::ESRCH) => {} // gone
+                Err(e) => {
+                    return Err(format!(
+                        "cannot move process {pid} out of {} into {}: {e}",
+                        root.display(),
+                        into.display()
+                    ));
+                }
+            }
+        }
+        for pid in super::pids_in(root) {
+            if !wait_until_exited(pid, deadline) {
+                return Err(format!(
+                    "process {pid} in {} could not be moved and did not finish exiting",
+                    root.display()
+                ));
+            }
+        }
     }
+}
 
-    Ok(own)
+/// Whether `pid` has exited by `deadline`, waiting on its pidfd. One already gone counts.
+fn wait_until_exited(pid: u32, deadline: Instant) -> bool {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_long, 0 as libc::c_long) };
+    if fd < 0 {
+        return unsafe { *libc::__errno_location() } == libc::ESRCH;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
+    readable_by(&fd, deadline)
+}
+
+/// Whether `fd` turns readable by `deadline`.
+fn readable_by(fd: &OwnedFd, deadline: Instant) -> bool {
+    let mut pfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let ms = crate::platform::checks::poll_timeout_ms(Some(deadline), Instant::now());
+        let n = unsafe { libc::poll(&mut pfd, 1, ms) };
+        if n > 0 {
+            return true;
+        }
+        if n == 0 || unsafe { *libc::__errno_location() } != libc::EINTR {
+            return false;
+        }
+    }
 }
 
 /// The systemd unit governing this process's cgroup, via `GetUnitByPID`: guessing from our
@@ -231,44 +308,94 @@ pub(super) fn user_app_slice(cgroup_root: &str, uid: u32) -> PathBuf {
         .join("app.slice")
 }
 
-/// Reads this process's own cgroup v2 path from `/proc/self/cgroup`.
-fn own_cgroup_path() -> Result<PathBuf> {
-    let raw =
-        fs::read_to_string("/proc/self/cgroup").map_err(|e| SandboxError::CgroupCreation {
-            context: format!("cannot read /proc/self/cgroup: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+/// A process of ours that the fresh scope is made with, so that this process never sits in
+/// the scope's root: it goes straight into its leaf (`AttachProcessesToUnit`). Single-threaded
+/// and never forking, it only waits for its pipe to close. Made by a raw clone() of this
+/// (multi-threaded) process, so it runs nothing but raw syscalls (see `child.rs`).
+struct Placeholder {
+    pid: libc::pid_t,
+    pidfd: OwnedFd,
+    release: Option<OwnedFd>,
+}
+
+impl Placeholder {
+    fn start() -> std::result::Result<Self, String> {
+        let (hold, release) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
+            .map_err(|e| format!("cannot make the placeholder's pipe: {e}"))?;
+        let hold_fd = hold.as_raw_fd();
+        let pid = unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD as libc::c_long, 0i64) };
+        if pid == 0 {
+            // The placeholder. Its first act: drop every descriptor but its end of the pipe, or
+            // it would hold other runs' pipes open (a reader would never see EOF).
+            unsafe {
+                if hold_fd > 0 {
+                    libc::syscall(libc::SYS_close_range, 0u32, (hold_fd - 1) as u32, 0i32);
+                }
+                libc::syscall(libc::SYS_close_range, (hold_fd + 1) as u32, u32::MAX, 0i32);
+                let mut byte = 0u8;
+                libc::syscall(libc::SYS_read, hold_fd, &mut byte as *mut u8, 1usize);
+                // Async-signal-safe: straight to exit_group, no atexit, no lock.
+                libc::_exit(0);
+            }
+        }
+        if pid < 0 {
+            return Err(format!(
+                "cannot start the scope's placeholder process: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        drop(hold);
+        let pid = pid as libc::pid_t;
+        let fd =
+            unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::c_long, 0 as libc::c_long) };
+        if fd < 0 {
+            let err = std::io::Error::last_os_error();
+            drop(release); // it exits
+            unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+            return Err(format!("cannot open the placeholder's pidfd: {err}"));
+        }
+        Ok(Self {
+            pid,
+            pidfd: unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) },
+            release: Some(release),
+        })
+    }
+}
+
+impl Drop for Placeholder {
+    /// It exits as its pipe closes; its pidfd says when it is gone, whatever this process does
+    /// with SIGCHLD, and then it is reaped unless something else already did.
+    fn drop(&mut self) {
+        self.release.take();
+        readable_by(&self.pidfd, Instant::now() + EXIT_GUARD);
+        unsafe {
+            libc::waitpid(self.pid, std::ptr::null_mut(), libc::WNOHANG);
+        }
+    }
+}
+
+/// The cgroup v2 path of `pid` (`self` for this process), from `/proc/<pid>/cgroup`.
+fn cgroup_path_of(pid: &str) -> std::result::Result<PathBuf, String> {
+    let raw = fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .map_err(|e| format!("cannot read /proc/{pid}/cgroup: {e}"))?;
     let rel = raw
         .lines()
         .find_map(|line| line.strip_prefix("0::"))
-        .ok_or_else(|| SandboxError::CgroupCreation {
-            context: "not a unified cgroup v2 hierarchy (no '0::' line in /proc/self/cgroup)"
-                .into(),
-            source: None,
-        })?
+        .ok_or("not a unified cgroup v2 hierarchy (no '0::' line in /proc/<pid>/cgroup)")?
         .trim();
     let mut acc = PathBuf::from(CGROUP_ROOT);
     acc.extend(rel.split('/').filter(|s| !s.is_empty()));
     Ok(acc)
 }
 
-/// Asks systemd over D-Bus to move us into a fresh `Delegate=true` scope (only the delegater
-/// can place the first process). Once per process; cached.
-fn relocate_into_delegated_scope(preferred_slice: Option<&str>) -> Result<()> {
-    static RESULT: std::sync::OnceLock<std::result::Result<(), String>> =
-        std::sync::OnceLock::new();
-    RESULT
-        .get_or_init(|| try_relocate_into_delegated_scope(preferred_slice))
-        .clone()
-        .map_err(|context| SandboxError::CgroupCreation {
-            context,
-            source: None,
-        })
-}
-
-fn try_relocate_into_delegated_scope(
+/// Asks systemd over D-Bus for a fresh `Delegate=true` scope (only the delegater can place the
+/// first process in it) and moves this process into a leaf of it, never into its root: the
+/// scope is made with a placeholder process, and this one is attached straight to the leaf.
+/// Returns the scope's root and the leaf; the root's only process is the placeholder, which
+/// exits when this returns.
+fn relocate_into_delegated_scope(
     preferred_slice: Option<&str>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<(PathBuf, PathBuf), String> {
     use zbus::blocking::Proxy;
     use zbus::blocking::connection::Builder as ConnectionBuilder;
     use zbus::zvariant::{OwnedObjectPath, Value};
@@ -285,10 +412,14 @@ fn try_relocate_into_delegated_scope(
     )
     .map_err(|e| format!("cannot reach systemd over D-Bus: {e}"))?;
 
-    let pid = std::process::id();
+    let placeholder = Placeholder::start()?;
     // Nonce-suffixed (see process_nonce()) so a stale same-pid scope can't fail StartTransientUnit.
-    let scope_name = format!("nanosandbox-{pid}-{:08x}.scope", super::process_nonce());
-    let pids: &[u32] = &[pid];
+    let scope_name = format!(
+        "nanosandbox-{}-{:08x}.scope",
+        std::process::id(),
+        super::process_nonce()
+    );
+    let pids: &[u32] = &[placeholder.pid as u32];
     let mut properties: Vec<(&str, Value)> = vec![
         ("PIDs", Value::new(pids)),
         ("Delegate", Value::new(true)),
@@ -329,7 +460,8 @@ fn try_relocate_into_delegated_scope(
         &(scope_name.as_str(), "fail", properties, aux),
     );
 
-    let in_scope = || own_cgroup_path().is_ok_and(|rel| rel.ends_with(&scope_name));
+    let placeholder_pid = placeholder.pid.to_string();
+    let in_scope = || cgroup_path_of(&placeholder_pid).is_ok_and(|p| p.ends_with(&scope_name));
     // The job may complete after our reply wait timed out, so a failed call is waited on too,
     // but not for long: there may be no job at all.
     let wait = if call_result.is_ok() {
@@ -347,15 +479,41 @@ fn try_relocate_into_delegated_scope(
             _ => {}
         }
     }
-    if in_scope() {
-        return Ok(());
+    if !in_scope() {
+        return Err(match call_result {
+            Ok(_) => format!(
+                "StartTransientUnit for {scope_name} returned but its placeholder never moved into it"
+            ),
+            Err(e) => format!("StartTransientUnit failed: {e}"),
+        });
     }
-    match call_result {
-        Ok(_) => Err(format!(
-            "StartTransientUnit for {scope_name} returned but this process never moved into it"
-        )),
-        Err(e) => Err(format!("StartTransientUnit failed: {e}")),
+
+    let own = cgroup_path_of(&placeholder_pid)?;
+    let supervisor = make_supervisor(&own)?;
+    let leaf = format!(
+        "/{}",
+        supervisor
+            .file_name()
+            .expect("the supervisor is a leaf of own")
+            .to_string_lossy()
+    );
+    // The whole thread group moves at once: a fork racing it is born either where this process
+    // was, or in the leaf; never in the root.
+    let this: &[u32] = &[std::process::id()];
+    proxy
+        .call::<_, _, ()>(
+            "AttachProcessesToUnit",
+            &(scope_name.as_str(), leaf.as_str(), this),
+        )
+        .map_err(|e| format!("cannot attach this process to {scope_name}{leaf}: {e}"))?;
+    if cgroup_path_of("self")? != supervisor {
+        return Err(format!(
+            "AttachProcessesToUnit returned but this process is not in {}",
+            supervisor.display()
+        ));
     }
+    drop(placeholder); // exits; `empty_the_root` finds nothing else to wait for
+    Ok((own, supervisor))
 }
 
 /// How long to wait for systemd's signal that the scope's job ended, once the call returned.
@@ -367,6 +525,54 @@ const FAILED_CALL_WAIT: Duration = Duration::from_millis(500);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Live processes are moved out; one killed just before (a big one, so its exit takes a
+    /// while) can't be, and is waited for until it has left. Then the root takes controllers.
+    #[test]
+    fn test_emptying_a_root_moves_the_live_and_waits_for_the_exiting() {
+        use std::process::Command;
+        let leaf = |name: &str| super::super::CgroupManager::create(name, &["memory"]).ok();
+        let id = super::super::next_leaf_id();
+        let (Some(root), Some(into)) = (leaf(&format!("{id}-root")), leaf(&format!("{id}-into")))
+        else {
+            return;
+        };
+        let mut live: Vec<_> = (0..3)
+            .map(|_| Command::new("sleep").arg("30").spawn().unwrap())
+            .collect();
+        let mut dying = Command::new("python3")
+            .args(["-c", "b = bytearray(1 << 30)\nfor i in range(0, len(b), 4096): b[i] = 1\nprint(flush=True)\nimport time; time.sleep(30)"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        for kid in live.iter().chain(std::iter::once(&dying)) {
+            root.add_process(kid.id()).unwrap();
+        }
+        // Wait until it has touched its gigabyte, then kill it: its exit frees that memory.
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(dying.stdout.take().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        unsafe { libc::kill(dying.id() as libc::pid_t, libc::SIGKILL) };
+
+        let emptied = empty_the_root(&root.path, &into.path);
+        let left = super::super::pids_in(&root.path);
+        let takes = fs::write(root.path.join("cgroup.subtree_control"), "+memory");
+
+        for kid in &mut live {
+            let _ = kid.kill();
+            let _ = kid.wait();
+        }
+        let _ = dying.wait();
+        let _ = fs::write(root.path.join("cgroup.subtree_control"), "-memory");
+        into.cleanup();
+        root.cleanup();
+        assert_eq!(emptied, Ok(()));
+        assert!(left.is_empty(), "{left:?}");
+        assert!(takes.is_ok(), "{takes:?}");
+    }
 
     #[test]
     fn builds_the_conventional_systemd_delegation_path() {
